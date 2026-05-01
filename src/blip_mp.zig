@@ -7,6 +7,7 @@ const std = @import("std");
 
 pub const encoding = @import("encoding.zig");
 pub const bignum = @import("bignum.zig");
+pub const tier3 = @import("tier3.zig");
 pub const Mp = bignum.Mp;
 
 test {

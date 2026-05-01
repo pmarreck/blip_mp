@@ -8,19 +8,20 @@ pub fn build(b: *std.Build) void {
 		"Optimization mode (default: ReleaseFast)",
 	) orelse .ReleaseFast;
 
-	// Optional: paths to system GMP (provided by Nix). When unset, the
-	// gmp_bench target is skipped — the core library has no GMP dependency.
-	const gmp_include_path = b.option([]const u8, "gmp-include-path", "Path to GMP headers (gmp.h)");
-	const gmp_lib_path = b.option([]const u8, "gmp-lib-path", "Path to GMP library directory");
+	// Optional: paths to system GMP for the gmp_bench comparison binary.
+	// blip_mp itself has NO runtime dep on GMP — tier 3 is implemented in
+	// pure Zig limb primitives. GMP is only needed for the apples-to-apples
+	// benchmark exe.
+	const gmp_include_path = b.option([]const u8, "gmp-include-path", "Path to GMP headers (gmp.h) — bench comparison only");
+	const gmp_lib_path = b.option([]const u8, "gmp-lib-path", "Path to GMP library directory — bench comparison only");
 
-	// Core module: pure Zig, no I/O, no external deps.
+	// Core module: pure Zig, no external link deps.
 	const core_module = b.createModule(.{
 		.root_source_file = b.path("src/blip_mp.zig"),
 		.target = target,
 		.optimize = optimize,
 	});
 
-	// Static library — the public artifact, exposed via C FFI later.
 	const static_lib = b.addLibrary(.{
 		.name = "blip_mp",
 		.linkage = .static,
@@ -28,7 +29,6 @@ pub fn build(b: *std.Build) void {
 	});
 	b.installArtifact(static_lib);
 
-	// Unit tests — every src/*.zig that has tests is reachable from blip_mp.zig.
 	const unit_tests = b.addTest(.{
 		.root_module = b.createModule(.{
 			.root_source_file = b.path("src/blip_mp.zig"),
@@ -40,30 +40,26 @@ pub fn build(b: *std.Build) void {
 	const test_step = b.step("test", "Run unit tests");
 	test_step.dependOn(&run_unit_tests.step);
 
-	// blip_mp benchmark exe — links the core module by name.
-	// link_libc is on so we can use std.heap.c_allocator (apples-to-apples
-	// with GMP, which uses libc malloc).
+	// blip_mp benchmark exe — links libc for c_allocator (apples-to-apples
+	// allocator with GMP comparison). No GMP linkage on the blip_mp side.
+	const blip_mp_bench_module = b.createModule(.{
+		.root_source_file = b.path("tests/benchmark/blip_mp_bench.zig"),
+		.target = target,
+		.optimize = optimize,
+		.link_libc = true,
+		.imports = &.{
+			.{ .name = "blip_mp", .module = core_module },
+		},
+	});
 	const blip_mp_bench = b.addExecutable(.{
 		.name = "blip_mp_bench",
-		.root_module = b.createModule(.{
-			.root_source_file = b.path("tests/benchmark/blip_mp_bench.zig"),
-			.target = target,
-			.optimize = optimize,
-			.link_libc = true,
-			.imports = &.{
-				.{ .name = "blip_mp", .module = core_module },
-			},
-		}),
+		.root_module = blip_mp_bench_module,
 	});
-	b.installArtifact(blip_mp_bench);
-
-	// Bench step: depend on the install of each bench artifact so `zig build
-	// bench --prefix $out` actually populates $out/bin/.
 	const install_blip_mp_bench = b.addInstallArtifact(blip_mp_bench, .{});
 	const bench_step = b.step("bench", "Build benchmark binaries");
 	bench_step.dependOn(&install_blip_mp_bench.step);
 
-	// gmp benchmark — only built if GMP paths are provided (typically by Nix).
+	// gmp_bench — pure C exe linking GMP.
 	if (gmp_include_path != null and gmp_lib_path != null) {
 		const gmp_module = b.createModule(.{
 			.root_source_file = null,

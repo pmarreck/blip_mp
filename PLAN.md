@@ -47,18 +47,29 @@ Working order, smallest reviewable increments. Strict TDD where business logic e
 - [x] Run 2: SBO `Mp.add` is **1.68× faster than GMP in the immediate bucket** — clears the 1.5× threshold. (2026-04-30 22:08 EST)
 - [x] **DECISION: hypothesis VALIDATED. Proceed to M3.** (2026-04-30 22:10 EST)
 
-## Milestone 3 — Tier 3 (large-number paths)
+## Milestone 3 — Tier 3 (large-number paths) — COMPLETE
 
-The hypothesis is validated for tier 0/1; M3 extends to large-number arithmetic so blip_mp is competitive across the full value-size spectrum.
+Hypothesis validated for tier 0/1; M3 extended to large-number arithmetic so blip_mp is competitive across the full value-size spectrum.
 
-- [ ] **Decide**: link libgmp's `mpn_*` layer (just the limb primitives, not `mpz_*`), or reimplement?
-  - Linking is faster to get to bench-able state; gives instant GMP-quality asm tuning at no implementation cost.
-  - Reimplementing avoids the LGPLv3 link constraint and lets us tune around BLIP-specific patterns (e.g., known result-L bounds after operations).
-  - *Lean: link initially, validate the hypothesis at scale, then reconsider for licensing if/when productizing.*
-- [ ] Unpack/repack: BLIP payload `bytes` ↔ aligned `mp_limb_t[]` buffer. Aligned scratch space allocator.
-- [ ] Tier 3 add/sub/mul, validated against GMP for correctness (round-trip tests across many random large values).
-- [ ] Cross-tier promotion: when tier-0/1 `add` overflows i64, promote to tier 3 path automatically (currently returns `error.TierOverflow`).
-- [ ] Bench: extend `blip_mp_bench` to large-value buckets (e.g., 256-bit, 1024-bit, 4096-bit). Verify we MATCH GMP rather than exceed (per spec, that's the goal at large sizes).
+- [x] **Strategy decision** (2026-04-30): briefly tried linking libgmp's `mpn_*` (failed at the symbol name layer, then Peter pointed out: with our own arithmetic, no need to convert to limbs at all — BLIP payload IS the two's-complement value). Reimplemented as **pure-Zig byte-direct arithmetic** in `src/tier3.zig`. No GMP runtime dep; no LGPL constraint.
+- [x] Byte-direct add/sub/cmp on BLIP payloads (no auxiliary limb arrays) (2026-04-30)
+- [x] Chunked u64 inner loop via `readInt`/`writeInt` (8× fewer iterations than per-byte) (2026-04-30)
+- [x] Cross-tier promotion in `Mp.add`/`Mp.sub` — tier 0/1 overflow silently routes to tier 3 (2026-04-30)
+- [x] Bench extended to 256/1024/4096-bit buckets (2026-04-30 22:35 EST)
+- [x] BENCHMARK_RESULTS.md Run 4 captures full spectrum: immediate 2.08× over GMP; tier 3 trails GMP 3-6× at large sizes (2026-04-30)
+- [ ] (Open) Tier 3 `mul` — currently still `error.TierOverflow` because schoolbook/Karatsuba mul wasn't in M3 scope. Add via byte-direct approach.
+
+## Milestone 4 — Optional follow-ups (ranked by ROI)
+
+These are prioritised in BENCHMARK_RESULTS.md "Open follow-ups". Pick when motivated.
+
+- [ ] **Heap buffer reuse** in `Mp.setBytes` — track `heap_cap` separately, reuse buffer when new value fits. Should close ~50% of the tier-3 gap to GMP. ~30 min.
+- [ ] **Comptime fast path** for L=2..L=4 in `Mp.setI64` (single-store paths). Should land `Mp.add` ≈ `raw` across all small buckets. ~1 hr.
+- [ ] **Tier 3 mul** (byte-direct multiplication, schoolbook for now, Karatsuba if needed).
+- [ ] **Statistical bench harness** — `hyperfine` integration + N-run aggregation; single-run numbers are noisy.
+- [ ] Bench bucket label cleanup (L=1 was actually L=2; legacy from Run 1).
+- [ ] C FFI header (`include/blip_mp.h`) for downstream C consumers.
+- [ ] BLIP wire interop: a separate "unsigned BLIP" mode for round-tripping with strict-spec BLIP producers (currently we only emit signed canonical).
 
 ## Optional pre-M3 micro-optimization (close the Mp.add → raw gap)
 

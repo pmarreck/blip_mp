@@ -35,10 +35,20 @@ Per-file index of important code locations. Updated as files are added.
   - `Mp.add(r, a, b)` / `Mp.sub(r, a, b)` / `Mp.mul(r, a, b)` — tier 0/1 only, errors `TierOverflow` if result exceeds i64
   - Error sets: `SetError`, `GetError`, `ArithError`
 
+- `src/tier3.zig` — large-number arithmetic operating DIRECTLY on BLIP payload bytes. No auxiliary limb-array conversion (Peter's "no limbs" insight). Pure-Zig, no GMP dep.
+  - `Header { L, endian, bytes_consumed }` — header descriptor
+  - `parseHeader` / `writeHeader` — supports L >= 32 with continuation varint
+  - `signExtByte(payload)` — returns 0x00 or 0xFF based on payload's high bit
+  - `addPayloads(a, b, n, out)` — two's-complement byte-direct add. Inner loop: 8-byte u64 chunked reads via `readInt`/`writeInt` for the fast region, per-byte for boundary/tail. Returns `n` or `n+1` (extra byte holds sign extension if same-sign overflow).
+  - `subPayloads(a, b, n, out)` — same shape with borrow propagation; opposite-sign-overflow detection.
+  - `canonicalLen(payload)` — trims redundant high sign-extension bytes (0x00 for positives / 0xFF for negatives) preserving sign.
+  - `payloadOf(blip)` — returns the payload slice from a BLIP-encoded value.
+  - `addRawBlip` / `subRawBlip` / `writeBlip` — high-level wrappers over the above.
+
 ## tests/
 
-- `tests/benchmark/blip_mp_bench.zig` — Zig executable. Two implementations measured per bucket: `impl=Mp.add` (current SBO `Mp.add`) and `impl=raw` (zero-alloc tier-0/1 fast path, the theoretical ceiling). Five value buckets from immediate (0..127) through L=4 (>8M..2G). Uses libc malloc (apples-to-apples with GMP). Times via direct `clock_gettime` extern (`std.time.Timer` was removed in 0.16).
-- `tests/benchmark/gmp_bench.c` — C executable. Same workload using GMP `mpz_add`. Built via build.zig with `-O3` and `-lgmp` (paths threaded from Nix via `-Dgmp-include-path` / `-Dgmp-lib-path`).
+- `tests/benchmark/blip_mp_bench.zig` — Zig executable. Small buckets measure `Mp.add` (full path) and `raw` (zero-alloc theoretical ceiling). Large buckets (256/1024/4096-bit) measure the tier-3 path. Pseudo-random pool seeded from index for the large buckets. Uses libc malloc (apples-to-apples with GMP). Times via direct `clock_gettime` extern (`std.time.Timer` was removed in Zig 0.16).
+- `tests/benchmark/gmp_bench.c` — C executable. Same workload shape using GMP `mpz_add`. Built via build.zig with `-O3` and `-lgmp` (paths threaded from Nix via `-Dgmp-include-path` / `-Dgmp-lib-path`). Bench-only dependency; the blip_mp core has no GMP requirement.
 
 ## tests/
 
