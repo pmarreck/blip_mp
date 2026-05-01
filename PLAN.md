@@ -61,15 +61,14 @@ Hypothesis validated for tier 0/1; M3 extended to large-number arithmetic so bli
 
 ## Milestone 4 — Optional follow-ups (ranked by ROI)
 
-These are prioritised in BENCHMARK_RESULTS.md "Open follow-ups". Pick when motivated.
-
-- [ ] **Heap buffer reuse** in `Mp.setBytes` — track `heap_cap` separately, reuse buffer when new value fits. Should close ~50% of the tier-3 gap to GMP. ~30 min.
-- [ ] **Comptime fast path** for L=2..L=4 in `Mp.setI64` (single-store paths). Should land `Mp.add` ≈ `raw` across all small buckets. ~1 hr.
+- [x] **Heap buffer reuse** in `Mp.setBytes`/`setI64` (2026-04-30 22:55 EST) — restructured to {heap_buf, heap_used}; ensureHeapCapacity reuses when cap suffices, doubles on grow. Tier-3 256-bit: 30 → 18 ns (40% faster); gap to GMP halved from 6.4× to 3.85×. Per Run 5 in BENCHMARK_RESULTS.md.
+- [ ] **Comptime fast path** for L=2..L=4 in `Mp.setI64` (single-store paths). Should land `Mp.add` ≈ `raw` (~3-4 ns) across all small buckets, putting us at parity-or-better with GMP. ~1 hr.
 - [ ] **Tier 3 mul** (byte-direct multiplication, schoolbook for now, Karatsuba if needed).
 - [ ] **Statistical bench harness** — `hyperfine` integration + N-run aggregation; single-run numbers are noisy.
+- [ ] **Tier 3 inner-loop SIMD** — investigate whether Zig's `@Vector` or LLVM IR can match GMP's hand-tuned aarch64 asm. Lower priority.
 - [ ] Bench bucket label cleanup (L=1 was actually L=2; legacy from Run 1).
 - [ ] C FFI header (`include/blip_mp.h`) for downstream C consumers.
-- [ ] BLIP wire interop: a separate "unsigned BLIP" mode for round-tripping with strict-spec BLIP producers (currently we only emit signed canonical).
+- [ ] BLIP wire interop: a separate "unsigned BLIP" mode for round-tripping with strict-spec BLIP producers.
 
 ## Optional pre-M3 micro-optimization (close the Mp.add → raw gap)
 

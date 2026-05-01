@@ -1,20 +1,19 @@
 // blip_mp_t — bignum value whose canonical storage is BLIP-encoded bytes
 // interpreted as signed two's-complement (per SPEC.md §Sign convention).
 //
-// Representation 1a (small-buffer-optimization): the encoding lives inline
-// in the struct when its length fits in INLINE_CAP bytes. Larger values
-// fall back to a heap allocation. For tier 0/1 (signed canonical L <= 8,
-// total encoded size <= 9 bytes), every value is inline — zero allocation
-// in the hot path. This is the representation SPEC.md §Storage model
-// option 1 calls for, and the one Run 1 of the benchmark identified as
-// necessary to realize the small-value performance win.
+// Representation 1a (small-buffer-optimization) with HEAP REUSE:
+//   - Tier 0/1 (encoded ≤ INLINE_CAP=24 bytes) lives inline; zero alloc.
+//   - Larger values use heap_buf; heap_used tracks the active length.
+//     setBytes/setI64 reuse heap_buf when heap_buf.len >= needed (saves
+//     malloc/free on every tier-3 op when sizes are stable).
 //
-// Struct layout (64 bytes total on 64-bit):
-//   [0..24)  inline_buf      — encoded bytes when in inline mode
-//   [24]     inline_len      — 0..INLINE_CAP if inline; SENTINEL_HEAP if heap
-//   [25..32) padding
-//   [32..48) heap_bytes      — slice when in heap mode (ptr + len)
-//   [48..64) allocator       — std.mem.Allocator (ptr + vtable ptr)
+// Struct layout (72 bytes total on 64-bit):
+//   [0..24)   inline_buf    — encoded bytes when in inline mode
+//   [24]      inline_len    — 0..INLINE_CAP if inline; SENTINEL_HEAP if heap
+//   [25..32)  padding
+//   [32..40)  heap_used     — active length within heap_buf (heap mode only)
+//   [40..56)  heap_buf      — full allocation (slice ptr + cap)
+//   [56..72)  allocator     — std.mem.Allocator (ptr + vtable ptr)
 
 const std = @import("std");
 const encoding = @import("encoding.zig");
@@ -40,34 +39,36 @@ pub const ArithError = SetError || GetError || error{
 pub const Mp = struct {
 	inline_buf: [INLINE_CAP]u8 align(8),
 	inline_len: u8,
-	heap_bytes: []u8,
+	heap_used: usize,
+	heap_buf: []u8, // FULL allocation; .len is capacity. Active value = heap_buf[0..heap_used].
 	allocator: std.mem.Allocator,
 
 	pub fn init(allocator: std.mem.Allocator) Mp {
 		return .{
 			.inline_buf = [_]u8{0} ** INLINE_CAP,
 			.inline_len = 0,
-			.heap_bytes = &[_]u8{},
+			.heap_used = 0,
+			.heap_buf = &[_]u8{},
 			.allocator = allocator,
 		};
 	}
 
 	pub fn deinit(self: *Mp) void {
-		if (self.inline_len == SENTINEL_HEAP) {
-			self.allocator.free(self.heap_bytes);
-			self.heap_bytes = &[_]u8{};
-			self.inline_len = 0;
+		if (self.heap_buf.len != 0) {
+			self.allocator.free(self.heap_buf);
+			self.heap_buf = &[_]u8{};
+			self.heap_used = 0;
 		}
+		self.inline_len = 0;
 	}
 
-	/// Returns the active encoded bytes — points into either inline_buf
-	/// or heap_bytes. Caller must not retain the slice across mutating
-	/// operations on this Mp.
+	/// Returns the active encoded bytes — points into either inline_buf or
+	/// heap_buf. Caller must not retain the slice across mutating ops.
 	pub fn bytes(self: *const Mp) []const u8 {
 		if (self.inline_len != SENTINEL_HEAP) {
 			return self.inline_buf[0..self.inline_len];
 		}
-		return self.heap_bytes;
+		return self.heap_buf[0..self.heap_used];
 	}
 
 	pub fn isInline(self: *const Mp) bool {
@@ -81,38 +82,35 @@ pub const Mp = struct {
 	/// the encoder. Closes the Mp.add/raw gap measured in BENCHMARK_RESULTS.md
 	/// Run 2 (~0.6 ns saved per immediate add).
 	pub fn setI64(self: *Mp, value: i64) SetError!void {
-		// Immediate-range fast path: by far the most common in tier-0
-		// workloads. Single byte store; predicted-true branch.
+		// Immediate-range fast path: single byte store; predicted-true branch.
 		if (value >= 0 and value < 128) {
-			if (self.inline_len == SENTINEL_HEAP) {
-				self.allocator.free(self.heap_bytes);
-				self.heap_bytes = &[_]u8{};
-			}
 			self.inline_buf[0] = @intCast(value);
 			self.inline_len = 1;
 			return;
 		}
 		const need = encoding.encodedSizeI64(value);
 		if (need <= INLINE_CAP) {
-			if (self.inline_len == SENTINEL_HEAP) {
-				self.allocator.free(self.heap_bytes);
-				self.heap_bytes = &[_]u8{};
-			}
 			const written = try encoding.encodeI64Canonical(self.inline_buf[0..need], value);
 			std.debug.assert(written == need);
 			self.inline_len = @intCast(need);
 			return;
 		}
-		// Heap path. Allocate first; only free old heap on success.
-		const buf = try self.allocator.alloc(u8, need);
-		errdefer self.allocator.free(buf);
-		const written = try encoding.encodeI64Canonical(buf, value);
+		// Heap path. Reuse heap_buf if capacity suffices.
+		try self.ensureHeapCapacity(need);
+		const written = try encoding.encodeI64Canonical(self.heap_buf[0..need], value);
 		std.debug.assert(written == need);
-		if (self.inline_len == SENTINEL_HEAP) {
-			self.allocator.free(self.heap_bytes);
-		}
-		self.heap_bytes = buf;
+		self.heap_used = need;
 		self.inline_len = SENTINEL_HEAP;
+	}
+
+	/// Ensure heap_buf has at least `cap` bytes. If a realloc happens it
+	/// drops the previous contents (caller must re-write). For monotonically
+	/// growing workloads, doubles the existing cap to amortise realloc cost.
+	inline fn ensureHeapCapacity(self: *Mp, cap: usize) std.mem.Allocator.Error!void {
+		if (self.heap_buf.len >= cap) return;
+		const new_cap = @max(cap, 2 * self.heap_buf.len);
+		if (self.heap_buf.len != 0) self.allocator.free(self.heap_buf);
+		self.heap_buf = try self.allocator.alloc(u8, new_cap);
 	}
 
 	pub fn setU64(self: *Mp, value: u64) SetError!void {
@@ -201,24 +199,17 @@ pub const Mp = struct {
 	}
 
 	/// Replace this Mp's value with the BLIP-encoded byte slice given.
-	/// Routes inline vs heap automatically.
+	/// Routes inline vs heap and REUSES heap_buf when capacity suffices.
+	/// (This is what closes the per-op malloc gap in tier-3 workloads.)
 	pub fn setBytes(self: *Mp, slice: []const u8) std.mem.Allocator.Error!void {
 		if (slice.len <= INLINE_CAP) {
-			if (self.inline_len == SENTINEL_HEAP) {
-				self.allocator.free(self.heap_bytes);
-				self.heap_bytes = &[_]u8{};
-			}
 			@memcpy(self.inline_buf[0..slice.len], slice);
 			self.inline_len = @intCast(slice.len);
 			return;
 		}
-		const buf = try self.allocator.alloc(u8, slice.len);
-		errdefer self.allocator.free(buf);
-		@memcpy(buf, slice);
-		if (self.inline_len == SENTINEL_HEAP) {
-			self.allocator.free(self.heap_bytes);
-		}
-		self.heap_bytes = buf;
+		try self.ensureHeapCapacity(slice.len);
+		@memcpy(self.heap_buf[0..slice.len], slice);
+		self.heap_used = slice.len;
 		self.inline_len = SENTINEL_HEAP;
 	}
 };
@@ -563,8 +554,8 @@ test "arithmetic with aliasing (r = a; r.add(&r, &b))" {
 	try testing.expectEqual(@as(i64, 150), try r.getI64());
 }
 
-test "Mp struct size: 64 bytes (one cache line)" {
-	try testing.expectEqual(@as(usize, 64), @sizeOf(Mp));
+test "Mp struct size: 72 bytes (one cache line + 8 for heap_used)" {
+	try testing.expectEqual(@as(usize, 72), @sizeOf(Mp));
 }
 
 // ── Tier-3 cross-tier promotion tests ────────────────────────────────────────

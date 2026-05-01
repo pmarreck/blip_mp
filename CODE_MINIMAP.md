@@ -23,16 +23,19 @@ Per-file index of important code locations. Updated as files are added.
   - `Decoded` struct (value: i64, bytes_read, endian, is_sentinel)
   - `minPayloadBytesSigned(i64)` — picks smallest L whose i(L*8) range contains value; 0 for immediate range
   - `encodedSizeI64(i64)` / `encodeI64Canonical` / `decodeI64` — canonical signed encode/decode
-- `src/bignum.zig` — `Mp` bignum struct (**representation 1a (SBO)**: 24-byte inline buffer + heap fallback. Tier 0/1 stays inline → zero allocation in the hot path. Struct size exactly 64 bytes / one cache line). Signed two's-complement payload.
-  - Layout: `inline_buf: [24]u8 align(8)`, `inline_len: u8` (sentinel `0xFF` = heap mode), `heap_bytes: []u8`, `allocator: std.mem.Allocator`
+- `src/bignum.zig` — `Mp` bignum struct (**representation 1a (SBO) + heap reuse**: 24-byte inline buffer + reuse-aware heap fallback. Tier 0/1 stays inline → zero allocation. For tier 3, `heap_buf` tracks the full allocation and `heap_used` tracks the active value length; `ensureHeapCapacity` reuses the buffer when cap suffices, doubles on grow. Struct size 72 bytes / one cache line + 8B). Signed two's-complement payload.
+  - Layout: `inline_buf: [24]u8 align(8)`, `inline_len: u8` (sentinel `0xFF` = heap mode), `heap_used: usize`, `heap_buf: []u8`, `allocator`
   - `INLINE_CAP = 24` — covers all tier 0/1 (max encoded size 9 bytes) plus headroom
-  - `Mp.init(allocator)` / `Mp.deinit()` — deinit only frees if currently in heap mode
-  - `Mp.bytes()` accessor — returns active slice (inline or heap)
+  - `Mp.init(allocator)` / `Mp.deinit()` — deinit frees heap_buf if non-empty
+  - `Mp.bytes()` accessor — returns `inline_buf[0..inline_len]` or `heap_buf[0..heap_used]`
   - `Mp.isInline()` — discriminator query
-  - `Mp.setI64(v)` / `Mp.setU64(v)` — routes to inline path when encoded size ≤ INLINE_CAP, heap fallback otherwise
+  - `Mp.setI64(v)` / `Mp.setU64(v)` — routes to inline path when encoded size ≤ INLINE_CAP, heap fallback otherwise (with cap reuse)
+  - `Mp.setBytes(slice)` — install a raw BLIP encoding; reuses heap_buf when cap suffices
   - `Mp.getI64()` / `Mp.getU64()`
   - `Mp.cmp(other)`, `Mp.sign()`
-  - `Mp.add(r, a, b)` / `Mp.sub(r, a, b)` / `Mp.mul(r, a, b)` — tier 0/1 only, errors `TierOverflow` if result exceeds i64
+  - `Mp.add(r, a, b)` / `Mp.sub(r, a, b)` — tier 0/1 fast path with cross-tier promotion to tier 3 on i64 overflow (no more `error.TierOverflow` for in-range cases)
+  - `Mp.mul(r, a, b)` — tier 0/1 only; tier-3 mul is an open follow-up
+  - Internal: `ensureHeapCapacity(cap)`, `decodeInlineSmall`, `tier3Op`
   - Error sets: `SetError`, `GetError`, `ArithError`
 
 - `src/tier3.zig` — large-number arithmetic operating DIRECTLY on BLIP payload bytes. No auxiliary limb-array conversion (Peter's "no limbs" insight). Pure-Zig, no GMP dep.
