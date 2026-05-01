@@ -43,16 +43,20 @@ pub const Decoded = struct {
 /// complement. Returns 0 for values 0..127 (the immediate range — no payload
 /// is needed at all). Otherwise returns the smallest L in 1..8 whose i(L*8)
 /// range contains `value`. Caps at 8 for any i64 input.
+///
+/// Implementation: count the bits needed including the sign bit via `@clz`.
+/// For positive values, that's `64 - @clz(value) + 1`. For negative values,
+/// the symmetric magnitude is `~value` (e.g., -1 has ~v == 0, requiring
+/// 0+1=1 bit; -128 has ~v == 127, requiring 7+1=8 bits → L=1). Round up to
+/// byte multiple. Replaces a 7-iter range-check loop with ~3 instructions.
 pub fn minPayloadBytesSigned(value: i64) usize {
 	if (value >= 0 and value < 128) return 0; // immediate
-	var L: usize = 1;
-	while (L < 8) : (L += 1) {
-		const bits: u6 = @intCast(8 * L - 1);
-		const max: i64 = (@as(i64, 1) << bits) - 1;
-		const min: i64 = -(@as(i64, 1) << bits);
-		if (value >= min and value <= max) return L;
-	}
-	return 8; // any i64 fits in 8 bytes
+	const u: u64 = if (value >= 0)
+		@bitCast(value)
+	else
+		~@as(u64, @bitCast(value));
+	const bits: usize = 64 - @clz(u) + 1; // +1 for the sign bit
+	return (bits + 7) / 8;
 }
 
 /// Bytes that encodeI64Canonical(value) would produce.
@@ -65,6 +69,13 @@ pub fn encodedSizeI64(value: i64) usize {
 /// Canonical signed (two's-complement) BLIP encode of an i64 in LE.
 /// L is at most 8 for any i64 input — fits in the header low 5 bits, no
 /// continuation. Returns the number of bytes written into `out`.
+///
+/// Hot path: when `out` has at least 9 bytes capacity (the typical case —
+/// e.g., when called against Mp's 24-byte inline_buf), writes the full u64
+/// little-endian in one store via `std.mem.writeInt`. Trailing bytes past L
+/// are scribbled but inert (the caller tracks the active length via `need`).
+/// On aarch64 this compiles to a single STR instruction vs the per-byte loop's
+/// 2-8 STRBs. Fallback byte-loop covers tight buffers (≤ 8 bytes capacity).
 pub fn encodeI64Canonical(out: []u8, value: i64) Error!usize {
 	if (value >= 0 and value < 128) {
 		if (out.len < 1) return Error.BufferTooSmall;
@@ -75,6 +86,12 @@ pub fn encodeI64Canonical(out: []u8, value: i64) Error!usize {
 	const need = 1 + L;
 	if (out.len < need) return Error.BufferTooSmall;
 	out[0] = 0x80 | @as(u8, @intCast(L)); // E=0 (LE), C=0
+	// Bulk-store path: out has room for the full 8-byte u64 (most callers).
+	if (out.len >= 9) {
+		std.mem.writeInt(u64, out[1..][0..8], @bitCast(value), .little);
+		return need;
+	}
+	// Fallback for tight buffers.
 	const u: u64 = @bitCast(value);
 	var i: usize = 0;
 	while (i < L) : (i += 1) {
@@ -111,14 +128,21 @@ pub fn decodeI64(buf: []const u8) Error!Decoded {
 	if (L == 0 or L > 8) return Error.OverlongEncoding; // L=0 in length-prefixed header is malformed; L>8 is out of i64 range
 	if (pos + L > buf.len) return Error.UnexpectedEndOfInput;
 
-	// Read L bytes in given endianness into a u64, then sign-extend if the
-	// high bit of the high payload byte is set.
+	// Read L bytes as u64. Bulk-load path: when `buf` has ≥ 8 bytes available
+	// past `pos`, do a single u64 load (single LDR on aarch64) and mask off
+	// the high bytes. This is the hot path for inline-storage Mp (always ≥ 8
+	// trailing bytes in the 24-byte inline_buf).
 	var u: u64 = 0;
 	switch (endian) {
 		.little => {
-			var i: usize = 0;
-			while (i < L) : (i += 1) {
-				u |= @as(u64, buf[pos + i]) << @intCast(8 * i);
+			if (pos + 8 <= buf.len) {
+				const raw = std.mem.readInt(u64, buf[pos..][0..8], .little);
+				u = if (L == 8) raw else raw & ((@as(u64, 1) << @intCast(8 * L)) - 1);
+			} else {
+				var i: usize = 0;
+				while (i < L) : (i += 1) {
+					u |= @as(u64, buf[pos + i]) << @intCast(8 * i);
+				}
 			}
 		},
 		.big => {

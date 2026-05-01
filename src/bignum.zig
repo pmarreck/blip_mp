@@ -1,8 +1,16 @@
 // blip_mp_t — bignum value whose canonical storage is BLIP-encoded bytes
 // interpreted as signed two's-complement (per SPEC.md §Sign convention).
 //
-// Representation 1a (small-buffer-optimization) with HEAP REUSE:
+// Representation 1a (small-buffer-optimization) with HEAP REUSE and
+// SIGN-EXTENDED INLINE TAIL:
 //   - Tier 0/1 (encoded ≤ INLINE_CAP=24 bytes) lives inline; zero alloc.
+//   - **Invariant** for inline-length-prefixed values (inline_len in 2..9):
+//     `inline_buf[1..9]` holds the full sign-extended i64 in LE form, NOT
+//     just the canonical L payload bytes. This lets `decodeInlineSmall`
+//     (the arithmetic hot path) read the i64 with a single u64 load —
+//     no header parse, no per-byte loop, no sign-extension. External
+//     readers via `bytes()` still see only `inline_buf[0..inline_len]`,
+//     i.e., the canonical form. setBytes/setI64 maintain this invariant.
 //   - Larger values use heap_buf; heap_used tracks the active length.
 //     setBytes/setI64 reuse heap_buf when heap_buf.len >= needed (saves
 //     malloc/free on every tier-3 op when sizes are stable).
@@ -88,19 +96,24 @@ pub const Mp = struct {
 			self.inline_len = 1;
 			return;
 		}
-		const need = encoding.encodedSizeI64(value);
-		if (need <= INLINE_CAP) {
-			const written = try encoding.encodeI64Canonical(self.inline_buf[0..need], value);
-			std.debug.assert(written == need);
-			self.inline_len = @intCast(need);
-			return;
-		}
-		// Heap path. Reuse heap_buf if capacity suffices.
-		try self.ensureHeapCapacity(need);
-		const written = try encoding.encodeI64Canonical(self.heap_buf[0..need], value);
-		std.debug.assert(written == need);
-		self.heap_used = need;
-		self.inline_len = SENTINEL_HEAP;
+		// Length-prefixed path. Compute L via @clz (~3 instructions) and
+		// always write the full sign-extended i64 to inline_buf[1..9] so the
+		// arithmetic hot path can do a single u64 load on read. The header
+		// byte at [0] and the canonical length in inline_len keep the
+		// public bytes() view consistent.
+		const u: u64 = if (value >= 0)
+			@bitCast(value)
+		else
+			~@as(u64, @bitCast(value));
+		const bits: usize = 64 - @clz(u) + 1; // +1 for sign bit
+		const L: usize = (bits + 7) / 8;
+		const need = 1 + L;
+		// Inline path always fits: max need = 9 ≤ INLINE_CAP = 24.
+		// (We never call setI64 with values that wouldn't fit inline.)
+		self.inline_buf[0] = 0x80 | @as(u8, @intCast(L));
+		// Single u64 store covers inline_buf[1..9] regardless of L.
+		std.mem.writeInt(u64, self.inline_buf[1..9], @bitCast(value), .little);
+		self.inline_len = @intCast(need);
 	}
 
 	/// Ensure heap_buf has at least `cap` bytes. If a realloc happens it
@@ -200,10 +213,22 @@ pub const Mp = struct {
 
 	/// Replace this Mp's value with the BLIP-encoded byte slice given.
 	/// Routes inline vs heap and REUSES heap_buf when capacity suffices.
-	/// (This is what closes the per-op malloc gap in tier-3 workloads.)
+	///
+	/// For inline length-prefixed values (slice.len in 2..9), maintains the
+	/// "sign-extended i64 in inline_buf[1..9]" invariant by sign-extending
+	/// the canonical payload up to 8 bytes after the header.
 	pub fn setBytes(self: *Mp, slice: []const u8) std.mem.Allocator.Error!void {
 		if (slice.len <= INLINE_CAP) {
 			@memcpy(self.inline_buf[0..slice.len], slice);
+			// Maintain the i64-in-tail invariant for length-prefixed inline
+			// values whose payload fits in 8 bytes (the i64 universe).
+			if (slice.len >= 2 and slice.len <= 9) {
+				const L = slice.len - 1;
+				const high_byte = self.inline_buf[1 + L - 1];
+				const sign_fill: u8 = if ((high_byte & 0x80) != 0) 0xFF else 0x00;
+				var i: usize = L;
+				while (i < 8) : (i += 1) self.inline_buf[1 + i] = sign_fill;
+			}
 			self.inline_len = @intCast(slice.len);
 			return;
 		}
@@ -215,15 +240,17 @@ pub const Mp = struct {
 };
 
 /// Hot-path decoder for inline values with len ≤ 9. Inlined in arithmetic.
-/// Fast path: immediate (len=1, byte < 0x80) returns the byte directly.
-/// Otherwise falls through to encoding.decodeI64 which handles the L=1..8
-/// header+payload case.
+/// Exploits the invariant that for length-prefixed inline values,
+/// `inline_buf[1..9]` holds the full sign-extended i64 in LE — so we read
+/// it as a single u64 load. Compiles to ~2-3 instructions on aarch64 vs
+/// the prior loop-and-decode call.
 inline fn decodeInlineSmall(self: *const Mp) i64 {
+	// Immediate (single byte, value < 128).
 	if (self.inline_len == 1 and self.inline_buf[0] < 0x80) {
 		return self.inline_buf[0];
 	}
-	const dec = encoding.decodeI64(self.inline_buf[0..self.inline_len]) catch unreachable;
-	return dec.value;
+	// Length-prefixed: tail invariant gives us the i64 directly.
+	return @bitCast(std.mem.readInt(u64, self.inline_buf[1..9], .little));
 }
 
 /// Internal tier-3 dispatch. Operates DIRECTLY on the BLIP payload bytes —

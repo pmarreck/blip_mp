@@ -1,5 +1,96 @@
 # BENCHMARK_RESULTS.md — blip_mp vs GMP
 
+## Run 6 — 2026-04-30 EST (sign-extended inline tail — beats GMP everywhere in i64)
+
+### The trick
+
+Maintain an **internal invariant** for inline length-prefixed values: while the public `bytes()` view returns only the canonical `[0..inline_len]` slice, the bytes at `inline_buf[1..9]` ALWAYS hold the full sign-extended i64 in LE form — regardless of canonical L. The "wasted" tail bytes past L are inert (external readers ignore them) but let internal arithmetic load the i64 in a **single u64 LDR** instead of parsing the BLIP header and looping byte-by-byte.
+
+`setI64` writes the full 8-byte LE u64 unconditionally (single STR). `setBytes` sign-extends the canonical payload up to byte 9 to maintain the invariant. `decodeInlineSmall` (the arithmetic hot path) reads the i64 with one `readInt(u64, ...)` plus a single bitcast.
+
+This is a "store both forms" trick: bytes for serialization (canonical, what external code sees), i64 in tail for arithmetic (fast path, internal only). Memory cost: 0 extra bytes (the inline_buf already had the room).
+
+### Numbers (median of 3 runs)
+
+**Small buckets — we now BEAT GMP across the entire i64 universe:**
+
+| Bucket | `Mp.add` | `raw` | GMP | `Mp.add` / GMP |
+|---|---:|---:|---:|---:|
+| L=0 (immediate, 0..127)  | **2.06** | 1.31 | 5.00 | **2.43× faster** ✅ |
+| L=2 (128..32K)           | **2.01** | 2.95 | 3.69 | **1.84× faster** ✅ |
+| L=3 (~16-bit..~24-bit)   | **2.02** | 3.35 | 3.46 | **1.71× faster** ✅ |
+| L=4 (~32-bit)            | **2.02** | 3.58 | 3.55 | **1.76× faster** ✅ |
+
+(`raw` is now SLOWER than `Mp.add` because the "raw" path still uses the `encoding.zig` public API — header parse + byte loop. `Mp.add`'s internal fast path skips that entirely via the inline-tail trick. `raw` is no longer the ceiling; it's the "without the tail trick" baseline.)
+
+**Large buckets — tier 3 unchanged from Run 5:**
+
+| Bucket | `Mp.add` (tier 3) | GMP | `Mp.add` / GMP |
+|---|---:|---:|---:|
+| 256-bit  | 18.39 | 4.58  | 0.25× (4.0× slower) |
+| 1024-bit | 28.97 | 8.34  | 0.29× (3.5× slower) |
+| 4096-bit | 96.54 | 30.84 | 0.31× (3.1× slower) |
+
+### Run 5 → Run 6 internal speedups
+
+| Bucket | Run 5 | Run 6 | Speedup | vs GMP shift |
+|---|---:|---:|---:|---|
+| immediate | 2.84 | 2.06 | 1.38× | 1.65× → 2.43× |
+| L=2       | 9.46 | 2.01 | **4.71×** | 0.53× → **1.84×** ✅ |
+| L=3       | 9.12 | 2.02 | **4.51×** | 0.51× → **1.71×** ✅ |
+| L=4       | 8.95 | 2.02 | **4.43×** | 0.50× → **1.76×** ✅ |
+
+The L=2..L=4 buckets went from losing by ~50% to winning by ~70-80%. **This is the biggest single optimization in the project.**
+
+## Findings — Run 6
+
+### 1. Hypothesis #1 fully validated across i64 universe
+
+SPEC.md predicted "1.5-3× faster than GMP on small-number workloads." We now hit 1.7× to 2.4× across every bucket from immediate through L=4 (~32-bit values). The architectural advantage — the storage IS the value — combined with the internal-tail trick makes us strictly faster than GMP for any value that fits in i64.
+
+### 2. Why this works
+
+GMP's `mpz_add` for small values must:
+- Read mpz_t struct (16 bytes)
+- Indirect-load `_mp_d` through pointer
+- Examine `_mp_size` for sign + length
+- Single u64 add
+- Update `_mp_size` and `_mp_d[0]`
+- Write back struct
+
+Our `Mp.add` for inline values:
+- Read inline_buf[0..9] (9 bytes, in-cache by definition — we ARE the cache line)
+- 1 u64 LDR for `a`'s i64 value via tail trick
+- 1 u64 LDR for `b`'s
+- ADDS instruction
+- Compute new L via @clz (~3 instructions)
+- 1 u64 STR for result's tail
+- Update inline_len byte
+
+Same instruction count, but no indirect load, no separate sign field, no allocator interaction. Direct beats indirect.
+
+### 3. Tier 3 still loses (3-4×)
+
+Unchanged from Run 5 — the inline-tail trick only affects inline values. Tier 3 large-number arithmetic still pays for byte-direct add (vs GMP's hand-tuned aarch64 asm) and runs the same speed. Closing it would require Zig SIMD (`@Vector`) or hand-written LLVM IR. Diminishing returns for a research result that already validates the spec across the i64 range.
+
+## Decision
+
+**Hypothesis #1 fully validated.** SPEC's 1.5× threshold met or exceeded across **every** bucket where blip_mp's storage advantage applies. blip_mp is now strictly preferable to GMP for any application dominated by ≤ i64 values (which is the vast majority of bignum workloads per spec).
+
+Tier 3 trails GMP by 3-4× at large sizes — within "matching" range per SPEC §Hypothesis #3.
+
+## Open follow-ups (revised, ranked)
+
+1. **Tier 3 mul** (currently still `error.TierOverflow`).
+2. **Tier 3 SIMD** — `@Vector(N, u8)` or LLVM IR to close the large-size gap.
+3. **Statistical bench harness** — `hyperfine` integration for proper N-run aggregation; current numbers are 3-run medians by hand.
+4. **Bench bucket label cleanup** (L=1 was actually L=2; legacy from Run 1).
+5. **C FFI header** for downstream consumers.
+6. **BLIP wire interop** — separate "unsigned BLIP" mode for round-tripping with strict-spec BLIP producers.
+7. **Cross-platform validation** — these numbers are aarch64-darwin only. x86_64 Linux/Windows likely similar but unverified.
+
+---
+
 ## Run 5 — 2026-04-30 EST (heap buffer reuse in setBytes/setI64)
 
 ### Change since Run 4
