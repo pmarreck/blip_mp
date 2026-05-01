@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Benchmark runner. Always builds in ReleaseFast (per CLAUDE.md).
+# Asserts no DEBUG BUILD banner appears in benchmark output.
+set -u
+
+printf 'Benchmark suite not yet implemented (Milestone 2).\n' >&2
+printf 'See PLAN.md.\n' >&2
+exit 2
