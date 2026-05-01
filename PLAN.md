@@ -20,16 +20,17 @@ Working order, smallest reviewable increments. Strict TDD where business logic e
 
 ## Milestone 1 — Tier 0/1 arithmetic (the hypothesis test)
 
-- [ ] `blip_mp_get_u64` round-trip (set then get, all values in `[0, u32_max]`)
-- [ ] `blip_mp_set_i64` / `blip_mp_get_i64` for signed two's-complement
-- [ ] `blip_mp_cmp` zero-decode comparison for same-encoding-class operands
-- [ ] `blip_mp_add` tier 0/1: native `u64` with overflow detect, promote on overflow
-- [ ] `blip_mp_sub` tier 0/1
-- [ ] `blip_mp_mul` tier 0/1 (use `@mulWithOverflow` or `u128` widen)
-- [ ] Canonicalization pass: shrink `L` after sign-extension cancellation
-- [ ] C FFI header (`include/blip_mp.h`) covering the above
-- *Curiosity poke:* tier 1 → tier 1 add can overflow into tier-2 territory (L=9). Do we promote in-place, or always allocate? Memory custody of `bytes` matters here.
-- *Curiosity poke:* `-1` has 4 valid L encodings (1,2,4,8). Add must produce canonical L on output, even when both inputs were L=8. This is the "carry-out smaller than operand" trap from SPEC §Open question 7.
+- [x] `Mp.setU64` / `Mp.getU64` round-trip across boundaries (2026-04-30)
+- [x] `Mp.setI64` / `Mp.getI64` signed two's-complement, with `encodeI64Canonical` / `decodeI64` primitives in encoding.zig (2026-04-30)
+- [x] `Mp.cmp` and `Mp.sign` (2026-04-30)
+- [x] `Mp.add` tier 0/1, native `i64` with `@addWithOverflow`, `error.TierOverflow` for results > i64.max (2026-04-30)
+- [x] `Mp.sub` tier 0/1 (2026-04-30)
+- [x] `Mp.mul` tier 0/1 via i128 widen for full product (2026-04-30)
+- [x] Canonicalization on every `setI64` (re-encodes from scratch, naturally canonical) — verified by `add: canonical-L shrink after sign-extension cancellation` test (2026-04-30)
+- [ ] C FFI header (`include/blip_mp.h`) covering the above (deferred to M2 alongside benchmark)
+- *Resolved poke:* tier-1 → tier-1 overflow currently returns `error.TierOverflow` instead of promoting. For Milestone 1 (hypothesis test) this is fine — the small-value benchmark stays well under i64.max. Promotion to L=9+ is a Milestone 3 concern.
+- *Resolved poke:* canonical-L is automatic since `setI64` always re-encodes from scratch. No separate canonicalization pass needed.
+- *New poke:* `Mp.add` decodes both operands every call (one `decodeI64` per arg). For a tight accumulator loop, that's wasted work — we keep re-decoding the same operand. A bench-justified optimization: cache the i64 inside `Mp` for tier-0/1 values so add can short-circuit. Wait for benchmark numbers before optimizing.
 
 ## Milestone 2 — Benchmark harness (proof or disproof)
 

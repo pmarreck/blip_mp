@@ -6,6 +6,8 @@
 const std = @import("std");
 
 pub const encoding = @import("encoding.zig");
+pub const bignum = @import("bignum.zig");
+pub const Mp = bignum.Mp;
 
 test {
 	std.testing.refAllDecls(@This());
