@@ -39,6 +39,36 @@ pub const Decoded = struct {
 	is_sentinel: bool,
 };
 
+/// Cheap header-byte classifier — comptime-built 256-entry lookup avoids
+/// the bit-juggling on every parse. For the immediate range (b0 < 0x80)
+/// the payload IS the byte and `has_continuation` is irrelevant.
+pub const HeaderInfo = packed struct {
+	is_immediate: bool, // b0 < 0x80
+	has_continuation: bool, // bit 5 set (only meaningful when length-prefixed)
+	endian_be: bool, // bit 6 set (only meaningful when length-prefixed)
+	low5: u5, // L low-5 bits (only meaningful when length-prefixed)
+};
+
+const HEADER_LUT: [256]HeaderInfo = blk: {
+	@setEvalBranchQuota(2000);
+	var t: [256]HeaderInfo = undefined;
+	for (0..256) |i| {
+		const b = @as(u8, @intCast(i));
+		t[i] = .{
+			.is_immediate = b < 0x80,
+			.has_continuation = (b & 0x20) != 0,
+			.endian_be = (b & 0x40) != 0,
+			.low5 = @intCast(b & 0x1F),
+		};
+	}
+	break :blk t;
+};
+
+/// Look up the structural meaning of a BLIP first byte. Single load, no math.
+pub inline fn headerInfoLookup(b0: u8) HeaderInfo {
+	return HEADER_LUT[b0];
+}
+
 /// Minimum payload byte-width needed to represent `value` as signed two's
 /// complement. Returns 0 for values 0..127 (the immediate range — no payload
 /// is needed at all). Otherwise returns the smallest L in 1..8 whose i(L*8)

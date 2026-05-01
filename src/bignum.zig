@@ -16,13 +16,21 @@
 //     malloc/free on every tier-3 op when sizes are stable).
 //
 // Struct layout (72 bytes total on 64-bit):
-//   [0..24)   inline_buf    — encoded bytes when in inline mode
-//   [24]      inline_len    — 0..INLINE_CAP if inline; SENTINEL_HEAP if heap
-//   [25]      heap_offset   — start offset within heap_buf (heap mode only)
-//   [26..32)  padding
-//   [32..40)  heap_used     — active length within heap_buf starting at heap_offset
-//   [40..56)  heap_buf      — full allocation (slice ptr + cap)
-//   [56..72)  allocator     — std.mem.Allocator (ptr + vtable ptr)
+//   [0..24)   inline_buf       — encoded bytes when in inline mode
+//   [24]      inline_len       — 0..INLINE_CAP if inline; SENTINEL_HEAP if heap
+//   [25]      heap_offset      — start offset within heap_buf (heap mode only)
+//   [26]      cached_pay_off   — cached payload offset within bytes() view
+//   [27]      cached_sign      — cached sign: -1 negative, 0 zero, +1 positive
+//   [28..32)  cached_pay_len   — cached payload length (u32, max 4G bytes per Mp)
+//   [32..40)  heap_used        — active length within heap_buf starting at heap_offset
+//   [40..56)  heap_buf         — full allocation (slice ptr + cap)
+//   [56..72)  allocator        — std.mem.Allocator (ptr + vtable ptr)
+//
+// The cached fields mirror GMP's _mp_size approach (sign + length cached in
+// the struct rather than parsed from the data per-op). This eliminates the
+// per-op `parseHeader` call and per-op high-bit-of-high-byte sign extraction
+// that previously dominated tier-3 add at small sizes (256-2048 bit). Cache
+// is maintained atomically with the bytes by every set/setBytes/tier3Op call.
 //
 // heap_offset enables tier3Op's direct-write optimisation: write the canonical
 // payload at a fixed offset (HDR_RESERVE = 10) inside heap_buf, compute the
@@ -55,9 +63,12 @@ pub const ArithError = SetError || GetError || error{
 pub const Mp = struct {
 	inline_buf: [INLINE_CAP]u8 align(8),
 	inline_len: u8,
-	heap_offset: u8, // start offset within heap_buf (active = heap_buf[offset..offset+used])
+	heap_offset: u8,
+	cached_pay_off: u8,
+	cached_sign: i8, // -1 / 0 / +1
+	cached_pay_len: u32,
 	heap_used: usize,
-	heap_buf: []u8, // FULL allocation; .len is capacity.
+	heap_buf: []u8,
 	allocator: std.mem.Allocator,
 
 	pub fn init(allocator: std.mem.Allocator) Mp {
@@ -65,6 +76,9 @@ pub const Mp = struct {
 			.inline_buf = [_]u8{0} ** INLINE_CAP,
 			.inline_len = 0,
 			.heap_offset = 0,
+			.cached_pay_off = 0,
+			.cached_sign = 0,
+			.cached_pay_len = 0,
 			.heap_used = 0,
 			.heap_buf = &[_]u8{},
 			.allocator = allocator,
@@ -79,6 +93,25 @@ pub const Mp = struct {
 			self.heap_offset = 0;
 		}
 		self.inline_len = 0;
+		self.cached_pay_off = 0;
+		self.cached_pay_len = 0;
+		self.cached_sign = 0;
+	}
+
+	/// Returns the cached payload slice (the value bytes after the BLIP
+	/// header). For immediate values (b0 < 0x80) this is the single byte;
+	/// for length-prefixed it's the L payload bytes. Cheap: just slices
+	/// `bytes()` using the cached offset/len. Used by tier3Op to skip
+	/// parseHeader on inputs.
+	pub fn payload(self: *const Mp) []const u8 {
+		const all = self.bytes();
+		const off: usize = self.cached_pay_off;
+		return all[off .. off + self.cached_pay_len];
+	}
+
+	/// Returns the cached sign (-1, 0, +1) without re-decoding.
+	pub fn cachedSign(self: *const Mp) i8 {
+		return self.cached_sign;
 	}
 
 	/// Returns the active encoded bytes — points into either inline_buf or
@@ -101,33 +134,26 @@ pub const Mp = struct {
 	/// the encoder. Closes the Mp.add/raw gap measured in BENCHMARK_RESULTS.md
 	/// Run 2 (~0.6 ns saved per immediate add).
 	pub fn setI64(self: *Mp, value: i64) SetError!void {
-		// Immediate-range fast path: single byte store; predicted-true branch.
+		// Immediate-range fast path.
 		if (value >= 0 and value < 128) {
 			self.inline_buf[0] = @intCast(value);
 			self.inline_len = 1;
+			self.cached_pay_off = 0;
+			self.cached_pay_len = 1;
+			self.cached_sign = if (value == 0) 0 else 1;
 			return;
 		}
-		// Length-prefixed path. Compute L via @clz (~3 instructions) and
-		// always write the full sign-extended i64 to inline_buf[1..9] so the
-		// arithmetic hot path can do a single u64 load on read. The header
-		// byte at [0] and the canonical length in inline_len keep the
-		// public bytes() view consistent.
-		const u: u64 = if (value >= 0)
-			@bitCast(value)
-		else
-			~@as(u64, @bitCast(value));
-		const bits: usize = 64 - @clz(u) + 1; // +1 for sign bit
+		const u: u64 = if (value >= 0) @bitCast(value) else ~@as(u64, @bitCast(value));
+		const bits: usize = 64 - @clz(u) + 1;
 		const L: usize = (bits + 7) / 8;
 		const need = 1 + L;
-		// Inline path always fits: max need = 9 ≤ INLINE_CAP = 24.
-		// (We never call setI64 with values that wouldn't fit inline.)
 		self.inline_buf[0] = 0x80 | @as(u8, @intCast(L));
-		// Single u64 store covers inline_buf[1..9] regardless of L.
 		std.mem.writeInt(u64, self.inline_buf[1..9], @bitCast(value), .little);
 		self.inline_len = @intCast(need);
-		// Reset heap_offset so a future bytes() call returning heap_buf would
-		// start at the right place (we're inline now, but be defensive).
 		self.heap_offset = 0;
+		self.cached_pay_off = 1;
+		self.cached_pay_len = @intCast(L);
+		self.cached_sign = if (value > 0) 1 else -1; // value != 0 here (handled above)
 	}
 
 	/// Ensure heap_buf has at least `cap` bytes. If a realloc happens it
@@ -169,10 +195,8 @@ pub const Mp = struct {
 	}
 
 	pub fn sign(self: *const Mp) GetError!i2 {
-		const v = try self.getI64();
-		if (v > 0) return 1;
-		if (v < 0) return -1;
-		return 0;
+		// Use the cached sign — no decode required.
+		return @intCast(self.cached_sign);
 	}
 
 	pub fn add(r: *Mp, a: *const Mp, b: *const Mp) ArithError!void {
@@ -233,8 +257,6 @@ pub const Mp = struct {
 	pub fn setBytes(self: *Mp, slice: []const u8) std.mem.Allocator.Error!void {
 		if (slice.len <= INLINE_CAP) {
 			@memcpy(self.inline_buf[0..slice.len], slice);
-			// Maintain the i64-in-tail invariant for length-prefixed inline
-			// values whose payload fits in 8 bytes (the i64 universe).
 			if (slice.len >= 2 and slice.len <= 9) {
 				const L = slice.len - 1;
 				const high_byte = self.inline_buf[1 + L - 1];
@@ -244,6 +266,7 @@ pub const Mp = struct {
 			}
 			self.inline_len = @intCast(slice.len);
 			self.heap_offset = 0;
+			self.computeAndCacheMeta(slice);
 			return;
 		}
 		try self.ensureHeapCapacity(slice.len);
@@ -251,6 +274,60 @@ pub const Mp = struct {
 		self.heap_used = slice.len;
 		self.heap_offset = 0;
 		self.inline_len = SENTINEL_HEAP;
+		self.computeAndCacheMeta(slice);
+	}
+
+	/// Decode a BLIP-encoded slice's payload offset, length, and sign, and
+	/// store them in the cached fields. Called once per `setBytes` so the
+	/// arithmetic hot path doesn't re-parse the header per op.
+	fn computeAndCacheMeta(self: *Mp, slice: []const u8) void {
+		if (slice.len == 0) {
+			self.cached_pay_off = 0;
+			self.cached_pay_len = 0;
+			self.cached_sign = 0;
+			return;
+		}
+		const b0 = slice[0];
+		if (b0 < 0x80) {
+			// Immediate, always 0..127, non-negative.
+			self.cached_pay_off = 0;
+			self.cached_pay_len = 1;
+			self.cached_sign = if (b0 == 0) 0 else 1;
+			return;
+		}
+		// Length-prefixed: parse header to find offset and length.
+		const hdr = encoding.headerInfoLookup(b0);
+		var L: usize = b0 & 0x1F;
+		var pos: usize = 1;
+		if (hdr.has_continuation) {
+			var shift: u6 = 5;
+			while (pos < slice.len) {
+				const n = slice[pos];
+				pos += 1;
+				L |= @as(usize, n & 0x7F) << shift;
+				shift += 7;
+				if ((n & 0x80) == 0) break;
+			}
+		}
+		self.cached_pay_off = @intCast(pos);
+		self.cached_pay_len = @intCast(L);
+		// Sign: high bit of high payload byte (or 0 if L=0 / all-zero).
+		if (L == 0) {
+			self.cached_sign = 0;
+		} else {
+			const high = slice[pos + L - 1];
+			if ((high & 0x80) != 0) {
+				self.cached_sign = -1;
+			} else {
+				// Positive or zero — check all bytes for non-zero.
+				var any_nonzero = false;
+				for (slice[pos .. pos + L]) |b| if (b != 0) {
+					any_nonzero = true;
+					break;
+				};
+				self.cached_sign = if (any_nonzero) 1 else 0;
+			}
+		}
 	}
 };
 
@@ -348,20 +425,19 @@ const HDR_RESERVE: usize = 10; // max BLIP header (continuation up to L≈2^77)
 fn tier3Op(r: *Mp, a: *const Mp, b: *const Mp, comptime op: TierOp) ArithError!void {
 	const a_bytes = a.bytes();
 	const b_bytes = b.bytes();
+	const a_pay_off: usize = a.cached_pay_off;
+	const b_pay_off: usize = b.cached_pay_off;
+	const a_pay_len: usize = a.cached_pay_len;
+	const b_pay_len: usize = b.cached_pay_len;
 
-	// Aliasing safeguard: if r is a or b, ensureHeapCapacity may move the
-	// underlying buffer. Capture inputs into stack scratch first in that
-	// case. For tight loops with stable sizes the realloc happens once
-	// (first iteration); subsequent ops take the hot path.
-	const a_pay_pre = try tier3.payloadOf(a_bytes);
-	const b_pay_pre = try tier3.payloadOf(b_bytes);
-	const max_payload = @max(a_pay_pre.len, b_pay_pre.len);
-	const out_need = HDR_RESERVE + max_payload + 1; // header room + payload + carry byte
+	const max_payload = @max(a_pay_len, b_pay_len);
+	const out_need = HDR_RESERVE + max_payload + 1;
 
 	const may_realloc = r.heap_buf.len < out_need;
 	const r_aliases_input = (a_bytes.ptr == r.heap_buf.ptr) or (b_bytes.ptr == r.heap_buf.ptr);
 	if (may_realloc or r_aliases_input) {
-		// Cold path: snapshot inputs to stack scratch, ensureHeapCapacity, then operate.
+		// Cold path: snapshot input PAYLOADS (not full bytes()) to stack
+		// scratch, ensureHeapCapacity, then operate directly on the snapshots.
 		const STACK_IN = 8192;
 		var stack_a: [STACK_IN]u8 = undefined;
 		var stack_b: [STACK_IN]u8 = undefined;
@@ -371,30 +447,33 @@ fn tier3Op(r: *Mp, a: *const Mp, b: *const Mp, comptime op: TierOp) ArithError!v
 			if (heap_a_in) |s| r.allocator.free(s);
 			if (heap_b_in) |s| r.allocator.free(s);
 		}
-		const a_copy: []u8 = if (a_bytes.len <= STACK_IN) stack_a[0..a_bytes.len] else blk: {
-			heap_a_in = try r.allocator.alloc(u8, a_bytes.len);
+		const a_copy: []u8 = if (a_pay_len <= STACK_IN) stack_a[0..a_pay_len] else blk: {
+			heap_a_in = try r.allocator.alloc(u8, a_pay_len);
 			break :blk heap_a_in.?;
 		};
-		const b_copy: []u8 = if (b_bytes.len <= STACK_IN) stack_b[0..b_bytes.len] else blk: {
-			heap_b_in = try r.allocator.alloc(u8, b_bytes.len);
+		const b_copy: []u8 = if (b_pay_len <= STACK_IN) stack_b[0..b_pay_len] else blk: {
+			heap_b_in = try r.allocator.alloc(u8, b_pay_len);
 			break :blk heap_b_in.?;
 		};
-		@memcpy(a_copy, a_bytes);
-		@memcpy(b_copy, b_bytes);
+		@memcpy(a_copy, a_bytes[a_pay_off .. a_pay_off + a_pay_len]);
+		@memcpy(b_copy, b_bytes[b_pay_off .. b_pay_off + b_pay_len]);
 		try r.ensureHeapCapacity(out_need);
-		try tier3OpInto(r, a_copy, b_copy, op);
+		try tier3OpIntoPayload(r, a_copy, b_copy, op);
 		return;
 	}
-	// Hot path: r.heap_buf has capacity AND no aliasing. Direct write.
-	try tier3OpInto(r, a_bytes, b_bytes, op);
+	// Hot path: pass payload slices directly using cached offsets — no parse.
+	try tier3OpIntoPayload(
+		r,
+		a_bytes[a_pay_off .. a_pay_off + a_pay_len],
+		b_bytes[b_pay_off .. b_pay_off + b_pay_len],
+		op,
+	);
 }
 
-/// Compute op(a_bytes, b_bytes) directly into r.heap_buf using the
-/// pre-reserved-header layout. Caller has guaranteed r.heap_buf has at least
-/// `HDR_RESERVE + max_payload + 1` bytes capacity AND no aliasing.
-fn tier3OpInto(r: *Mp, a_bytes: []const u8, b_bytes: []const u8, comptime op: TierOp) ArithError!void {
-	const a_pay = try tier3.payloadOf(a_bytes);
-	const b_pay = try tier3.payloadOf(b_bytes);
+/// Compute op(a_pay, b_pay) directly into r.heap_buf using the
+/// pre-reserved-header layout. Caller passes payloads pre-extracted via
+/// the cached payload offsets — no header parse on the hot path.
+fn tier3OpIntoPayload(r: *Mp, a_pay: []const u8, b_pay: []const u8, comptime op: TierOp) ArithError!void {
 	const n = @max(a_pay.len, b_pay.len);
 
 	const payload_dst = r.heap_buf[HDR_RESERVE..];
@@ -404,23 +483,23 @@ fn tier3OpInto(r: *Mp, a_bytes: []const u8, b_bytes: []const u8, comptime op: Ti
 	};
 	const canon = tier3.canonicalLen(payload_dst[0..result_len]);
 
-	// Immediate-result fast path (rare for tier-3 but possible after cancellation).
+	// Immediate-result fast path.
 	if (canon == 1 and payload_dst[0] < 0x80) {
 		r.inline_buf[0] = payload_dst[0];
 		r.inline_len = 1;
 		r.heap_offset = 0;
+		r.cached_pay_off = 0;
+		r.cached_pay_len = 1;
+		r.cached_sign = if (payload_dst[0] == 0) 0 else 1;
 		return;
 	}
-	// Inline-fits fast path (result shrunk back below INLINE_CAP after sub
-	// or sign cancellation). Copy canonical encoding into inline_buf.
+	// Inline-fits fast path.
 	const total = canon + headerByteCount(canon);
 	if (total <= INLINE_CAP) {
-		// Build header + payload in inline_buf.
 		var hdr_buf: [HDR_RESERVE]u8 = undefined;
 		const hdr_len = tier3.writeHeader(&hdr_buf, canon) catch unreachable;
 		@memcpy(r.inline_buf[0..hdr_len], hdr_buf[0..hdr_len]);
 		@memcpy(r.inline_buf[hdr_len .. hdr_len + canon], payload_dst[0..canon]);
-		// Maintain the i64-in-tail invariant if the result fits in i64.
 		if (total >= 2 and total <= 9) {
 			const L = total - 1;
 			const high_byte = r.inline_buf[1 + L - 1];
@@ -430,17 +509,45 @@ fn tier3OpInto(r: *Mp, a_bytes: []const u8, b_bytes: []const u8, comptime op: Ti
 		}
 		r.inline_len = @intCast(total);
 		r.heap_offset = 0;
+		r.cached_pay_off = @intCast(hdr_len);
+		r.cached_pay_len = @intCast(canon);
+		r.cached_sign = signFromPayload(r.inline_buf[hdr_len .. hdr_len + canon]);
 		return;
 	}
 
-	// Heap fast path: write the header at HDR_RESERVE - hdr_len so it sits
-	// directly before the payload; no shift needed.
+	// Heap fast path.
 	const hdr_len = headerByteCount(canon);
 	const hdr_start = HDR_RESERVE - hdr_len;
 	_ = tier3.writeHeader(r.heap_buf[hdr_start .. hdr_start + hdr_len], canon) catch unreachable;
 	r.heap_offset = @intCast(hdr_start);
 	r.heap_used = hdr_len + canon;
 	r.inline_len = SENTINEL_HEAP;
+	r.cached_pay_off = @intCast(hdr_len);
+	r.cached_pay_len = @intCast(canon);
+	r.cached_sign = signFromPayload(r.heap_buf[hdr_start + hdr_len .. hdr_start + hdr_len + canon]);
+}
+
+/// How many header bytes does a length-prefixed BLIP value occupy?
+/// Reads only from the buffer — uses the lookup table for the first byte
+/// then walks any continuation bytes.
+inline fn headerByteCountByte(b0: u8, buf: []const u8) usize {
+	const info = encoding.headerInfoLookup(b0);
+	if (!info.has_continuation) return 1;
+	var pos: usize = 1;
+	while (pos < buf.len) {
+		const n = buf[pos];
+		pos += 1;
+		if ((n & 0x80) == 0) break;
+	}
+	return pos;
+}
+
+/// Sign of a payload (LE two's-complement) — high bit of high byte, or 0 if all-zero.
+inline fn signFromPayload(payload: []const u8) i8 {
+	if (payload.len == 0) return 0;
+	if ((payload[payload.len - 1] & 0x80) != 0) return -1;
+	for (payload) |b| if (b != 0) return 1;
+	return 0;
 }
 
 /// Cheap helper: how many bytes will writeHeader produce for L?
