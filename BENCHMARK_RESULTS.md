@@ -1,5 +1,33 @@
 # BENCHMARK_RESULTS.md — blip_mp vs GMP
 
+## Run 3 — 2026-04-30 EST (SBO + immediate fast path)
+
+### Change since Run 2
+
+Added comptime fast paths in `Mp.setI64` and `Mp.getI64` for `value ∈ [0,127]`:
+- `setI64`: single byte store, no encode call, no L computation
+- `getI64`: single byte read when inline + first byte < 0x80, no decode call
+
+### Numbers
+
+| Bucket | SBO+fastpath `Mp.add` | `raw` | GMP | `Mp.add` / GMP |
+|---|---:|---:|---:|---:|
+| immediate (0..127) | **1.70** | 1.43 | 3.71 | **2.18× faster** ✅ |
+| L=2 (mislabeled "L=1", 128..255) | 4.29 | 3.06 | 3.77 | 0.88× |
+| L=2 (256..32767) | 4.76 | 3.41 | 3.71 | 0.78× |
+| L=3 (32768..8M) | 5.51 | 3.86 | 3.81 | 0.69× |
+| L=4 (>8M..2G) | 5.99 | 4.28 | 3.93 | 0.66× |
+
+### Run 2 → Run 3 delta (immediate bucket)
+
+`Mp.add` went 2.21 → 1.70 ns (**24% faster**). Mp.add ceiling-vs-actual gap shrank from 0.64 ns to 0.27 ns (within 19% of `raw`).
+
+### Note: bench bucket labels are misleading
+
+The original "L=1 (128..255)" bucket actually exercises L=2 in signed canonical, because positive values 128..127 don't fit in i8 — they jump directly to i16. There is no positive-L=1 bucket; L=1 signed only holds [-128, -1]. Will redesign the bench bucket layout when extending to large-value buckets in B-4 (M3).
+
+---
+
 ## Run 2 — 2026-04-30 EST (SBO `Mp` — representation 1a)
 
 ### Change since Run 1

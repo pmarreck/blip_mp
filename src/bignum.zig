@@ -74,10 +74,24 @@ pub const Mp = struct {
 
 	/// Replace this value with the canonical signed BLIP encoding of `value`.
 	/// Tier 0/1 stays inline (zero allocation). Larger values fall back to heap.
+	///
+	/// Hot path: value in [0,127] gets a single-byte store with no call into
+	/// the encoder. Closes the Mp.add/raw gap measured in BENCHMARK_RESULTS.md
+	/// Run 2 (~0.6 ns saved per immediate add).
 	pub fn setI64(self: *Mp, value: i64) SetError!void {
+		// Immediate-range fast path: by far the most common in tier-0
+		// workloads. Single byte store; predicted-true branch.
+		if (value >= 0 and value < 128) {
+			if (self.inline_len == SENTINEL_HEAP) {
+				self.allocator.free(self.heap_bytes);
+				self.heap_bytes = &[_]u8{};
+			}
+			self.inline_buf[0] = @intCast(value);
+			self.inline_len = 1;
+			return;
+		}
 		const need = encoding.encodedSizeI64(value);
 		if (need <= INLINE_CAP) {
-			// Inline path. If we were previously on heap, free first.
 			if (self.inline_len == SENTINEL_HEAP) {
 				self.allocator.free(self.heap_bytes);
 				self.heap_bytes = &[_]u8{};
@@ -105,6 +119,11 @@ pub const Mp = struct {
 	}
 
 	pub fn getI64(self: *const Mp) GetError!i64 {
+		// Hot path: inline + immediate first byte (< 0x80). One byte read,
+		// no decode loop, no sign-extension.
+		if (self.inline_len != SENTINEL_HEAP and self.inline_len == 1 and self.inline_buf[0] < 0x80) {
+			return self.inline_buf[0];
+		}
 		const dec = try encoding.decodeI64(self.bytes());
 		if (dec.is_sentinel) return error.SentinelValue;
 		return dec.value;
