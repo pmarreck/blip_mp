@@ -263,22 +263,30 @@ fn tier3MulOp(r: *Mp, a: *const Mp, b: *const Mp) ArithError!void {
 	const r_pay_max = a_pay_len + b_pay_len + 1;
 	const out_need = r_pay_max + 10; // +10 for header
 
-	// 4 KB per operand for mul (results doubles, so 8 KB result + out).
+	// 4 KB per operand for mul (results double, so 8 KB result + out).
 	// Covers up to ~32768-bit operands without spilling to allocator.
 	const STACK_BYTES = 4096;
 	var stack_a: [STACK_BYTES]u8 = undefined;
 	var stack_b: [STACK_BYTES]u8 = undefined;
 	var stack_r: [STACK_BYTES * 2 + 1]u8 = undefined;
 	var stack_out: [STACK_BYTES * 2 + 16]u8 = undefined;
+	// Karatsuba scratch: ~4n bytes per CLAUDE.md karatsubaScratchNeed.
+	// Sized for the larger operand. If sizes don't match (Karatsuba doesn't apply),
+	// scratch_k stays empty and mulRawBlip falls back to schoolbook.
+	const max_pay = @max(a_pay_len, b_pay_len);
+	const k_need = if (a_pay_len == b_pay_len) tier3.karatsubaScratchNeed(max_pay) else 0;
+	var stack_k: [STACK_BYTES * 4 + 64]u8 = undefined;
 	var heap_a: ?[]u8 = null;
 	var heap_b: ?[]u8 = null;
 	var heap_r: ?[]u8 = null;
 	var heap_out: ?[]u8 = null;
+	var heap_k: ?[]u8 = null;
 	defer {
 		if (heap_a) |s| r.allocator.free(s);
 		if (heap_b) |s| r.allocator.free(s);
 		if (heap_r) |s| r.allocator.free(s);
 		if (heap_out) |s| r.allocator.free(s);
+		if (heap_k) |s| r.allocator.free(s);
 	}
 	const sa: []u8 = if (a_pay_len <= STACK_BYTES) stack_a[0..a_pay_len] else blk: {
 		heap_a = try r.allocator.alloc(u8, a_pay_len);
@@ -296,8 +304,12 @@ fn tier3MulOp(r: *Mp, a: *const Mp, b: *const Mp) ArithError!void {
 		heap_out = try r.allocator.alloc(u8, out_need);
 		break :blk heap_out.?;
 	};
+	const sk: []u8 = if (k_need == 0) &[_]u8{} else if (k_need <= stack_k.len) stack_k[0..k_need] else blk: {
+		heap_k = try r.allocator.alloc(u8, k_need);
+		break :blk heap_k.?;
+	};
 
-	const written = try tier3.mulRawBlip(a_bytes, b_bytes, sa, sb, sr, out_buf);
+	const written = try tier3.mulRawBlip(a_bytes, b_bytes, sa, sb, sr, sk, out_buf);
 	try r.setBytes(out_buf[0..written]);
 }
 

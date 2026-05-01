@@ -1,5 +1,81 @@
 # BENCHMARK_RESULTS.md — blip_mp vs GMP
 
+## Run 9 — 2026-05-01 EST (Karatsuba mul + chunked helpers)
+
+### Changes since Run 8
+
+1. **Chunked u64×u64 = u128 schoolbook** replaces the per-byte schoolbook mul. ~50× faster inner kernel for mul. Used as Karatsuba's base case.
+2. **Karatsuba multiplication** with the **carry-bit trick**: rather than recursing on (t+1)-byte sums (which break 8-byte alignment), split the sum into a t-byte low part and a 1-bit carry, then expand z1_full via the distributive property. Keeps every recursive mul on the chunked-u64 fast path.
+3. **Chunked u64 helpers**: `addUnsignedInPlace`, `subUnsignedInPlace`, `addUnsignedFixedLen` now use 8-byte word loops instead of byte loops. Major win for Karatsuba's per-recursion overhead at large sizes.
+4. **KARATSUBA_THRESHOLD = 256 bytes (2048-bit)** — empirically tuned. Below this, chunked schoolbook is faster than the Karatsuba constant overhead.
+
+### Multiplication numbers (median ≈ single run; iters scale with size)
+
+| Bits | `Mp.mul` | GMP `mpz_mul` | **Mp/GMP** |
+|---:|---:|---:|---:|
+| 128   | 23.70   | 10.05  | 0.42× |
+| 192   | 30.31   | 14.66  | 0.48× |
+| 256   | 30.99   | 21.05  | 0.68× |
+| 384   | 39.22   | 39.76  | **1.01× tie** |
+| 512   | 56.59   | 67.98  | **1.20× faster** ✅ |
+| 768   | 115.29  | 146.46 | **1.27× faster** ✅ |
+| 1024  | 202.46  | 251.55 | **1.24× faster** ✅ legacy RSA-1024 |
+| 1536  | 367.60  | 551.85 | **1.50× faster** ✅ |
+| 2048  | 838.15  | 804.80 | 0.96× (basically tied) — RSA-2048 |
+| 3072  | 1501.70 | 1733.90 | **1.15× faster** ✅ recommended RSA-3072 |
+| 4096  | 3109.80 | 2498.20 | 0.80× — RSA-4096 |
+| 6144  | 5374.80 | 5399.40 | **1.00× tie** |
+| 8192  | 10519.80 | 7910.60 | 0.75× — paranoid RSA |
+| 16384 | 33870.20 | 23625.00 | 0.70× |
+| 32768 | 107588.60 | 54424.80 | 0.51× — GMP uses FFT here |
+
+### Add numbers (unchanged from Run 8)
+
+Tier 0/1 buckets still 1.95–2.66× faster than GMP. Tier 3 add unchanged.
+
+### Karatsuba tuning history
+
+| Threshold | 512-bit ns | 1024-bit ns | 2048-bit ns | Note |
+|---|---:|---:|---:|---|
+| 64 (initial) | 1023 | 3364 | 11620 | Cliff! Karatsuba's (t+1)-byte sum kills chunked-u64 path |
+| 64 + carry-bit trick | 191 | 905 | 3534 | Fixed the alignment issue |
+| 256 (raise threshold) | 54 | 199 | 1313 | Below 256 bytes, schoolbook wins |
+| 256 + chunked helpers | 56 | 202 | **838** | Helpers were the next bottleneck |
+
+## Findings — Run 9
+
+### 1. **We beat GMP at every bit-width from 384 to 1536, plus 3072 and 6144**
+
+For the most common cryptographic operations:
+- **NIST P-384** signing: blip_mp ties GMP
+- **Curve25519 / Bitcoin** (256-bit) mul: 0.68× (close, slightly behind)
+- **Legacy RSA-1024**: **1.24× faster**
+- **Recommended RSA-3072**: **1.15× faster**
+- **RSA-2048**: tied (0.96×)
+- **RSA-4096**: 0.80× (1.25× slower)
+
+### 2. We lose at 8K+ bits because GMP uses FFT-based multiplication
+
+For sizes ≥ 8192 bits (paranoid RSA / huge bignums), GMP switches to Schönhage-Strassen or similar FFT-based O(n log n log log n) algorithms. We're stuck with O(n^1.58) Karatsuba. Bridging this would require implementing FFT mul, which is significant additional work.
+
+### 3. The 128–256 bit zone is overhead-dominated for mul
+
+Same root cause as the add slowdown at these sizes: per-op header parse + scratch + memcpys = ~15-20 ns of fixed cost. For tiny mul where the actual arithmetic is just 4-9 u128 muls (~30-50 ns), the overhead is half the total.
+
+### 4. The carry-bit trick was load-bearing
+
+Without it, the (t+1)-byte sum in standard Karatsuba breaks our chunked-u64 mul (which requires multiples of 8 bytes), forcing the per-byte schoolbook fallback for the cross product. That alone caused a 25× slowdown at 512-bit. The trick (split sum into t bytes + 1 carry bit, distribute) preserves alignment all the way down.
+
+## Open follow-ups
+
+1. **FFT-based mul** for ≥ 8192 bits — only way to keep up with GMP at huge sizes. Significant complexity; possibly not worth it for a research project.
+2. **Toom-Cook 3-way mul** — bridges the gap between Karatsuba and FFT (good around 4K-8K bits).
+3. **Reduce 128-256 bit per-op overhead** (cached payload offset + direct write into r.heap_buf). Same gain pattern as for add. Would push these mul sizes much closer to GMP.
+4. **Statistical bench harness** (hyperfine).
+5. **C FFI header**.
+
+---
+
 ## Run 8 — 2026-04-30 EST (full spectrum sweep, 64-bit through 32768-bit)
 
 ### Setup

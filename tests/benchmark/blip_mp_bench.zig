@@ -97,6 +97,14 @@ pub fn main() !void {
 		const ns = try benchmarkMpAddLarge(allocator, lb);
 		std.debug.print("RESULT impl=Mp.add bucket={s} ns_per_op={d:.2}\n", .{ lb.name, ns });
 	}
+
+	// Multiplication sweep — same bucket sizes as add. Iterations scale down
+	// for large sizes (mul is O(n^1.58) Karatsuba / O(n^2) schoolbook).
+	std.debug.print("\n--- multiplication ---\n", .{});
+	for (LARGE_BUCKETS) |lb| {
+		const ns = try benchmarkMpMulLarge(allocator, lb);
+		std.debug.print("RESULT impl=Mp.mul bucket={s} ns_per_op={d:.2}\n", .{ lb.name, ns });
+	}
 }
 
 // Measures the current Mp.add with per-call alloc/free.
@@ -205,4 +213,49 @@ fn benchmarkMpAddLarge(allocator: std.mem.Allocator, lb: LargeBucket) !f64 {
 
 	std.mem.doNotOptimizeAway(result.bytes().ptr);
 	return @as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(ITERATIONS_LARGE));
+}
+
+// Mul-specific iteration count: scales down with bit width (mul is O(n^2)
+// or O(n^1.58); want bench to complete in reasonable time).
+fn mulIters(bits: usize) usize {
+	if (bits <= 256) return 500_000;
+	if (bits <= 1024) return 100_000;
+	if (bits <= 4096) return 20_000;
+	return 5_000; // 8K-bit and up
+}
+
+fn benchmarkMpMulLarge(allocator: std.mem.Allocator, lb: LargeBucket) !f64 {
+	const byte_count = lb.bits / 8;
+	var pool: [POOL_SIZE]blip_mp.Mp = undefined;
+	for (&pool, 0..) |*slot, i| {
+		slot.* = blip_mp.Mp.init(allocator);
+		const payload = try allocator.alloc(u8, byte_count);
+		defer allocator.free(payload);
+		var rng = std.Random.DefaultPrng.init(0xCAFE_BEEF + i);
+		const r = rng.random();
+		for (payload) |*p| p.* = r.int(u8);
+		payload[byte_count - 1] &= 0x7F;
+		const blip_buf = try allocator.alloc(u8, byte_count + 16);
+		defer allocator.free(blip_buf);
+		const hdr_len = try blip_mp.tier3.writeHeader(blip_buf, byte_count);
+		@memcpy(blip_buf[hdr_len .. hdr_len + byte_count], payload);
+		try slot.setBytes(blip_buf[0 .. hdr_len + byte_count]);
+	}
+	defer for (&pool) |*slot| slot.deinit();
+
+	var result = blip_mp.Mp.init(allocator);
+	defer result.deinit();
+
+	const iters = mulIters(lb.bits);
+	const start_ns = nowNs();
+	var i: usize = 0;
+	while (i < iters) : (i += 1) {
+		const a = &pool[i & (POOL_SIZE - 1)];
+		const b = &pool[(i + 1) & (POOL_SIZE - 1)];
+		try result.mul(a, b);
+	}
+	const elapsed_ns = nowNs() - start_ns;
+
+	std.mem.doNotOptimizeAway(result.bytes().ptr);
+	return @as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(iters));
 }
