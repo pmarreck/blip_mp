@@ -37,10 +37,24 @@ typedef struct {
 } LargeBucket;
 
 static const LargeBucket LARGE_BUCKETS[] = {
-	{"tier3 256-bit", 256},
-	{"tier3 1024-bit", 1024},
-	{"tier3 4096-bit", 4096},
+	{"128-bit",   128},
+	{"192-bit",   192},
+	{"256-bit",   256},
+	{"384-bit",   384},
+	{"512-bit",   512},
+	{"768-bit",   768},
+	{"1024-bit",  1024},
+	{"1536-bit",  1536},
+	{"2048-bit",  2048},
+	{"3072-bit",  3072},
+	{"4096-bit",  4096},
+	{"6144-bit",  6144},
+	{"8192-bit",  8192},
+	{"16384-bit", 16384},
+	{"32768-bit", 32768},
 };
+
+#define LARGEST_BYTES (32768 / 8)
 
 static double benchmark_bucket(const Bucket *bucket) {
 	mpz_t pool[POOL_SIZE];
@@ -76,19 +90,19 @@ static double benchmark_bucket(const Bucket *bucket) {
 static double benchmark_large_bucket(const LargeBucket *lb) {
 	mpz_t pool[POOL_SIZE];
 	const int byte_count = lb->bits / 8;
+	unsigned char *payload = (unsigned char *)malloc((size_t)byte_count);
+	if (!payload) { perror("malloc"); exit(1); }
 	for (int i = 0; i < POOL_SIZE; i++) {
 		mpz_init(pool[i]);
-		/* Same seeding as Zig side (xorshift-ish init from index). */
 		uint64_t s = 0xCAFEBEEFULL + (uint64_t)i;
-		unsigned char payload[4096 / 8];
 		for (int k = 0; k < byte_count; k++) {
 			s ^= s << 13; s ^= s >> 7; s ^= s << 17;
 			payload[k] = (unsigned char)(s & 0xFF);
 		}
 		payload[byte_count - 1] &= 0x7F; /* positive */
-		/* mpz_import: little-endian, byte_count bytes. order=-1 (LSB first), endian=0. */
-		mpz_import(pool[i], byte_count, -1, 1, 0, 0, payload);
+		mpz_import(pool[i], (size_t)byte_count, -1, 1, 0, 0, payload);
 	}
+	free(payload);
 
 	mpz_t result;
 	mpz_init(result);

@@ -263,7 +263,9 @@ fn tier3MulOp(r: *Mp, a: *const Mp, b: *const Mp) ArithError!void {
 	const r_pay_max = a_pay_len + b_pay_len + 1;
 	const out_need = r_pay_max + 10; // +10 for header
 
-	const STACK_BYTES = 1024;
+	// 4 KB per operand for mul (results doubles, so 8 KB result + out).
+	// Covers up to ~32768-bit operands without spilling to allocator.
+	const STACK_BYTES = 4096;
 	var stack_a: [STACK_BYTES]u8 = undefined;
 	var stack_b: [STACK_BYTES]u8 = undefined;
 	var stack_r: [STACK_BYTES * 2 + 1]u8 = undefined;
@@ -312,7 +314,11 @@ fn tier3Op(r: *Mp, a: *const Mp, b: *const Mp, comptime op: TierOp) ArithError!v
 	const scratch_need = max_payload + 1;
 	const out_need = max_payload + 1 + 10;
 
-	const STACK_BYTES = 1024;
+	// 8 KB stack scratch covers operands up to 65536-bit. Bigger spills to
+	// the allocator. Stack frames at this size are fine on macOS/Linux
+	// (default ~8 MB stack); per-op malloc was the dominant cost when this
+	// limit was lower (jumped 8192-bit from ~60 ns to ~113 ns in the sweep).
+	const STACK_BYTES = 8192;
 	var stack_scratch: [STACK_BYTES]u8 = undefined;
 	var stack_out: [STACK_BYTES]u8 = undefined;
 	var heap_scratch: ?[]u8 = null;
