@@ -29,7 +29,8 @@ fn nowNs() u64 {
 }
 
 const POOL_SIZE: usize = 256;
-const ITERATIONS: usize = 5_000_000;
+const ITERATIONS_SMALL: usize = 5_000_000;
+const ITERATIONS_LARGE: usize = 500_000; // big values: 10x fewer iterations
 
 const Bucket = struct {
 	name: []const u8,
@@ -38,11 +39,24 @@ const Bucket = struct {
 };
 
 const BUCKETS = [_]Bucket{
-	.{ .name = "immediate (0..127)", .min = 1, .max = 127 },
-	.{ .name = "L=1 (128..255)", .min = 128, .max = 255 },
-	.{ .name = "L=2 (256..32767)", .min = 1000, .max = 32000 },
-	.{ .name = "L=3 (32768..8M)", .min = 100_000, .max = 8_000_000 },
-	.{ .name = "L=4 (>8M..2G)", .min = 10_000_000, .max = 1_000_000_000 },
+	.{ .name = "L=0 (immediate, 0..127)", .min = 1, .max = 127 },
+	.{ .name = "L=2 (128..32K)", .min = 128, .max = 32000 },
+	.{ .name = "L=3 (~16-bit..~24-bit)", .min = 100_000, .max = 8_000_000 },
+	.{ .name = "L=4 (~32-bit)", .min = 10_000_000, .max = 1_000_000_000 },
+};
+
+// Large-value buckets: random-ish bit patterns of fixed width. Test the
+// tier-3 byte-direct path. These don't fit in i64 so they're encoded by
+// constructing the BLIP bytes directly.
+const LargeBucket = struct {
+	name: []const u8,
+	bits: usize, // bit-width of the value
+};
+
+const LARGE_BUCKETS = [_]LargeBucket{
+	.{ .name = "tier3 256-bit", .bits = 256 },
+	.{ .name = "tier3 1024-bit", .bits = 1024 },
+	.{ .name = "tier3 4096-bit", .bits = 4096 },
 };
 
 pub fn main() !void {
@@ -53,14 +67,20 @@ pub fn main() !void {
 	// libc malloc — apples-to-apples with GMP's default allocator.
 	const allocator = std.heap.c_allocator;
 
-	std.debug.print("=== blip_mp tier-0/1 add benchmark ===\n", .{});
-	std.debug.print("pool_size={d} iterations={d}\n\n", .{ POOL_SIZE, ITERATIONS });
+	std.debug.print("=== blip_mp add benchmark ===\n", .{});
+	std.debug.print("small_iters={d} large_iters={d}\n\n", .{ ITERATIONS_SMALL, ITERATIONS_LARGE });
 
 	for (BUCKETS) |bucket| {
 		const ns_mp = try benchmarkMpAdd(allocator, bucket);
 		std.debug.print("RESULT impl=Mp.add bucket={s} ns_per_op={d:.2}\n", .{ bucket.name, ns_mp });
 		const ns_raw = try benchmarkRawAdd(allocator, bucket);
 		std.debug.print("RESULT impl=raw bucket={s} ns_per_op={d:.2}\n", .{ bucket.name, ns_raw });
+	}
+
+	// Large-value buckets exercise the tier-3 byte-direct path.
+	for (LARGE_BUCKETS) |lb| {
+		const ns = try benchmarkMpAddLarge(allocator, lb);
+		std.debug.print("RESULT impl=Mp.add bucket={s} ns_per_op={d:.2}\n", .{ lb.name, ns });
 	}
 }
 
@@ -82,17 +102,15 @@ fn benchmarkMpAdd(allocator: std.mem.Allocator, bucket: Bucket) !f64 {
 
 	const start_ns = nowNs();
 	var i: usize = 0;
-	while (i < ITERATIONS) : (i += 1) {
+	while (i < ITERATIONS_SMALL) : (i += 1) {
 		const a = &pool[i & (POOL_SIZE - 1)];
 		const b = &pool[(i + 1) & (POOL_SIZE - 1)];
 		try result.add(a, b);
 	}
 	const elapsed_ns = nowNs() - start_ns;
 
-	// Sanity: prevent the optimizer from eliding the loop entirely.
 	std.mem.doNotOptimizeAway(result.bytes().ptr);
-
-	return @as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(ITERATIONS));
+	return @as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(ITERATIONS_SMALL));
 }
 
 // Zero-alloc tier-0/1 add: decode both operands, native i64 add, encode into
@@ -119,7 +137,7 @@ fn benchmarkRawAdd(allocator: std.mem.Allocator, bucket: Bucket) !f64 {
 
 	const start_ns = nowNs();
 	var i: usize = 0;
-	while (i < ITERATIONS) : (i += 1) {
+	while (i < ITERATIONS_SMALL) : (i += 1) {
 		const a_bytes = pool[i & (POOL_SIZE - 1)].bytes();
 		const b_bytes = pool[(i + 1) & (POOL_SIZE - 1)].bytes();
 		const a_dec = try enc.decodeI64(a_bytes);
@@ -132,6 +150,46 @@ fn benchmarkRawAdd(allocator: std.mem.Allocator, bucket: Bucket) !f64 {
 
 	std.mem.doNotOptimizeAway(&out_buf);
 	std.mem.doNotOptimizeAway(&written);
+	return @as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(ITERATIONS_SMALL));
+}
 
-	return @as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(ITERATIONS));
+// Large-value bench: build a pool of POOL_SIZE bigints with the given bit
+// width, time Mp.add (which routes to tier 3 internally).
+fn benchmarkMpAddLarge(allocator: std.mem.Allocator, lb: LargeBucket) !f64 {
+	const byte_count = lb.bits / 8;
+	// Each pool entry: a BLIP-encoded value with byte_count payload bytes.
+	// Keep the high bit of the high byte clear so all values are positive
+	// (avoids the sign-bit-extension edge in the high byte; we want a
+	// representative bignum size, not edge cases).
+	var pool: [POOL_SIZE]blip_mp.Mp = undefined;
+	for (&pool, 0..) |*slot, i| {
+		slot.* = blip_mp.Mp.init(allocator);
+		// Build payload: pseudo-random bytes seeded by index.
+		var payload: [4096 / 8 + 1]u8 = undefined; // big enough for largest bucket
+		var rng = std.Random.DefaultPrng.init(0xCAFE_BEEF + i);
+		const r = rng.random();
+		for (payload[0..byte_count]) |*p| p.* = r.int(u8);
+		payload[byte_count - 1] &= 0x7F; // ensure positive
+		// Encode: header for L=byte_count + payload.
+		var blip_buf: [4096 / 8 + 16]u8 = undefined;
+		const hdr_len = try blip_mp.tier3.writeHeader(&blip_buf, byte_count);
+		@memcpy(blip_buf[hdr_len .. hdr_len + byte_count], payload[0..byte_count]);
+		try slot.setBytes(blip_buf[0 .. hdr_len + byte_count]);
+	}
+	defer for (&pool) |*slot| slot.deinit();
+
+	var result = blip_mp.Mp.init(allocator);
+	defer result.deinit();
+
+	const start_ns = nowNs();
+	var i: usize = 0;
+	while (i < ITERATIONS_LARGE) : (i += 1) {
+		const a = &pool[i & (POOL_SIZE - 1)];
+		const b = &pool[(i + 1) & (POOL_SIZE - 1)];
+		try result.add(a, b);
+	}
+	const elapsed_ns = nowNs() - start_ns;
+
+	std.mem.doNotOptimizeAway(result.bytes().ptr);
+	return @as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(ITERATIONS_LARGE));
 }

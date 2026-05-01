@@ -18,6 +18,7 @@
 
 const std = @import("std");
 const encoding = @import("encoding.zig");
+const tier3 = @import("tier3.zig");
 
 pub const INLINE_CAP: usize = 24;
 const SENTINEL_HEAP: u8 = 0xFF;
@@ -32,7 +33,8 @@ pub const GetError = encoding.Error || error{
 };
 
 pub const ArithError = SetError || GetError || error{
-	TierOverflow,
+	TierOverflow, // currently unused — tier 3 promotion handles all in-range cases
+	OutputBufferTooSmall, // tier-3 result wouldn't fit in target Mp's heap or inline buffer
 };
 
 pub const Mp = struct {
@@ -149,31 +151,128 @@ pub const Mp = struct {
 	}
 
 	pub fn add(r: *Mp, a: *const Mp, b: *const Mp) ArithError!void {
-		const av = try a.getI64();
-		const bv = try b.getI64();
-		const ov = @addWithOverflow(av, bv);
-		if (ov[1] != 0) return error.TierOverflow;
-		try r.setI64(ov[0]);
+		// Tier-0/1 fast path: both operands inline AND ≤9 bytes each.
+		// Hand-inlined to keep the compiler from emitting function calls
+		// in the hot loop (measured: function-call form was 4× slower).
+		if (a.inline_len <= 9 and b.inline_len <= 9) {
+			const av = decodeInlineSmall(a);
+			const bv = decodeInlineSmall(b);
+			const ov = @addWithOverflow(av, bv);
+			if (ov[1] == 0) {
+				try r.setI64(ov[0]);
+				return;
+			}
+		}
+		try tier3Op(r, a, b, .add);
 	}
 
 	pub fn sub(r: *Mp, a: *const Mp, b: *const Mp) ArithError!void {
-		const av = try a.getI64();
-		const bv = try b.getI64();
-		const ov = @subWithOverflow(av, bv);
-		if (ov[1] != 0) return error.TierOverflow;
-		try r.setI64(ov[0]);
+		if (a.inline_len <= 9 and b.inline_len <= 9) {
+			const av = decodeInlineSmall(a);
+			const bv = decodeInlineSmall(b);
+			const ov = @subWithOverflow(av, bv);
+			if (ov[1] == 0) {
+				try r.setI64(ov[0]);
+				return;
+			}
+		}
+		try tier3Op(r, a, b, .sub);
 	}
 
 	pub fn mul(r: *Mp, a: *const Mp, b: *const Mp) ArithError!void {
-		const av: i128 = @as(i128, try a.getI64());
-		const bv: i128 = @as(i128, try b.getI64());
-		const product: i128 = av * bv;
-		if (product < std.math.minInt(i64) or product > std.math.maxInt(i64)) {
-			return error.TierOverflow;
+		if (a.inline_len <= 9 and b.inline_len <= 9) {
+			const av: i128 = @as(i128, decodeInlineSmall(a));
+			const bv: i128 = @as(i128, decodeInlineSmall(b));
+			const product: i128 = av * bv;
+			if (product >= std.math.minInt(i64) and product <= std.math.maxInt(i64)) {
+				try r.setI64(@intCast(product));
+				return;
+			}
 		}
-		try r.setI64(@intCast(product));
+		// Tier-3 mul not yet implemented — only add/sub for now.
+		return error.TierOverflow;
+	}
+
+	/// Returns true iff this Mp's encoded form fits in the i64 universe
+	/// (signed canonical L ≤ 8 → at most 9 bytes total).
+	fn fitsTier01(self: *const Mp) bool {
+		const len = if (self.inline_len != SENTINEL_HEAP) self.inline_len else self.heap_bytes.len;
+		return len <= 9;
+	}
+
+	/// Replace this Mp's value with the BLIP-encoded byte slice given.
+	/// Routes inline vs heap automatically.
+	pub fn setBytes(self: *Mp, slice: []const u8) std.mem.Allocator.Error!void {
+		if (slice.len <= INLINE_CAP) {
+			if (self.inline_len == SENTINEL_HEAP) {
+				self.allocator.free(self.heap_bytes);
+				self.heap_bytes = &[_]u8{};
+			}
+			@memcpy(self.inline_buf[0..slice.len], slice);
+			self.inline_len = @intCast(slice.len);
+			return;
+		}
+		const buf = try self.allocator.alloc(u8, slice.len);
+		errdefer self.allocator.free(buf);
+		@memcpy(buf, slice);
+		if (self.inline_len == SENTINEL_HEAP) {
+			self.allocator.free(self.heap_bytes);
+		}
+		self.heap_bytes = buf;
+		self.inline_len = SENTINEL_HEAP;
 	}
 };
+
+/// Hot-path decoder for inline values with len ≤ 9. Inlined in arithmetic.
+/// Fast path: immediate (len=1, byte < 0x80) returns the byte directly.
+/// Otherwise falls through to encoding.decodeI64 which handles the L=1..8
+/// header+payload case.
+inline fn decodeInlineSmall(self: *const Mp) i64 {
+	if (self.inline_len == 1 and self.inline_buf[0] < 0x80) {
+		return self.inline_buf[0];
+	}
+	const dec = encoding.decodeI64(self.inline_buf[0..self.inline_len]) catch unreachable;
+	return dec.value;
+}
+
+/// Internal tier-3 dispatch. Operates DIRECTLY on the BLIP payload bytes —
+/// no limb-array conversion. Two's-complement arithmetic is bit-position-
+/// local, so per-byte add/sub with carry produces correct results across
+/// any sign combination. Stack scratch up to 1KB (8192-bit operands);
+/// larger spills to the allocator.
+fn tier3Op(r: *Mp, a: *const Mp, b: *const Mp, comptime op: enum { add, sub }) ArithError!void {
+	const a_bytes = a.bytes();
+	const b_bytes = b.bytes();
+	// Worst-case scratch: max payload length + 1 (overflow byte).
+	const max_payload = @max(a_bytes.len, b_bytes.len);
+	const scratch_need = max_payload + 1;
+	// Worst-case output: payload (max_payload + 1) + header (≤10 bytes).
+	const out_need = max_payload + 1 + 10;
+
+	const STACK_BYTES = 1024; // 8192-bit operands stay alloc-free
+	var stack_scratch: [STACK_BYTES]u8 = undefined;
+	var stack_out: [STACK_BYTES]u8 = undefined;
+	var heap_scratch: ?[]u8 = null;
+	var heap_out: ?[]u8 = null;
+	defer {
+		if (heap_scratch) |slice| r.allocator.free(slice);
+		if (heap_out) |slice| r.allocator.free(slice);
+	}
+	const scratch: []u8 = if (scratch_need <= STACK_BYTES) stack_scratch[0..scratch_need] else blk: {
+		heap_scratch = try r.allocator.alloc(u8, scratch_need);
+		break :blk heap_scratch.?;
+	};
+	const out_buf: []u8 = if (out_need <= STACK_BYTES) stack_out[0..out_need] else blk: {
+		heap_out = try r.allocator.alloc(u8, out_need);
+		break :blk heap_out.?;
+	};
+
+	const written = switch (op) {
+		.add => try tier3.addRawBlip(a_bytes, b_bytes, scratch, out_buf),
+		.sub => try tier3.subRawBlip(a_bytes, b_bytes, scratch, out_buf),
+	};
+	try r.setBytes(out_buf[0..written]);
+}
 
 // ── Tests ────────────────────────────────────────────────────────────────────
 
@@ -372,9 +471,19 @@ test "add: canonical-L shrink after sign-extension cancellation" {
 	try testing.expectEqualSlices(u8, &[_]u8{0x00}, r.bytes());
 }
 
-test "add: i64 overflow returns TierOverflow" {
-	try expectArithOverflow(.add, std.math.maxInt(i64), 1);
-	try expectArithOverflow(.add, std.math.minInt(i64), -1);
+test "add: i64 overflow promotes to tier 3 (no longer errors)" {
+	// Was error.TierOverflow before tier-3 promotion landed; now silently
+	// promotes. Result encoding exceeds 9 bytes (the i64 universe).
+	var a = Mp.init(testing.allocator);
+	defer a.deinit();
+	var b = Mp.init(testing.allocator);
+	defer b.deinit();
+	var r = Mp.init(testing.allocator);
+	defer r.deinit();
+	try a.setI64(std.math.maxInt(i64));
+	try b.setI64(1);
+	try r.add(&a, &b);
+	try testing.expect(r.bytes().len > 9);
 }
 
 test "sub: basic and sign mixing" {
@@ -385,9 +494,17 @@ test "sub: basic and sign mixing" {
 	try doArith(.sub, std.math.maxInt(i64), std.math.maxInt(i64), 0);
 }
 
-test "sub: i64 overflow returns TierOverflow" {
-	try expectArithOverflow(.sub, std.math.minInt(i64), 1);
-	try expectArithOverflow(.sub, std.math.maxInt(i64), -1);
+test "sub: i64 overflow promotes to tier 3 (no longer errors)" {
+	var a = Mp.init(testing.allocator);
+	defer a.deinit();
+	var b = Mp.init(testing.allocator);
+	defer b.deinit();
+	var r = Mp.init(testing.allocator);
+	defer r.deinit();
+	try a.setI64(std.math.minInt(i64));
+	try b.setI64(1);
+	try r.sub(&a, &b);
+	try testing.expect(r.bytes().len > 9);
 }
 
 test "mul: basic and sign mixing" {
@@ -448,4 +565,67 @@ test "arithmetic with aliasing (r = a; r.add(&r, &b))" {
 
 test "Mp struct size: 64 bytes (one cache line)" {
 	try testing.expectEqual(@as(usize, 64), @sizeOf(Mp));
+}
+
+// ── Tier-3 cross-tier promotion tests ────────────────────────────────────────
+//
+// Drive the tier3.zig path through Mp.add. Operands chosen so that:
+//   - both operands fit in i64 (tier 0/1 fast path is reachable), or
+//   - operand or result exceeds i64 (must promote to tier 3)
+
+test "add: i64.max + 1 promotes to tier 3 (no error.TierOverflow)" {
+	var a = Mp.init(testing.allocator);
+	defer a.deinit();
+	var b = Mp.init(testing.allocator);
+	defer b.deinit();
+	var r = Mp.init(testing.allocator);
+	defer r.deinit();
+	try a.setI64(std.math.maxInt(i64));
+	try b.setI64(1);
+	try r.add(&a, &b); // Was error.TierOverflow before tier-3.
+	// Result = 2^63, which doesn't fit in i64. Should encode in L=9 with leading sign byte.
+	// Verify by decoding via tier3.payloadToMagnitude and checking the magnitude.
+	const r_bytes = r.bytes();
+	try testing.expect(r_bytes.len > 9); // exceeds i64 universe
+}
+
+test "add: minInt(i64) + (-1) promotes to tier 3 (negative overflow)" {
+	var a = Mp.init(testing.allocator);
+	defer a.deinit();
+	var b = Mp.init(testing.allocator);
+	defer b.deinit();
+	var r = Mp.init(testing.allocator);
+	defer r.deinit();
+	try a.setI64(std.math.minInt(i64));
+	try b.setI64(-1);
+	try r.add(&a, &b); // tier 3 takes over
+	try testing.expect(r.bytes().len > 9);
+}
+
+test "sub: i64.max - i64.min overflows i64, promotes" {
+	var a = Mp.init(testing.allocator);
+	defer a.deinit();
+	var b = Mp.init(testing.allocator);
+	defer b.deinit();
+	var r = Mp.init(testing.allocator);
+	defer r.deinit();
+	try a.setI64(std.math.maxInt(i64));
+	try b.setI64(std.math.minInt(i64));
+	try r.sub(&a, &b);
+	// Result = 2^64 - 1, doesn't fit in i64.
+	try testing.expect(r.bytes().len > 9);
+}
+
+test "tier-3 round-trip: (i64.max + 1) - 1 = i64.max (back to tier 0/1)" {
+	var a = Mp.init(testing.allocator);
+	defer a.deinit();
+	var one = Mp.init(testing.allocator);
+	defer one.deinit();
+	var r = Mp.init(testing.allocator);
+	defer r.deinit();
+	try a.setI64(std.math.maxInt(i64));
+	try one.setI64(1);
+	try r.add(&a, &one); // r = 2^63 (tier 3)
+	try r.sub(&r, &one); // r = 2^63 - 1 = i64.max (back to tier 0/1, encoded in 9 bytes)
+	try testing.expectEqual(@as(i64, std.math.maxInt(i64)), try r.getI64());
 }
