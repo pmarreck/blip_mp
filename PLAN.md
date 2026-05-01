@@ -32,14 +32,19 @@ Working order, smallest reviewable increments. Strict TDD where business logic e
 - *Resolved poke:* canonical-L is automatic since `setI64` always re-encodes from scratch. No separate canonicalization pass needed.
 - *New poke:* `Mp.add` decodes both operands every call (one `decodeI64` per arg). For a tight accumulator loop, that's wasted work — we keep re-decoding the same operand. A bench-justified optimization: cache the i64 inside `Mp` for tier-0/1 values so add can short-circuit. Wait for benchmark numbers before optimizing.
 
+## Milestone 1.5 — Cleanup (2026-04-30 EST)
+
+- [x] Drop the unsigned `encodeU64Canonical`/`decodeU64` and tests — Peter correctly noted the dual-encoder split was self-inflicted. The "where is the sign bit" issue dissolves once we commit fully to signed two's-complement (the bit is, by definition, the high bit of the high payload byte). Encoder still picks L based on signed range; that's the only signedness-aware decision. (2026-04-30 21:25 EST)
+
 ## Milestone 2 — Benchmark harness (proof or disproof)
 
-- [ ] Add `gmp` to `flake.nix` for the comparison build
-- [ ] `tests/benchmark/small_accumulator.zig` — sum of u32 array as bignum, 1M iterations
-- [ ] Same workload in C against GMP, compiled with the same `-O3` (or equivalent)
-- [ ] `./bm` runs both, reports ratio, asserts no `DEBUG BUILD` banner present
-- [ ] **Decision point**: if blip_mp ≥ 1.5× faster on this workload, proceed to Milestone 3. If not, document findings in `BENCHMARK_RESULTS.md` and stop.
-- *Curiosity poke:* allocator choice matters. GMP uses libc malloc by default; we should compare apples-to-apples (same allocator), or measure each with its native allocator and report both numbers.
+- [x] `gmp` already in `flake.nix` `buildInputs` (added during M0 in anticipation) (2026-04-30)
+- [ ] `tests/benchmark/small_accumulator.zig` — accumulator loop summing N values into a bignum
+- [ ] Same workload in C against GMP, same optimization level
+- [ ] `./bm` runs both, reports ratio, asserts no `DEBUG BUILD` banner
+- [ ] **Decision point**: if blip_mp ≥ 1.5× faster, proceed to M3. Otherwise document findings in `BENCHMARK_RESULTS.md` and stop.
+- *Curiosity poke:* allocator choice matters. GMP uses libc malloc by default; should compare apples-to-apples (same allocator), or measure each with its native allocator and report both numbers.
+- *Curiosity poke:* my current `Mp.add` decodes both operands every call. For a tight accumulator loop, that's wasted work. The bench may surface this as a bottleneck. Don't pre-optimize — let the numbers speak.
 
 ## Milestone 3 — Tier 3 (only if Milestone 2 succeeds)
 
