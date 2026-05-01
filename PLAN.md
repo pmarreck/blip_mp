@@ -63,8 +63,8 @@ Hypothesis validated for tier 0/1; M3 extended to large-number arithmetic so bli
 
 - [x] **Heap buffer reuse** in `Mp.setBytes`/`setI64` (2026-04-30 22:55 EST) — Run 5: tier-3 256-bit gap halved 6.4× → 3.85×.
 - [x] **Sign-extended inline tail** in `Mp` (2026-04-30 23:15 EST) — store the full i64 in `inline_buf[1..9]` regardless of canonical L; `decodeInlineSmall` reads via single u64 load. **HYPOTHESIS #1 FULLY VALIDATED:** Mp.add now beats GMP by 1.7-2.4× across the ENTIRE i64 universe (L=0 through L=4). L=2..L=4 went from 0.5× (losing) to 1.7-1.8× (winning). Run 6 in BENCHMARK_RESULTS.md.
-- [ ] **Tier 3 mul** (byte-direct multiplication, schoolbook for now, Karatsuba if needed).
-- [ ] **Tier 3 SIMD** — `@Vector(N, u8)` or LLVM IR to close the large-size gap (currently 3-4× behind GMP at 256-4096 bits).
+- [x] **Tier 3 mul** (2026-04-30 23:35 EST) — byte-direct schoolbook with sign-magnitude dispatch. `Mp.mul` no longer returns `error.TierOverflow`; routes to tier-3 path automatically.
+- [x] **Tier 3 wide-int chunking** (2026-04-30 23:50 EST) — added u128 → u256 → u512 chunked add inner loops (cascade with u64 fallback). Halves iterations at each step. **4096-bit Mp.add: 96 → 41 ns (2.34× faster), now only 1.32× slower than GMP**; 1024-bit: 29 → 18 ns (1.62×), 2.13× slower than GMP. 256-bit unchanged at ~17 ns due to constant per-op overhead (header parse + 2 memcpys); the inline-tail fast path doesn't extend to tier 3 yet.
 - [ ] **Statistical bench harness** — `hyperfine` integration + N-run aggregation; current numbers are 3-run medians by hand.
 - [ ] Bench bucket label cleanup (L=1 was actually L=2; legacy from Run 1).
 - [ ] C FFI header (`include/blip_mp.h`) for downstream C consumers.

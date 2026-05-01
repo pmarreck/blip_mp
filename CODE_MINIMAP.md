@@ -42,11 +42,13 @@ Per-file index of important code locations. Updated as files are added.
   - `Header { L, endian, bytes_consumed }` — header descriptor
   - `parseHeader` / `writeHeader` — supports L >= 32 with continuation varint
   - `signExtByte(payload)` — returns 0x00 or 0xFF based on payload's high bit
-  - `addPayloads(a, b, n, out)` — two's-complement byte-direct add. Inner loop: 8-byte u64 chunked reads via `readInt`/`writeInt` for the fast region, per-byte for boundary/tail. Returns `n` or `n+1` (extra byte holds sign extension if same-sign overflow).
+  - `addPayloads(a, b, n, out)` — two's-complement byte-direct add. **Cascading inner loop**: u512 chunks (64 bytes) → u256 (32) → u128 (16) → u64 (8) → per-byte tail. Each chunk size compiles to a sequence of ADCS instructions on aarch64. Returns `n` or `n+1` (extra byte for same-sign overflow).
   - `subPayloads(a, b, n, out)` — same shape with borrow propagation; opposite-sign-overflow detection.
-  - `canonicalLen(payload)` — trims redundant high sign-extension bytes (0x00 for positives / 0xFF for negatives) preserving sign.
+  - `canonicalLen(payload)` — trims redundant high sign-extension bytes (0x00 for positives / 0xFF for negatives) preserving sign. Fast path: returns immediately when high byte is neither 0x00 nor 0xFF.
   - `payloadOf(blip)` — returns the payload slice from a BLIP-encoded value.
-  - `addRawBlip` / `subRawBlip` / `writeBlip` — high-level wrappers over the above.
+  - `negateInPlace(payload)` — two's-complement negation `~payload + 1` for sign-magnitude conversion (used by mul).
+  - `mulMagnitudes(a, b, r)` — schoolbook unsigned multiply on LE byte arrays. r[0..a.len + b.len].
+  - `addRawBlip` / `subRawBlip` / `mulRawBlip` / `writeBlip` — high-level wrappers over the above.
 
 ## tests/
 
