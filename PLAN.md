@@ -61,14 +61,15 @@ Hypothesis validated for tier 0/1; M3 extended to large-number arithmetic so bli
 
 ## Milestone 4 — Optional follow-ups (ranked by ROI)
 
-- [x] **Heap buffer reuse** in `Mp.setBytes`/`setI64` (2026-04-30 22:55 EST) — restructured to {heap_buf, heap_used}; ensureHeapCapacity reuses when cap suffices, doubles on grow. Tier-3 256-bit: 30 → 18 ns (40% faster); gap to GMP halved from 6.4× to 3.85×. Per Run 5 in BENCHMARK_RESULTS.md.
-- [ ] **Comptime fast path** for L=2..L=4 in `Mp.setI64` (single-store paths). Should land `Mp.add` ≈ `raw` (~3-4 ns) across all small buckets, putting us at parity-or-better with GMP. ~1 hr.
+- [x] **Heap buffer reuse** in `Mp.setBytes`/`setI64` (2026-04-30 22:55 EST) — Run 5: tier-3 256-bit gap halved 6.4× → 3.85×.
+- [x] **Sign-extended inline tail** in `Mp` (2026-04-30 23:15 EST) — store the full i64 in `inline_buf[1..9]` regardless of canonical L; `decodeInlineSmall` reads via single u64 load. **HYPOTHESIS #1 FULLY VALIDATED:** Mp.add now beats GMP by 1.7-2.4× across the ENTIRE i64 universe (L=0 through L=4). L=2..L=4 went from 0.5× (losing) to 1.7-1.8× (winning). Run 6 in BENCHMARK_RESULTS.md.
 - [ ] **Tier 3 mul** (byte-direct multiplication, schoolbook for now, Karatsuba if needed).
-- [ ] **Statistical bench harness** — `hyperfine` integration + N-run aggregation; single-run numbers are noisy.
-- [ ] **Tier 3 inner-loop SIMD** — investigate whether Zig's `@Vector` or LLVM IR can match GMP's hand-tuned aarch64 asm. Lower priority.
+- [ ] **Tier 3 SIMD** — `@Vector(N, u8)` or LLVM IR to close the large-size gap (currently 3-4× behind GMP at 256-4096 bits).
+- [ ] **Statistical bench harness** — `hyperfine` integration + N-run aggregation; current numbers are 3-run medians by hand.
 - [ ] Bench bucket label cleanup (L=1 was actually L=2; legacy from Run 1).
 - [ ] C FFI header (`include/blip_mp.h`) for downstream C consumers.
 - [ ] BLIP wire interop: a separate "unsigned BLIP" mode for round-tripping with strict-spec BLIP producers.
+- [ ] Cross-platform validation — current numbers are aarch64-darwin; verify x86_64 Linux/Windows.
 
 ## Optional pre-M3 micro-optimization (close the Mp.add → raw gap)
 
