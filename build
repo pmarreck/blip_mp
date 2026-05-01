@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# Top-level build driver per CLAUDE.md conventions.
+# Uses `nix build` for sandboxed/deterministic native builds.
+# Avoid `nix develop -c zig build` for native — Zig 0.15.2's libSystem stubs
+# don't cover macOS 26.x and produce undefined-symbol errors.
+set -u
+
+mode="release"
+for arg in "$@"; do
+	case "$arg" in
+		--debug) mode="debug" ;;
+		--test)  mode="test"  ;;
+		-h|--help)
+			printf 'Usage: ./build [--debug|--test]\n'
+			printf '  (default) ReleaseFast native build via nix\n'
+			printf '  --debug   Debug build via nix develop -c zig build (cross-compile / sysroot path)\n'
+			printf '  --test    Build and run tests\n'
+			exit 0
+			;;
+		*)
+			printf 'Unknown arg: %s\n' "$arg" >&2
+			exit 64
+			;;
+	esac
+done
+
+case "$mode" in
+	release)
+		nix build .# --print-build-logs
+		rc=$?
+		if [ "$rc" -ne 0 ]; then exit "$rc"; fi
+		mkdir -p zig-out/bin zig-out/lib
+		# Copy resulting artifacts out of the nix store result for local use.
+		if [ -e result/lib/libblip_mp.a ]; then
+			cp -f result/lib/libblip_mp.a zig-out/lib/
+		fi
+		;;
+	debug)
+		nix develop -c zig build -Doptimize=Debug
+		;;
+	test)
+		exec ./test
+		;;
+esac

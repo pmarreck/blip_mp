@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# Top-level test runner. Accumulates subtest exit codes; returns nonzero
+# if any failed. Per CLAUDE.md: never `set -e` here — that masks
+# expected-failure assertions inside test runners.
+set -u
+
+fail_count=0
+
+run() {
+	local label="$1"
+	shift
+	printf '\n=== %s ===\n' "$label"
+	if "$@"; then
+		printf '[PASS] %s\n' "$label"
+	else
+		printf '[FAIL] %s (exit %d)\n' "$label" $?
+		fail_count=$((fail_count + 1))
+	fi
+}
+
+# Unit tests — Zig core, run via Nix sandbox for determinism.
+run "zig unit tests (nix)" nix build ".#checks.$(nix eval --raw --impure --expr 'builtins.currentSystem').test" --print-build-logs
+
+# CLI tests come later when there's a CLI. Add them here:
+# run "cli tests" tests/cli/run_all.sh
+
+if [ "$fail_count" -eq 0 ]; then
+	printf '\nAll test groups passed.\n'
+	exit 0
+else
+	printf '\n%d test group(s) failed.\n' "$fail_count" >&2
+	exit 1
+fi

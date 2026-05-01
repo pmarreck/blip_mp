@@ -1,0 +1,15 @@
+# Agent briefing files (per CLAUDE.md: do not commit)
+AGENTS.md
+CLAUDE.md
+ZIG_RECENT_API_CHANGES_2025.md
+
+# Nix build output symlinks
+result
+result-*
+
+# Zig build output
+zig-out/
+.zig-cache/
+
+# macOS noise
+.DS_Store
