@@ -90,7 +90,7 @@ fn benchmarkMpAdd(allocator: std.mem.Allocator, bucket: Bucket) !f64 {
 	const elapsed_ns = nowNs() - start_ns;
 
 	// Sanity: prevent the optimizer from eliding the loop entirely.
-	std.mem.doNotOptimizeAway(result.bytes.ptr);
+	std.mem.doNotOptimizeAway(result.bytes().ptr);
 
 	return @as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(ITERATIONS));
 }
@@ -120,8 +120,8 @@ fn benchmarkRawAdd(allocator: std.mem.Allocator, bucket: Bucket) !f64 {
 	const start_ns = nowNs();
 	var i: usize = 0;
 	while (i < ITERATIONS) : (i += 1) {
-		const a_bytes = pool[i & (POOL_SIZE - 1)].bytes;
-		const b_bytes = pool[(i + 1) & (POOL_SIZE - 1)].bytes;
+		const a_bytes = pool[i & (POOL_SIZE - 1)].bytes();
+		const b_bytes = pool[(i + 1) & (POOL_SIZE - 1)].bytes();
 		const a_dec = try enc.decodeI64(a_bytes);
 		const b_dec = try enc.decodeI64(b_bytes);
 		const ov = @addWithOverflow(a_dec.value, b_dec.value);
