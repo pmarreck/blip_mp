@@ -45,19 +45,34 @@ const BUCKETS = [_]Bucket{
 	.{ .name = "L=4 (~32-bit)", .min = 10_000_000, .max = 1_000_000_000 },
 };
 
-// Large-value buckets: random-ish bit patterns of fixed width. Test the
-// tier-3 byte-direct path. These don't fit in i64 so they're encoded by
-// constructing the BLIP bytes directly.
+// Large-value buckets: random-ish bit patterns of fixed width. Sweep across
+// the spectrum from 128-bit (just past the inline boundary) to 32768-bit
+// (paranoid RSA). The 128/192-bit cases test the inline-but-tier-3 path
+// (encoded value still fits in INLINE_CAP=24 bytes); larger sizes go to heap.
 const LargeBucket = struct {
 	name: []const u8,
 	bits: usize, // bit-width of the value
 };
 
 const LARGE_BUCKETS = [_]LargeBucket{
-	.{ .name = "tier3 256-bit", .bits = 256 },
-	.{ .name = "tier3 1024-bit", .bits = 1024 },
-	.{ .name = "tier3 4096-bit", .bits = 4096 },
+	.{ .name = "128-bit",   .bits = 128 },
+	.{ .name = "192-bit",   .bits = 192 },
+	.{ .name = "256-bit",   .bits = 256 },
+	.{ .name = "384-bit",   .bits = 384 },
+	.{ .name = "512-bit",   .bits = 512 },
+	.{ .name = "768-bit",   .bits = 768 },
+	.{ .name = "1024-bit",  .bits = 1024 },
+	.{ .name = "1536-bit",  .bits = 1536 },
+	.{ .name = "2048-bit",  .bits = 2048 },
+	.{ .name = "3072-bit",  .bits = 3072 },
+	.{ .name = "4096-bit",  .bits = 4096 },
+	.{ .name = "6144-bit",  .bits = 6144 },
+	.{ .name = "8192-bit",  .bits = 8192 },
+	.{ .name = "16384-bit", .bits = 16384 },
+	.{ .name = "32768-bit", .bits = 32768 },
 };
+
+const LARGEST_BYTES: usize = 32768 / 8; // 4096 bytes
 
 pub fn main() !void {
 	if (comptime @import("builtin").mode == .Debug) {
@@ -154,26 +169,24 @@ fn benchmarkRawAdd(allocator: std.mem.Allocator, bucket: Bucket) !f64 {
 }
 
 // Large-value bench: build a pool of POOL_SIZE bigints with the given bit
-// width, time Mp.add (which routes to tier 3 internally).
+// width, time Mp.add (which routes to tier 3 internally for sizes > i64).
 fn benchmarkMpAddLarge(allocator: std.mem.Allocator, lb: LargeBucket) !f64 {
 	const byte_count = lb.bits / 8;
-	// Each pool entry: a BLIP-encoded value with byte_count payload bytes.
-	// Keep the high bit of the high byte clear so all values are positive
-	// (avoids the sign-bit-extension edge in the high byte; we want a
-	// representative bignum size, not edge cases).
 	var pool: [POOL_SIZE]blip_mp.Mp = undefined;
 	for (&pool, 0..) |*slot, i| {
 		slot.* = blip_mp.Mp.init(allocator);
-		// Build payload: pseudo-random bytes seeded by index.
-		var payload: [4096 / 8 + 1]u8 = undefined; // big enough for largest bucket
+		// Build payload from heap-allocated buffer (avoids huge stack frames
+		// for large bit widths).
+		const payload = try allocator.alloc(u8, byte_count);
+		defer allocator.free(payload);
 		var rng = std.Random.DefaultPrng.init(0xCAFE_BEEF + i);
 		const r = rng.random();
-		for (payload[0..byte_count]) |*p| p.* = r.int(u8);
+		for (payload) |*p| p.* = r.int(u8);
 		payload[byte_count - 1] &= 0x7F; // ensure positive
-		// Encode: header for L=byte_count + payload.
-		var blip_buf: [4096 / 8 + 16]u8 = undefined;
-		const hdr_len = try blip_mp.tier3.writeHeader(&blip_buf, byte_count);
-		@memcpy(blip_buf[hdr_len .. hdr_len + byte_count], payload[0..byte_count]);
+		const blip_buf = try allocator.alloc(u8, byte_count + 16);
+		defer allocator.free(blip_buf);
+		const hdr_len = try blip_mp.tier3.writeHeader(blip_buf, byte_count);
+		@memcpy(blip_buf[hdr_len .. hdr_len + byte_count], payload);
 		try slot.setBytes(blip_buf[0 .. hdr_len + byte_count]);
 	}
 	defer for (&pool) |*slot| slot.deinit();
