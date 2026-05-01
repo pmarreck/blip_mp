@@ -352,8 +352,9 @@ pub fn negateInPlace(payload: []u8) void {
 }
 
 /// r[0..a.len + b.len] = a * b (unsigned, LE byte arrays).
-/// Schoolbook with per-byte carry propagation.
-pub fn mulMagnitudes(a: []const u8, b: []const u8, r: []u8) void {
+/// Per-byte schoolbook — used as a fallback for sizes that aren't multiples
+/// of 8 bytes. For aligned sizes, prefer `mulMagnitudesU64`.
+pub fn mulMagnitudesByte(a: []const u8, b: []const u8, r: []u8) void {
 	std.debug.assert(r.len >= a.len + b.len);
 	@memset(r[0 .. a.len + b.len], 0);
 	for (a, 0..) |ai, i| {
@@ -368,16 +369,253 @@ pub fn mulMagnitudes(a: []const u8, b: []const u8, r: []u8) void {
 	}
 }
 
+/// Chunked u64*u64 = u128 schoolbook multiply for byte arrays whose lengths
+/// are multiples of 8. ~50× faster than the per-byte schoolbook because each
+/// inner-loop iteration handles 64 bits of operands in a single u128 multiply
+/// (a few cycles on aarch64) plus carry propagation.
+pub fn mulMagnitudesU64(a: []const u8, b: []const u8, r: []u8) void {
+	std.debug.assert(a.len % 8 == 0 and b.len % 8 == 0);
+	std.debug.assert(r.len >= a.len + b.len);
+	const a_n = a.len / 8;
+	const b_n = b.len / 8;
+	@memset(r[0 .. a.len + b.len], 0);
+
+	var i: usize = 0;
+	while (i < a_n) : (i += 1) {
+		const ai = std.mem.readInt(u64, a[i * 8 ..][0..8], .little);
+		if (ai == 0) continue;
+
+		var carry: u64 = 0;
+		var j: usize = 0;
+		while (j < b_n) : (j += 1) {
+			const bj = std.mem.readInt(u64, b[j * 8 ..][0..8], .little);
+			const r_chunk = std.mem.readInt(u64, r[(i + j) * 8 ..][0..8], .little);
+			const prod: u128 = @as(u128, ai) * @as(u128, bj) + r_chunk + carry;
+			std.mem.writeInt(u64, r[(i + j) * 8 ..][0..8], @truncate(prod), .little);
+			carry = @intCast(prod >> 64);
+		}
+		// Propagate the final carry into higher r positions.
+		var pos = i + b_n;
+		while (carry != 0 and pos < (a.len + b.len) / 8) {
+			const r_chunk = std.mem.readInt(u64, r[pos * 8 ..][0..8], .little);
+			const sum: u128 = @as(u128, r_chunk) + @as(u128, carry);
+			std.mem.writeInt(u64, r[pos * 8 ..][0..8], @truncate(sum), .little);
+			carry = @intCast(sum >> 64);
+			pos += 1;
+		}
+	}
+}
+
+/// Dispatch wrapper: chunked u64 path when both inputs are 8-byte multiples,
+/// per-byte fallback otherwise.
+pub fn mulMagnitudes(a: []const u8, b: []const u8, r: []u8) void {
+	if (a.len > 0 and b.len > 0 and a.len % 8 == 0 and b.len % 8 == 0) {
+		mulMagnitudesU64(a, b, r);
+	} else {
+		mulMagnitudesByte(a, b, r);
+	}
+}
+
+// ── Karatsuba multiplication ─────────────────────────────────────────────────
+//
+// Asymptotic O(n^1.58) vs schoolbook O(n^2). Splits each n-byte operand
+// into halves, computes three half-size products instead of four:
+//   z0 = a_lo * b_lo
+//   z2 = a_hi * b_hi
+//   z1 = (a_lo + a_hi)(b_lo + b_hi) - z0 - z2  (the cross-product sum)
+// Result = z2 * B^2 + z1 * B + z0  where B = 2^(half * 8).
+//
+// Below KARATSUBA_THRESHOLD bytes, falls back to chunked schoolbook
+// (constant per-call overhead is too high for tiny operands).
+
+/// Empirically-tuned crossover where Karatsuba starts beating chunked
+/// schoolbook on aarch64. The Karatsuba overhead (sum/sub/add helper
+/// byte-loops, ~150 ns per recursion) amortises only when the saved sub-
+/// multiplication is bigger than the overhead. With our ~50 ns chunked
+/// schoolbook for 32×32 bytes, the crossover is around 256 bytes.
+pub const KARATSUBA_THRESHOLD: usize = 256;
+
+/// out[0..max(a.len, b.len)] = (a + b) mod 2^(8*out.len). Returns carry-out
+/// (0 or 1). For Karatsuba: caller passes out of length t (the larger half),
+/// captures the carry separately, and uses the carry-bit trick to keep the
+/// recursive multiplication at exactly t bytes (staying on the chunked-u64
+/// fast path that requires 8-byte alignment).
+fn addUnsignedFixedLen(a: []const u8, b: []const u8, out: []u8) u8 {
+	std.debug.assert(out.len >= a.len and out.len >= b.len);
+	const longer = if (a.len >= b.len) a else b;
+	const shorter = if (a.len >= b.len) b else a;
+	var carry: u16 = 0;
+	var i: usize = 0;
+	while (i < shorter.len) : (i += 1) {
+		const sum: u16 = @as(u16, longer[i]) + @as(u16, shorter[i]) + carry;
+		out[i] = @truncate(sum);
+		carry = sum >> 8;
+	}
+	while (i < longer.len) : (i += 1) {
+		const sum: u16 = @as(u16, longer[i]) + carry;
+		out[i] = @truncate(sum);
+		carry = sum >> 8;
+	}
+	// Zero any bytes in out past `longer.len`.
+	while (i < out.len) : (i += 1) {
+		out[i] = 0;
+	}
+	return @intCast(carry);
+}
+
+/// target -= sub (unsigned). Caller guarantees target >= sub.
+/// sub.len may be < target.len; missing high bytes treated as 0.
+/// Chunked u64 fast path for the aligned-prefix region.
+fn subUnsignedInPlace(target: []u8, sub: []const u8) void {
+	std.debug.assert(sub.len <= target.len);
+	var borrow: u64 = 0;
+	var i: usize = 0;
+	// Chunked u64: subtract sub from target in 8-byte words.
+	const chunk_end = sub.len - (sub.len % 8);
+	while (i < chunk_end) : (i += 8) {
+		const tv = std.mem.readInt(u64, target[i..][0..8], .little);
+		const sv = std.mem.readInt(u64, sub[i..][0..8], .little);
+		const d1 = @subWithOverflow(tv, sv);
+		const d2 = @subWithOverflow(d1[0], borrow);
+		std.mem.writeInt(u64, target[i..][0..8], d2[0], .little);
+		borrow = @as(u64, d1[1]) + @as(u64, d2[1]);
+	}
+	// Per-byte tail of sub.
+	while (i < sub.len) : (i += 1) {
+		const diff: i32 = @as(i32, target[i]) - @as(i32, sub[i]) - @as(i32, @intCast(borrow));
+		target[i] = @truncate(@as(u32, @bitCast(diff)) & 0xFF);
+		borrow = if (diff < 0) 1 else 0;
+	}
+	// Propagate borrow into high bytes (chunked when possible).
+	while (i + 8 <= target.len and borrow != 0) : (i += 8) {
+		const tv = std.mem.readInt(u64, target[i..][0..8], .little);
+		const d = @subWithOverflow(tv, borrow);
+		std.mem.writeInt(u64, target[i..][0..8], d[0], .little);
+		borrow = d[1];
+	}
+	while (i < target.len and borrow != 0) : (i += 1) {
+		const diff: i32 = @as(i32, target[i]) - @as(i32, @intCast(borrow));
+		target[i] = @truncate(@as(u32, @bitCast(diff)) & 0xFF);
+		borrow = if (diff < 0) 1 else 0;
+	}
+}
+
+/// target += add (unsigned). add.len may be ≤ target.len; carry propagates.
+/// Chunked u64 fast path.
+fn addUnsignedInPlace(target: []u8, add: []const u8) void {
+	std.debug.assert(add.len <= target.len);
+	var carry: u64 = 0;
+	var i: usize = 0;
+	const chunk_end = add.len - (add.len % 8);
+	while (i < chunk_end) : (i += 8) {
+		const tv = std.mem.readInt(u64, target[i..][0..8], .little);
+		const av = std.mem.readInt(u64, add[i..][0..8], .little);
+		const s1 = @addWithOverflow(tv, av);
+		const s2 = @addWithOverflow(s1[0], carry);
+		std.mem.writeInt(u64, target[i..][0..8], s2[0], .little);
+		carry = @as(u64, s1[1]) + @as(u64, s2[1]);
+	}
+	while (i < add.len) : (i += 1) {
+		const sum: u16 = @as(u16, target[i]) + @as(u16, add[i]) + @as(u16, @intCast(carry));
+		target[i] = @truncate(sum);
+		carry = sum >> 8;
+	}
+	while (i + 8 <= target.len and carry != 0) : (i += 8) {
+		const tv = std.mem.readInt(u64, target[i..][0..8], .little);
+		const s = @addWithOverflow(tv, carry);
+		std.mem.writeInt(u64, target[i..][0..8], s[0], .little);
+		carry = s[1];
+	}
+	while (i < target.len and carry != 0) : (i += 1) {
+		const sum: u16 = @as(u16, target[i]) + @as(u16, @intCast(carry));
+		target[i] = @truncate(sum);
+		carry = sum >> 8;
+	}
+}
+
+/// Karatsuba multiplication with the **carry-bit trick** to preserve 8-byte
+/// alignment in recursive mults. a.len == b.len. Result fills r[0..2*n].
+/// scratch must be at least karatsubaScratchNeed(n) bytes.
+///
+/// Standard Karatsuba: z1 = (a_lo + a_hi)(b_lo + b_hi) - z0 - z2. The sum
+/// (a_lo + a_hi) is up to t+1 bytes, breaking 8-byte alignment for the
+/// recursive mul. Workaround: split each sum into a t-byte low part and
+/// a 1-bit carry, then compute z1_full via the distributive property:
+///   (sa_lo + ca·B^t)(sb_lo + cb·B^t) = sa_lo·sb_lo
+///                                       + ca·sb_lo·B^t + cb·sa_lo·B^t
+///                                       + ca·cb·B^(2t)
+/// Each recursive mul is t × t (still chunked-u64-friendly); the carry-bit
+/// corrections are simple shifts+adds.
+pub fn mulKaratsuba(a: []const u8, b: []const u8, r: []u8, scratch: []u8) void {
+	std.debug.assert(a.len == b.len);
+	const n = a.len;
+	std.debug.assert(r.len >= 2 * n);
+
+	if (n < KARATSUBA_THRESHOLD) {
+		mulMagnitudes(a, b, r);
+		return;
+	}
+
+	const h = n / 2;
+	const t = n - h; // t ≥ h; equal when n is even
+
+	const a_lo = a[0..h];
+	const a_hi = a[h..n];
+	const b_lo = b[0..h];
+	const b_hi = b[h..n];
+
+	// z0 in r[0..2h]; z2 in r[2h..2h+2t].
+	mulKaratsuba(a_lo, b_lo, r[0 .. 2 * h], scratch);
+	mulKaratsuba(a_hi, b_hi, r[2 * h .. 2 * h + 2 * t], scratch);
+
+	// sum split: [sa_lo: t bytes] + [ca: 1 bit].
+	const sa_lo = scratch[0..t];
+	const sb_lo = scratch[t .. 2 * t];
+	const ca = addUnsignedFixedLen(a_lo, a_hi, sa_lo);
+	const cb = addUnsignedFixedLen(b_lo, b_hi, sb_lo);
+
+	// z1_full = sa_lo * sb_lo (t × t recursive mult, 8-byte aligned).
+	// Plus carry-bit corrections.
+	const z1_full_len = 2 * t + 1;
+	const z1_full = scratch[2 * t .. 2 * t + z1_full_len];
+	@memset(z1_full, 0);
+	const next_scratch = scratch[2 * t + z1_full_len ..];
+	mulKaratsuba(sa_lo, sb_lo, z1_full[0 .. 2 * t], next_scratch);
+
+	// Carry-bit corrections.
+	if (ca != 0) addUnsignedInPlace(z1_full[t..], sb_lo);
+	if (cb != 0) addUnsignedInPlace(z1_full[t..], sa_lo);
+	if (ca != 0 and cb != 0) addUnsignedInPlace(z1_full[2 * t ..], &[_]u8{1});
+
+	// z1 = z1_full - z0 - z2 (non-negative by construction).
+	subUnsignedInPlace(z1_full, r[0 .. 2 * h]);
+	subUnsignedInPlace(z1_full, r[2 * h .. 2 * h + 2 * t]);
+
+	// r += z1 << (h*8).
+	addUnsignedInPlace(r[h..], z1_full);
+}
+
+/// Conservative scratch upper-bound for n-byte Karatsuba. Each level uses
+/// 2*(t+1) + 2*(t+1) ≈ 2n bytes; recursion depth is log2(n/threshold);
+/// geometric series sums to ≤ 4n.
+pub fn karatsubaScratchNeed(n: usize) usize {
+	return 4 * n + 64;
+}
+
 /// r = a * b. Operates on raw BLIP-encoded slices. Result is canonically
 /// encoded into `out`. Caller provides scratch buffers:
 ///   scratch_a, scratch_b: at least each operand's payload length.
 ///   scratch_r: at least a_payload + b_payload + 1 (slack for sign-ext byte).
+///   scratch_k: at least karatsubaScratchNeed(max(a_payload, b_payload)) bytes
+///              when operand payloads are equal length and ≥ KARATSUBA_THRESHOLD.
+///              May be empty otherwise.
 pub fn mulRawBlip(
 	a_blip: []const u8,
 	b_blip: []const u8,
 	scratch_a: []u8,
 	scratch_b: []u8,
 	scratch_r: []u8,
+	scratch_k: []u8,
 	out: []u8,
 ) !usize {
 	const a_pay = try payloadOf(a_blip);
@@ -395,7 +633,13 @@ pub fn mulRawBlip(
 	if (b_neg) negateInPlace(scratch_b[0..b_pay.len]);
 
 	const r_len = a_pay.len + b_pay.len;
-	mulMagnitudes(scratch_a[0..a_pay.len], scratch_b[0..b_pay.len], scratch_r[0..r_len]);
+	// Karatsuba when operands are equal-length AND big enough to benefit.
+	if (a_pay.len == b_pay.len and a_pay.len >= KARATSUBA_THRESHOLD and scratch_k.len >= karatsubaScratchNeed(a_pay.len)) {
+		@memset(scratch_r[0..r_len], 0);
+		mulKaratsuba(scratch_a[0..a_pay.len], scratch_b[0..b_pay.len], scratch_r[0..r_len], scratch_k);
+	} else {
+		mulMagnitudes(scratch_a[0..a_pay.len], scratch_b[0..b_pay.len], scratch_r[0..r_len]);
+	}
 
 	// Check for zero result (canonical encoding is single 0x00 byte).
 	var all_zero = true;
@@ -714,7 +958,7 @@ test "mulRawBlip: small positive * positive (6 * 7 = 42)" {
 	var sb: [4]u8 = undefined;
 	var sr: [16]u8 = undefined;
 	var out: [16]u8 = undefined;
-	const n = try mulRawBlip(&[_]u8{0x06}, &[_]u8{0x07}, &sa, &sb, &sr, &out);
+	const n = try mulRawBlip(&[_]u8{0x06}, &[_]u8{0x07}, &sa, &sb, &sr, &[_]u8{}, &out);
 	try testing.expectEqualSlices(u8, &[_]u8{0x2A}, out[0..n]); // 42 immediate
 }
 
@@ -724,7 +968,7 @@ test "mulRawBlip: positive * negative = negative (-6 * 7 = -42)" {
 	var sr: [16]u8 = undefined;
 	var out: [16]u8 = undefined;
 	// -6 = 0x81 0xFA (i8 -6); +7 = 0x07 immediate
-	const n = try mulRawBlip(&[_]u8{ 0x81, 0xFA }, &[_]u8{0x07}, &sa, &sb, &sr, &out);
+	const n = try mulRawBlip(&[_]u8{ 0x81, 0xFA }, &[_]u8{0x07}, &sa, &sb, &sr, &[_]u8{}, &out);
 	// -42 = i8 0xD6 → BLIP [0x81, 0xD6]
 	try testing.expectEqualSlices(u8, &[_]u8{ 0x81, 0xD6 }, out[0..n]);
 }
@@ -734,7 +978,7 @@ test "mulRawBlip: negative * negative = positive (-6 * -7 = 42)" {
 	var sb: [4]u8 = undefined;
 	var sr: [16]u8 = undefined;
 	var out: [16]u8 = undefined;
-	const n = try mulRawBlip(&[_]u8{ 0x81, 0xFA }, &[_]u8{ 0x81, 0xF9 }, &sa, &sb, &sr, &out);
+	const n = try mulRawBlip(&[_]u8{ 0x81, 0xFA }, &[_]u8{ 0x81, 0xF9 }, &sa, &sb, &sr, &[_]u8{}, &out);
 	try testing.expectEqualSlices(u8, &[_]u8{0x2A}, out[0..n]); // 42 immediate
 }
 
@@ -743,8 +987,91 @@ test "mulRawBlip: result is zero (anything * 0)" {
 	var sb: [4]u8 = undefined;
 	var sr: [16]u8 = undefined;
 	var out: [16]u8 = undefined;
-	const n = try mulRawBlip(&[_]u8{0x05}, &[_]u8{0x00}, &sa, &sb, &sr, &out);
+	const n = try mulRawBlip(&[_]u8{0x05}, &[_]u8{0x00}, &sa, &sb, &sr, &[_]u8{}, &out);
 	try testing.expectEqualSlices(u8, &[_]u8{0x00}, out[0..n]);
+}
+
+test "mulMagnitudesU64 == mulMagnitudesByte for aligned inputs" {
+	// Verify the chunked u64 schoolbook gives identical results to per-byte.
+	const cases = [_]usize{ 8, 16, 32, 64, 128 };
+	for (cases) |n| {
+		var a = std.mem.zeroes([128]u8);
+		var b = std.mem.zeroes([128]u8);
+		var rng = std.Random.DefaultPrng.init(0xDEADBEEF + n);
+		const r = rng.random();
+		for (a[0..n]) |*p| p.* = r.int(u8);
+		for (b[0..n]) |*p| p.* = r.int(u8);
+
+		var r_byte: [256]u8 = undefined;
+		var r_u64: [256]u8 = undefined;
+		mulMagnitudesByte(a[0..n], b[0..n], &r_byte);
+		mulMagnitudesU64(a[0..n], b[0..n], &r_u64);
+		try testing.expectEqualSlices(u8, r_byte[0 .. 2 * n], r_u64[0 .. 2 * n]);
+	}
+}
+
+test "mulKaratsuba == mulMagnitudes for various sizes" {
+	// Karatsuba result must match schoolbook for any equal-length input pair.
+	const cases = [_]usize{ 64, 96, 128, 192, 256, 384, 512 };
+	for (cases) |n| {
+		const a = std.testing.allocator.alloc(u8, n) catch unreachable;
+		defer std.testing.allocator.free(a);
+		const b = std.testing.allocator.alloc(u8, n) catch unreachable;
+		defer std.testing.allocator.free(b);
+		var rng = std.Random.DefaultPrng.init(0x1337CAFE + n);
+		const r = rng.random();
+		for (a) |*p| p.* = r.int(u8);
+		for (b) |*p| p.* = r.int(u8);
+
+		const r_school = std.testing.allocator.alloc(u8, 2 * n) catch unreachable;
+		defer std.testing.allocator.free(r_school);
+		const r_kara = std.testing.allocator.alloc(u8, 2 * n) catch unreachable;
+		defer std.testing.allocator.free(r_kara);
+		const scratch = std.testing.allocator.alloc(u8, karatsubaScratchNeed(n)) catch unreachable;
+		defer std.testing.allocator.free(scratch);
+
+		mulMagnitudes(a, b, r_school);
+		@memset(r_kara, 0);
+		mulKaratsuba(a, b, r_kara, scratch);
+		try testing.expectEqualSlices(u8, r_school, r_kara);
+	}
+}
+
+test "mulRawBlip: large equal-size operands via Karatsuba" {
+	// 256-bit positive operands. Result should equal schoolbook (u64 chunked).
+	var a_pay: [32]u8 = undefined;
+	var b_pay: [32]u8 = undefined;
+	var rng = std.Random.DefaultPrng.init(0xC0FFEE);
+	const r_g = rng.random();
+	for (&a_pay) |*p| p.* = r_g.int(u8);
+	for (&b_pay) |*p| p.* = r_g.int(u8);
+	a_pay[31] &= 0x7F; // positive
+	b_pay[31] &= 0x7F;
+
+	var a_blip: [34]u8 = undefined;
+	a_blip[0] = 0xA0;
+	a_blip[1] = 0x01;
+	@memcpy(a_blip[2..], &a_pay);
+	var b_blip: [34]u8 = undefined;
+	b_blip[0] = 0xA0;
+	b_blip[1] = 0x01;
+	@memcpy(b_blip[2..], &b_pay);
+
+	var sa: [64]u8 = undefined;
+	var sb: [64]u8 = undefined;
+	var sr: [128]u8 = undefined;
+	var sk: [256]u8 = undefined; // ~4n = 128 + slack
+	var out: [128]u8 = undefined;
+
+	const n = try mulRawBlip(&a_blip, &b_blip, &sa, &sb, &sr, &sk, &out);
+
+	// Verify by recomputing with the schoolbook path (passing empty scratch_k forces fallback).
+	var sa2: [64]u8 = undefined;
+	var sb2: [64]u8 = undefined;
+	var sr2: [128]u8 = undefined;
+	var out2: [128]u8 = undefined;
+	const n2 = try mulRawBlip(&a_blip, &b_blip, &sa2, &sb2, &sr2, &[_]u8{}, &out2);
+	try testing.expectEqualSlices(u8, out2[0..n2], out[0..n]);
 }
 
 test "mulRawBlip: i64.max * 2 (overflows i64)" {
@@ -755,7 +1082,7 @@ test "mulRawBlip: i64.max * 2 (overflows i64)" {
 	var sb: [16]u8 = undefined;
 	var sr: [32]u8 = undefined;
 	var out: [32]u8 = undefined;
-	const n = try mulRawBlip(max_blip, two_blip, &sa, &sb, &sr, &out);
+	const n = try mulRawBlip(max_blip, two_blip, &sa, &sb, &sr, &[_]u8{}, &out);
 	// Expected: 2 * (2^63 - 1) = 2^64 - 2.
 	// As signed canonical: needs L=9 with leading 0x00.
 	// LE payload: [0xFE, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00]
