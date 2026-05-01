@@ -21,6 +21,15 @@ run() {
 # Unit tests — Zig core, run via Nix sandbox for determinism.
 run "zig unit tests (nix)" nix build ".#checks.$(nix eval --raw --impure --expr 'builtins.currentSystem').test" --print-build-logs
 
+# Cross-validation against GMP — every blip_mp result must equal GMP's.
+# Builds the cross_check exe (linked against GMP) and runs random
+# add/sub/mul comparisons across 18 bit-widths.
+run "cross-validation vs GMP" bash -c '
+	nix build .#packages.$(nix eval --raw --impure --expr "builtins.currentSystem").bench --print-build-logs >/dev/null 2>&1 \
+		|| { echo "build failed"; exit 1; }
+	./result/bin/cross_check
+'
+
 # CLI tests come later when there's a CLI. Add them here:
 # run "cli tests" tests/cli/run_all.sh
 

@@ -59,6 +59,31 @@ pub fn build(b: *std.Build) void {
 	const bench_step = b.step("bench", "Build benchmark binaries");
 	bench_step.dependOn(&install_blip_mp_bench.step);
 
+	// cross_check — Zig exe that links both blip_mp (Zig core) and GMP,
+	// runs randomized add/sub/mul comparisons, asserts results match.
+	// Run via `./test` (or `nix build .#packages.<sys>.cross_check`).
+	if (gmp_include_path != null and gmp_lib_path != null) {
+		const cc_module = b.createModule(.{
+			.root_source_file = b.path("tests/integration/cross_check.zig"),
+			.target = target,
+			.optimize = optimize,
+			.link_libc = true,
+			.imports = &.{
+				.{ .name = "blip_mp", .module = core_module },
+			},
+		});
+		cc_module.addLibraryPath(.{ .cwd_relative = gmp_lib_path.? });
+		cc_module.linkSystemLibrary("gmp", .{});
+		const cross_check = b.addExecutable(.{
+			.name = "cross_check",
+			.root_module = cc_module,
+		});
+		const install_cc = b.addInstallArtifact(cross_check, .{});
+		const cc_step = b.step("cross_check", "Build cross-validation against GMP");
+		cc_step.dependOn(&install_cc.step);
+		bench_step.dependOn(&install_cc.step);
+	}
+
 	// gmp_bench — pure C exe linking GMP.
 	if (gmp_include_path != null and gmp_lib_path != null) {
 		const gmp_module = b.createModule(.{
