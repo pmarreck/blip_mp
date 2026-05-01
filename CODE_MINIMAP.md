@@ -17,12 +17,12 @@ Per-file index of important code locations. Updated as files are added.
 ## src/
 
 - `src/blip_mp.zig` — public Zig surface. Re-exports `encoding` and `bignum`; aliases `Mp = bignum.Mp`. `refAllDecls` ensures every test in dependent files runs.
-- `src/encoding.zig` — pure BLIP integer encoding (per BLIP_SPEC, reimplemented in-tree). Functions:
-  - `Endian` enum (little/big payload endianness)
-  - `Error` (BufferTooSmall, UnexpectedEndOfInput, OverlongEncoding, OverlongHeader)
-  - `minPayloadBytes(u64)` / `encodedSizeU64(u64)` / `encodeU64Canonical` / `decodeU64` — UNSIGNED BLIP encode/decode (signedness-agnostic per BLIP spec)
-  - `Decoded` struct (value, bytes_read, endian, is_sentinel)
-  - `minPayloadBytesSigned(i64)` / `encodedSizeI64(i64)` / `encodeI64Canonical` / `decodeI64` — SIGNED two's-complement canonical encoding (used by `Mp` per SPEC.md §Sign convention). Sign-extension on decode.
+- `src/encoding.zig` — BLIP integer encoding restricted to the **signed two's-complement** reading (per SPEC.md §Sign convention). One encoder, one decoder; the "where is the sign bit" question is settled by definition (high bit of high payload byte). Functions:
+  - `Endian` enum (little/big payload endianness — BLIP permits per-value E bit; decoder honours both)
+  - `Error` (BufferTooSmall, UnexpectedEndOfInput, OverlongEncoding)
+  - `Decoded` struct (value: i64, bytes_read, endian, is_sentinel)
+  - `minPayloadBytesSigned(i64)` — picks smallest L whose i(L*8) range contains value; 0 for immediate range
+  - `encodedSizeI64(i64)` / `encodeI64Canonical` / `decodeI64` — canonical signed encode/decode
 - `src/bignum.zig` — `Mp` bignum struct (representation 1b: `{bytes, allocator}`, always heap, signed two's-complement payload).
   - `Mp.init(allocator)` / `Mp.deinit()`
   - `Mp.setI64(v)` / `Mp.setU64(v)` (rejects v > i64.max for tier 0/1)
