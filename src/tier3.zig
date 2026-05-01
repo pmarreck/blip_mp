@@ -117,10 +117,43 @@ pub fn addPayloads(
 
 	var carry: u64 = 0;
 	var i: usize = 0;
-	// Chunked u64 path: only when BOTH operands have a full 8-byte chunk
-	// available at offset i. Boundaries fall through to the per-byte tail.
-	const chunk_end = chunkEndForLen(@min(a.len, b.len), n);
-	while (i + 8 <= chunk_end) : (i += 8) {
+	// Chunked u512 path: 64 bytes per iter when operands are large enough
+	// (4096-bit and up). Each u512 add compiles to 8 ADCS instructions on
+	// aarch64 — same per-byte throughput as smaller chunks but minimises
+	// loop branches and load/store insn count. This closes most of the
+	// remaining gap to GMP at 4096+ bits.
+	const both_end = chunkEndForLen(@min(a.len, b.len), n);
+	const both_end_64 = both_end - (both_end % 64);
+	while (i + 64 <= both_end_64) : (i += 64) {
+		const av: u512 = std.mem.readInt(u512, a[i..][0..64], .little);
+		const bv: u512 = std.mem.readInt(u512, b[i..][0..64], .little);
+		const s1 = @addWithOverflow(av, bv);
+		const s2 = @addWithOverflow(s1[0], carry);
+		std.mem.writeInt(u512, out[i..][0..64], s2[0], .little);
+		carry = @as(u64, s1[1]) + @as(u64, s2[1]);
+	}
+	// u256 chunks for the next size band.
+	const both_end_32 = both_end - (both_end % 32);
+	while (i + 32 <= both_end_32) : (i += 32) {
+		const av: u256 = std.mem.readInt(u256, a[i..][0..32], .little);
+		const bv: u256 = std.mem.readInt(u256, b[i..][0..32], .little);
+		const s1 = @addWithOverflow(av, bv);
+		const s2 = @addWithOverflow(s1[0], carry);
+		std.mem.writeInt(u256, out[i..][0..32], s2[0], .little);
+		carry = @as(u64, s1[1]) + @as(u64, s2[1]);
+	}
+	// Drop down to u128 chunks for any remaining 16-byte slot.
+	while (i + 16 <= both_end) : (i += 16) {
+		const av: u128 = std.mem.readInt(u128, a[i..][0..16], .little);
+		const bv: u128 = std.mem.readInt(u128, b[i..][0..16], .little);
+		const s1 = @addWithOverflow(av, bv);
+		const s2 = @addWithOverflow(s1[0], carry);
+		std.mem.writeInt(u128, out[i..][0..16], s2[0], .little);
+		carry = @as(u64, s1[1]) + @as(u64, s2[1]);
+	}
+	// Drop down to u64 chunks for any remaining 8-byte slot in the
+	// "both operands have real bytes" region.
+	while (i + 8 <= both_end) : (i += 8) {
 		const av: u64 = std.mem.readInt(u64, a[i..][0..8], .little);
 		const bv: u64 = std.mem.readInt(u64, b[i..][0..8], .little);
 		const s1 = @addWithOverflow(av, bv);
@@ -128,8 +161,8 @@ pub fn addPayloads(
 		std.mem.writeInt(u64, out[i..][0..8], s2[0], .little);
 		carry = @as(u64, s1[1]) + @as(u64, s2[1]);
 	}
-	// Continue with remaining full chunks past one operand's real-bytes
-	// boundary. This time at least one side reads from sign-extension.
+	// Continue with remaining full u64 chunks past one operand's real-bytes
+	// boundary. At least one side now reads from sign-extension.
 	while (i + 8 <= n) : (i += 8) {
 		const av: u64 = readPayloadChunk(a, i, sa_word);
 		const bv: u64 = readPayloadChunk(b, i, sb_word);
@@ -221,18 +254,23 @@ pub fn subPayloads(
 /// canonical form drops trailing 0x00 bytes (for positives) or trailing 0xFF
 /// bytes (for negatives), as long as the remaining high bit still encodes
 /// the correct sign. Returns the canonical length (>= 1).
+///
+/// Fast path: when the high byte is neither 0x00 nor 0xFF, no trimming is
+/// possible and we return immediately. This is the common case for random
+/// add results — saves a scan of the entire payload at large sizes.
 pub fn canonicalLen(payload: []const u8) usize {
 	if (payload.len <= 1) return @max(payload.len, 1);
-	const sign_byte: u8 = if ((payload[payload.len - 1] & 0x80) != 0) 0xFF else 0x00;
+	const high = payload[payload.len - 1];
+	if (high != 0x00 and high != 0xFF) return payload.len; // common case
+
+	const sign_byte: u8 = if ((high & 0x80) != 0) 0xFF else 0x00;
 	var n = payload.len;
 	while (n > 1) {
-		const high = payload[n - 1];
+		const h = payload[n - 1];
 		const next = payload[n - 2];
-		// Drop high byte if it equals the sign-extension AND removing it
-		// preserves the sign bit (i.e., next byte's high bit matches).
 		const next_high_bit_set = (next & 0x80) != 0;
 		const sign_is_negative = sign_byte == 0xFF;
-		if (high == sign_byte and next_high_bit_set == sign_is_negative) {
+		if (h == sign_byte and next_high_bit_set == sign_is_negative) {
 			n -= 1;
 			continue;
 		}
@@ -290,6 +328,105 @@ pub fn subRawBlip(
 	const result_len = subPayloads(a_pay, b_pay, n, scratch);
 	const canon = canonicalLen(scratch[0..result_len]);
 	return try writeBlip(scratch[0..canon], out);
+}
+
+// ── Multiplication: sign-magnitude, schoolbook on bytes ──────────────────────
+//
+// Sign-magnitude dispatch is required for mul (unlike add/sub which work
+// uniformly on two's-complement). We:
+//   1. Negate any negative inputs in scratch (~bytes + 1) to get magnitudes.
+//   2. Schoolbook multiply unsigned magnitudes byte-by-byte with carry.
+//   3. Sign of result = sign(a) XOR sign(b).
+//   4. If result negative, negate scratch_r; pad with 0xFF if high bit clear.
+//      Else pad with 0x00 if high bit set.
+//   5. Canonicalize (trim sign-extension), write BLIP.
+
+/// Negate a two's-complement byte payload IN PLACE: payload = (~payload + 1).
+pub fn negateInPlace(payload: []u8) void {
+	var carry: u16 = 1;
+	for (payload) |*p| {
+		const v: u16 = @as(u16, ~p.*) + carry;
+		p.* = @truncate(v);
+		carry = v >> 8;
+	}
+}
+
+/// r[0..a.len + b.len] = a * b (unsigned, LE byte arrays).
+/// Schoolbook with per-byte carry propagation.
+pub fn mulMagnitudes(a: []const u8, b: []const u8, r: []u8) void {
+	std.debug.assert(r.len >= a.len + b.len);
+	@memset(r[0 .. a.len + b.len], 0);
+	for (a, 0..) |ai, i| {
+		if (ai == 0) continue;
+		var carry: u16 = 0;
+		for (b, 0..) |bj, j| {
+			const prod: u16 = @as(u16, ai) * @as(u16, bj) + r[i + j] + carry;
+			r[i + j] = @truncate(prod);
+			carry = prod >> 8;
+		}
+		r[i + b.len] += @intCast(carry);
+	}
+}
+
+/// r = a * b. Operates on raw BLIP-encoded slices. Result is canonically
+/// encoded into `out`. Caller provides scratch buffers:
+///   scratch_a, scratch_b: at least each operand's payload length.
+///   scratch_r: at least a_payload + b_payload + 1 (slack for sign-ext byte).
+pub fn mulRawBlip(
+	a_blip: []const u8,
+	b_blip: []const u8,
+	scratch_a: []u8,
+	scratch_b: []u8,
+	scratch_r: []u8,
+	out: []u8,
+) !usize {
+	const a_pay = try payloadOf(a_blip);
+	const b_pay = try payloadOf(b_blip);
+	std.debug.assert(scratch_a.len >= a_pay.len);
+	std.debug.assert(scratch_b.len >= b_pay.len);
+	std.debug.assert(scratch_r.len >= a_pay.len + b_pay.len + 1);
+
+	const a_neg = signExtByte(a_pay) == 0xFF;
+	const b_neg = signExtByte(b_pay) == 0xFF;
+
+	@memcpy(scratch_a[0..a_pay.len], a_pay);
+	@memcpy(scratch_b[0..b_pay.len], b_pay);
+	if (a_neg) negateInPlace(scratch_a[0..a_pay.len]);
+	if (b_neg) negateInPlace(scratch_b[0..b_pay.len]);
+
+	const r_len = a_pay.len + b_pay.len;
+	mulMagnitudes(scratch_a[0..a_pay.len], scratch_b[0..b_pay.len], scratch_r[0..r_len]);
+
+	// Check for zero result (canonical encoding is single 0x00 byte).
+	var all_zero = true;
+	for (scratch_r[0..r_len]) |byte| {
+		if (byte != 0) {
+			all_zero = false;
+			break;
+		}
+	}
+	if (all_zero) {
+		out[0] = 0x00;
+		return 1;
+	}
+
+	const result_neg = a_neg != b_neg;
+	var actual_len = r_len;
+	if (result_neg) {
+		negateInPlace(scratch_r[0..r_len]);
+		if ((scratch_r[r_len - 1] & 0x80) == 0) {
+			scratch_r[r_len] = 0xFF;
+			actual_len = r_len + 1;
+		}
+	} else {
+		if ((scratch_r[r_len - 1] & 0x80) != 0) {
+			scratch_r[r_len] = 0x00;
+			actual_len = r_len + 1;
+		}
+	}
+
+	const canon = canonicalLen(scratch_r[0..actual_len]);
+	return try writeBlip(scratch_r[0..canon], out);
 }
 
 /// Write a canonical BLIP encoding for the given two's-complement LE payload.
@@ -540,4 +677,89 @@ test "addRawBlip → subRawBlip round-trip: r + b - b == a" {
 	const sum_n = try addRawBlip(a_blip, b_blip, &scratch, &sum_buf);
 	const diff_n = try subRawBlip(sum_buf[0..sum_n], b_blip, &scratch, &diff_buf);
 	try testing.expectEqualSlices(u8, a_blip, diff_buf[0..diff_n]);
+}
+
+test "negateInPlace: -1 -> 1" {
+	var p = [_]u8{0xFF}; // -1 as i8
+	negateInPlace(&p);
+	try testing.expectEqual(@as(u8, 1), p[0]);
+}
+
+test "negateInPlace: -129 (i16) -> 129" {
+	var p = [_]u8{ 0x7F, 0xFF }; // -129 LE
+	negateInPlace(&p);
+	try testing.expectEqual(@as(u8, 0x81), p[0]); // 129 = 0x81 low byte
+	try testing.expectEqual(@as(u8, 0x00), p[1]);
+}
+
+test "mulMagnitudes: small (2 * 3 = 6)" {
+	var r = [_]u8{ 0xAA, 0xAA }; // pre-fill to verify @memset works
+	mulMagnitudes(&[_]u8{2}, &[_]u8{3}, &r);
+	try testing.expectEqual(@as(u8, 6), r[0]);
+	try testing.expectEqual(@as(u8, 0), r[1]);
+}
+
+test "mulMagnitudes: 256 * 256 = 65536 (LE bytes)" {
+	// 256 = [0x00, 0x01], 256 * 256 = 65536 = [0x00, 0x00, 0x01, 0x00] LE
+	var r: [4]u8 = undefined;
+	mulMagnitudes(&[_]u8{ 0x00, 0x01 }, &[_]u8{ 0x00, 0x01 }, &r);
+	try testing.expectEqual(@as(u8, 0x00), r[0]);
+	try testing.expectEqual(@as(u8, 0x00), r[1]);
+	try testing.expectEqual(@as(u8, 0x01), r[2]);
+	try testing.expectEqual(@as(u8, 0x00), r[3]);
+}
+
+test "mulRawBlip: small positive * positive (6 * 7 = 42)" {
+	var sa: [4]u8 = undefined;
+	var sb: [4]u8 = undefined;
+	var sr: [16]u8 = undefined;
+	var out: [16]u8 = undefined;
+	const n = try mulRawBlip(&[_]u8{0x06}, &[_]u8{0x07}, &sa, &sb, &sr, &out);
+	try testing.expectEqualSlices(u8, &[_]u8{0x2A}, out[0..n]); // 42 immediate
+}
+
+test "mulRawBlip: positive * negative = negative (-6 * 7 = -42)" {
+	var sa: [4]u8 = undefined;
+	var sb: [4]u8 = undefined;
+	var sr: [16]u8 = undefined;
+	var out: [16]u8 = undefined;
+	// -6 = 0x81 0xFA (i8 -6); +7 = 0x07 immediate
+	const n = try mulRawBlip(&[_]u8{ 0x81, 0xFA }, &[_]u8{0x07}, &sa, &sb, &sr, &out);
+	// -42 = i8 0xD6 → BLIP [0x81, 0xD6]
+	try testing.expectEqualSlices(u8, &[_]u8{ 0x81, 0xD6 }, out[0..n]);
+}
+
+test "mulRawBlip: negative * negative = positive (-6 * -7 = 42)" {
+	var sa: [4]u8 = undefined;
+	var sb: [4]u8 = undefined;
+	var sr: [16]u8 = undefined;
+	var out: [16]u8 = undefined;
+	const n = try mulRawBlip(&[_]u8{ 0x81, 0xFA }, &[_]u8{ 0x81, 0xF9 }, &sa, &sb, &sr, &out);
+	try testing.expectEqualSlices(u8, &[_]u8{0x2A}, out[0..n]); // 42 immediate
+}
+
+test "mulRawBlip: result is zero (anything * 0)" {
+	var sa: [4]u8 = undefined;
+	var sb: [4]u8 = undefined;
+	var sr: [16]u8 = undefined;
+	var out: [16]u8 = undefined;
+	const n = try mulRawBlip(&[_]u8{0x05}, &[_]u8{0x00}, &sa, &sb, &sr, &out);
+	try testing.expectEqualSlices(u8, &[_]u8{0x00}, out[0..n]);
+}
+
+test "mulRawBlip: i64.max * 2 (overflows i64)" {
+	// i64.max = 0x7FFFFFFFFFFFFFFF as L=8 BLIP: [0x88, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x7F]
+	const max_blip = &[_]u8{ 0x88, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x7F };
+	const two_blip = &[_]u8{0x02};
+	var sa: [16]u8 = undefined;
+	var sb: [16]u8 = undefined;
+	var sr: [32]u8 = undefined;
+	var out: [32]u8 = undefined;
+	const n = try mulRawBlip(max_blip, two_blip, &sa, &sb, &sr, &out);
+	// Expected: 2 * (2^63 - 1) = 2^64 - 2.
+	// As signed canonical: needs L=9 with leading 0x00.
+	// LE payload: [0xFE, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00]
+	// BLIP: [0x89, ...]
+	const expected = [_]u8{ 0x89, 0xFE, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00 };
+	try testing.expectEqualSlices(u8, &expected, out[0..n]);
 }

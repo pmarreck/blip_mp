@@ -200,8 +200,7 @@ pub const Mp = struct {
 				return;
 			}
 		}
-		// Tier-3 mul not yet implemented — only add/sub for now.
-		return error.TierOverflow;
+		try tier3MulOp(r, a, b);
 	}
 
 	/// Returns true iff this Mp's encoded form fits in the i64 universe
@@ -253,21 +252,67 @@ inline fn decodeInlineSmall(self: *const Mp) i64 {
 	return @bitCast(std.mem.readInt(u64, self.inline_buf[1..9], .little));
 }
 
+/// Tier-3 multiplication. Sign-magnitude on byte payloads; result up to
+/// `a_payload + b_payload + 1` bytes. Stack scratch for inputs up to
+/// 1024 bytes each (8192-bit operands); spills to allocator beyond.
+fn tier3MulOp(r: *Mp, a: *const Mp, b: *const Mp) ArithError!void {
+	const a_bytes = a.bytes();
+	const b_bytes = b.bytes();
+	const a_pay_len: usize = if (a_bytes[0] < 0x80) 1 else a_bytes.len - 1;
+	const b_pay_len: usize = if (b_bytes[0] < 0x80) 1 else b_bytes.len - 1;
+	const r_pay_max = a_pay_len + b_pay_len + 1;
+	const out_need = r_pay_max + 10; // +10 for header
+
+	const STACK_BYTES = 1024;
+	var stack_a: [STACK_BYTES]u8 = undefined;
+	var stack_b: [STACK_BYTES]u8 = undefined;
+	var stack_r: [STACK_BYTES * 2 + 1]u8 = undefined;
+	var stack_out: [STACK_BYTES * 2 + 16]u8 = undefined;
+	var heap_a: ?[]u8 = null;
+	var heap_b: ?[]u8 = null;
+	var heap_r: ?[]u8 = null;
+	var heap_out: ?[]u8 = null;
+	defer {
+		if (heap_a) |s| r.allocator.free(s);
+		if (heap_b) |s| r.allocator.free(s);
+		if (heap_r) |s| r.allocator.free(s);
+		if (heap_out) |s| r.allocator.free(s);
+	}
+	const sa: []u8 = if (a_pay_len <= STACK_BYTES) stack_a[0..a_pay_len] else blk: {
+		heap_a = try r.allocator.alloc(u8, a_pay_len);
+		break :blk heap_a.?;
+	};
+	const sb: []u8 = if (b_pay_len <= STACK_BYTES) stack_b[0..b_pay_len] else blk: {
+		heap_b = try r.allocator.alloc(u8, b_pay_len);
+		break :blk heap_b.?;
+	};
+	const sr: []u8 = if (r_pay_max <= stack_r.len) stack_r[0..r_pay_max] else blk: {
+		heap_r = try r.allocator.alloc(u8, r_pay_max);
+		break :blk heap_r.?;
+	};
+	const out_buf: []u8 = if (out_need <= stack_out.len) stack_out[0..out_need] else blk: {
+		heap_out = try r.allocator.alloc(u8, out_need);
+		break :blk heap_out.?;
+	};
+
+	const written = try tier3.mulRawBlip(a_bytes, b_bytes, sa, sb, sr, out_buf);
+	try r.setBytes(out_buf[0..written]);
+}
+
 /// Internal tier-3 dispatch. Operates DIRECTLY on the BLIP payload bytes —
 /// no limb-array conversion. Two's-complement arithmetic is bit-position-
 /// local, so per-byte add/sub with carry produces correct results across
-/// any sign combination. Stack scratch up to 1KB (8192-bit operands);
-/// larger spills to the allocator.
-fn tier3Op(r: *Mp, a: *const Mp, b: *const Mp, comptime op: enum { add, sub }) ArithError!void {
+/// any sign combination.
+const TierOp = enum { add, sub };
+
+fn tier3Op(r: *Mp, a: *const Mp, b: *const Mp, comptime op: TierOp) ArithError!void {
 	const a_bytes = a.bytes();
 	const b_bytes = b.bytes();
-	// Worst-case scratch: max payload length + 1 (overflow byte).
 	const max_payload = @max(a_bytes.len, b_bytes.len);
 	const scratch_need = max_payload + 1;
-	// Worst-case output: payload (max_payload + 1) + header (≤10 bytes).
 	const out_need = max_payload + 1 + 10;
 
-	const STACK_BYTES = 1024; // 8192-bit operands stay alloc-free
+	const STACK_BYTES = 1024;
 	var stack_scratch: [STACK_BYTES]u8 = undefined;
 	var stack_out: [STACK_BYTES]u8 = undefined;
 	var heap_scratch: ?[]u8 = null;
@@ -533,10 +578,30 @@ test "mul: basic and sign mixing" {
 	try doArith(.mul, 1, std.math.maxInt(i64), std.math.maxInt(i64));
 }
 
-test "mul: i64 overflow returns TierOverflow" {
-	try expectArithOverflow(.mul, std.math.maxInt(i64), 2);
-	try expectArithOverflow(.mul, @as(i64, 1) << 32, @as(i64, 1) << 32);
-	try expectArithOverflow(.mul, std.math.minInt(i64), -1);
+test "mul: i64 overflow now promotes to tier 3" {
+	// Was error.TierOverflow before tier-3 mul landed; now succeeds with
+	// result encoding > 9 bytes (the i64 universe).
+	var a = Mp.init(testing.allocator);
+	defer a.deinit();
+	var b = Mp.init(testing.allocator);
+	defer b.deinit();
+	var r = Mp.init(testing.allocator);
+	defer r.deinit();
+
+	try a.setI64(std.math.maxInt(i64));
+	try b.setI64(2);
+	try r.mul(&a, &b);
+	try testing.expect(r.bytes().len > 9);
+
+	try a.setI64(@as(i64, 1) << 32);
+	try b.setI64(@as(i64, 1) << 32);
+	try r.mul(&a, &b);
+	try testing.expect(r.bytes().len > 9);
+
+	try a.setI64(std.math.minInt(i64));
+	try b.setI64(-1);
+	try r.mul(&a, &b);
+	try testing.expect(r.bytes().len > 9);
 }
 
 test "mul: result canonicalizes (small product from large inputs)" {

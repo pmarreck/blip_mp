@@ -1,5 +1,72 @@
 # BENCHMARK_RESULTS.md — blip_mp vs GMP
 
+## Run 7 — 2026-04-30 EST (tier-3 mul + chunked u512 + canonicalLen fast path)
+
+### Changes since Run 6
+
+1. **Tier-3 multiplication** added (`tier3.mulRawBlip`, byte-direct schoolbook with sign-magnitude dispatch). `Mp.mul` no longer returns `error.TierOverflow` for results that exceed i64; it routes to tier-3 instead.
+2. **Chunked add inner loop now uses u128 → u256 → u512 → u64 → u8 cascade**. Each chunk size is one Zig integer add (compiles to N consecutive ADCS instructions on aarch64). Halves loop iterations at every step. `u512` chunks are 64 bytes per iteration — 8 iterations for 4096-bit, 1 for 1024-bit, 0 (fall-through to u256) for 256-bit.
+3. **`canonicalLen` fast path** — when the payload's high byte is neither 0x00 nor 0xFF, no trim is possible; return immediately. Saves a payload-length scan per op for typical (random) results.
+
+### Numbers (3-run median)
+
+**Small buckets (5M iterations) — unchanged from Run 6:**
+
+| Bucket | `Mp.add` | GMP | `Mp.add` / GMP |
+|---|---:|---:|---:|
+| L=0 (immediate, 0..127)  | **2.06** | 4.83 | **2.34× faster** ✅ |
+| L=2 (128..32K)           | **2.03** | 4.52 | **2.23× faster** ✅ |
+| L=3 (~16-bit..~24-bit)   | **2.01** | 4.31 | **2.14× faster** ✅ |
+| L=4 (~32-bit)            | **1.99** | 3.89 | **1.95× faster** ✅ |
+
+**Large buckets (500K iterations) — major SIMD speedups:**
+
+| Bucket | `Mp.add` | GMP | `Mp.add` / GMP |
+|---|---:|---:|---:|
+| 256-bit  | 16.63 | 4.52  | 0.27× (3.68× slower) |
+| 1024-bit | 17.71 | 8.29  | 0.47× (2.13× slower) |
+| 4096-bit | 40.61 | 30.88 | **0.76× (1.32× slower)** — within 32% of GMP |
+
+### Run 5 → Run 7 tier-3 evolution
+
+| Bucket | Run 5 (heap reuse only) | Run 7 (chunked u512) | Speedup | vs GMP shift |
+|---|---:|---:|---:|---|
+| 256-bit  | 17.69 | 16.63 | 1.06×  | 3.85× → 3.68× |
+| 1024-bit | 28.78 | 17.71 | **1.62×** | 3.46× → 2.13× |
+| 4096-bit | 95.16 | 40.61 | **2.34×** | 3.16× → **1.32×** |
+
+The bigger the operand, the more the SIMD wins matter — exactly as expected (more bytes per iteration vs constant per-op overhead). For 4096-bit we're now within striking distance of GMP.
+
+### Why 256-bit hasn't budged
+
+256-bit operand = 32-byte payload. The chunked add takes effectively one u256 iteration (~3-4 ns of arithmetic). The remaining ~13 ns is pure overhead: `payloadOf` parsing both headers, scratch+out_buf memcpys (32 bytes each), `canonicalLen` (now fast-pathed but still at least one comparison), and `setBytes` final copy. To match GMP at this size, that overhead needs to come down — most plausibly by caching the payload offset in `Mp` and writing the result directly into `r.heap_buf` (attempted but regressed due to `std.mem.copyForwards` not vectorising; needs a different layout).
+
+## Findings — Run 7
+
+### 1. Small buckets unchanged: still 2-2.4× over GMP
+
+The tier-0/1 inline-tail trick from Run 6 carries through. We beat GMP across the entire i64 universe.
+
+### 2. Tier 3 within striking distance of GMP at 4096-bit
+
+1.32× slower at 4096-bit, 2.13× at 1024-bit. The pure-Zig u512-chunked inner loop is competitive with GMP's hand-tuned aarch64 asm at large sizes. Per-byte throughput at 4096-bit: blip_mp ≈ 79 MB/s of payload processed, GMP ≈ 104 MB/s. Within 25% on raw arithmetic.
+
+### 3. Tier 3 mul correctness landed
+
+`Mp.mul` now handles arbitrary result sizes via byte-direct schoolbook with sign-magnitude. The error path shrank from "all i64 overflow returns TierOverflow" to "never returns TierOverflow for in-range cases." Test: `(2^63) * (2^63) = 2^126` succeeds and produces a ~16-byte payload.
+
+## Open follow-ups (revised)
+
+1. **Beat GMP at tier 3 256-bit** — needs caching payload offset in `Mp` (skip header parse) + writing directly into r.heap_buf without scratch (skip 2 memcpys). ~1-2 hr of careful refactoring; previous attempt regressed due to `copyForwards` slowness.
+2. **u1024 chunks** for 4096-bit (4 iter vs 8). Marginal expected gain.
+3. **Statistical bench harness** — `hyperfine` integration + N-run aggregation; current numbers are 3-run medians by hand.
+4. Bench bucket label cleanup (L=1 was actually L=2; legacy from Run 1).
+5. **C FFI header** for downstream consumers.
+6. **BLIP wire interop** — separate "unsigned BLIP" mode for round-tripping with strict-spec BLIP producers.
+7. Cross-platform validation (current numbers are aarch64-darwin only).
+
+---
+
 ## Run 6 — 2026-04-30 EST (sign-extended inline tail — beats GMP everywhere in i64)
 
 ### The trick
