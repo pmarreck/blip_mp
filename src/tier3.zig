@@ -406,10 +406,74 @@ pub fn mulMagnitudesU64(a: []const u8, b: []const u8, r: []u8) void {
 	}
 }
 
-/// Dispatch wrapper: chunked u64 path always (with pad-to-multiple-of-8
-/// for non-aligned inputs) when sizes fit in stack scratch (≤ 256 bytes
-/// per operand). Falls back to per-byte schoolbook for huge non-aligned
-/// inputs (rare since most callers use aligned sizes).
+/// Read 8 bytes from `buf` starting at byte_off. Past-end bytes read as 0.
+inline fn readChunkOrZero(buf: []const u8, byte_off: usize) u64 {
+	if (byte_off + 8 <= buf.len) {
+		return std.mem.readInt(u64, buf[byte_off..][0..8], .little);
+	}
+	if (byte_off >= buf.len) return 0;
+	var bytes: [8]u8 = .{0} ** 8;
+	@memcpy(bytes[0 .. buf.len - byte_off], buf[byte_off..]);
+	return std.mem.readInt(u64, &bytes, .little);
+}
+
+/// Write 8 bytes (val LE) to `buf` at byte_off. Bytes past buf.len silently dropped.
+inline fn writeChunkTruncated(buf: []u8, byte_off: usize, val: u64) void {
+	if (byte_off + 8 <= buf.len) {
+		std.mem.writeInt(u64, buf[byte_off..][0..8], val, .little);
+		return;
+	}
+	if (byte_off >= buf.len) return;
+	var bytes: [8]u8 = undefined;
+	std.mem.writeInt(u64, &bytes, val, .little);
+	@memcpy(buf[byte_off..], bytes[0 .. buf.len - byte_off]);
+}
+
+/// Chunked u64*u64 = u128 schoolbook for ANY-length unsigned LE byte arrays.
+/// Reads/writes partial trailing chunks with zero-fill / truncate, so no
+/// stack-pad round-trip is needed. Same O(n²) work as the aligned variant
+/// but applies uniformly to non-multiple-of-8 sizes (common in Toom-3
+/// recursive sub-mults).
+pub fn mulMagnitudesU64Unaligned(a: []const u8, b: []const u8, r: []u8) void {
+	std.debug.assert(r.len >= a.len + b.len);
+	@memset(r[0 .. a.len + b.len], 0);
+	if (a.len == 0 or b.len == 0) return;
+
+	const a_chunks = (a.len + 7) / 8;
+	const b_chunks = (b.len + 7) / 8;
+
+	var i: usize = 0;
+	while (i < a_chunks) : (i += 1) {
+		const ai = readChunkOrZero(a, i * 8);
+		if (ai == 0) continue;
+		var carry: u64 = 0;
+		var j: usize = 0;
+		while (j < b_chunks) : (j += 1) {
+			const bj = readChunkOrZero(b, j * 8);
+			const r_off = (i + j) * 8;
+			const r_chunk = readChunkOrZero(r, r_off);
+			const prod: u128 = @as(u128, ai) * @as(u128, bj) + r_chunk + carry;
+			writeChunkTruncated(r, r_off, @truncate(prod));
+			carry = @intCast(prod >> 64);
+		}
+		// Propagate the final carry into higher r positions (chunked).
+		var pos = i + b_chunks;
+		while (carry != 0) {
+			const r_off = pos * 8;
+			if (r_off >= r.len) break; // by math, carry should be 0 here
+			const r_chunk = readChunkOrZero(r, r_off);
+			const sum: u128 = @as(u128, r_chunk) + @as(u128, carry);
+			writeChunkTruncated(r, r_off, @truncate(sum));
+			carry = @intCast(sum >> 64);
+			pos += 1;
+		}
+	}
+}
+
+/// Dispatch wrapper: prefer chunked u64 for any size > 0. Aligned sizes use
+/// the tighter `mulMagnitudesU64`; unaligned sizes use the partial-chunk
+/// `mulMagnitudesU64Unaligned`. Per-byte schoolbook is reserved for the
+/// rare case of zero-length operands (effectively unreachable).
 pub fn mulMagnitudes(a: []const u8, b: []const u8, r: []u8) void {
 	if (a.len == 0 or b.len == 0) {
 		@memset(r[0 .. a.len + b.len], 0);
@@ -419,27 +483,7 @@ pub fn mulMagnitudes(a: []const u8, b: []const u8, r: []u8) void {
 		mulMagnitudesU64(a, b, r);
 		return;
 	}
-	// Pad up to next multiple of 8 in stack scratch, then call chunked u64.
-	// The padded high bytes are zeros, so they contribute no terms — the
-	// chunked product's high bytes will be zero and we can safely copy back
-	// only the meaningful prefix.
-	const a_padded_len = (a.len + 7) & ~@as(usize, 7);
-	const b_padded_len = (b.len + 7) & ~@as(usize, 7);
-	const r_padded_len = a_padded_len + b_padded_len;
-	const STACK = 256;
-	if (a_padded_len > STACK or b_padded_len > STACK or r_padded_len > 2 * STACK) {
-		mulMagnitudesByte(a, b, r);
-		return;
-	}
-	var stack_a: [STACK]u8 = undefined;
-	var stack_b: [STACK]u8 = undefined;
-	var stack_r: [2 * STACK]u8 = undefined;
-	@memcpy(stack_a[0..a.len], a);
-	@memset(stack_a[a.len..a_padded_len], 0);
-	@memcpy(stack_b[0..b.len], b);
-	@memset(stack_b[b.len..b_padded_len], 0);
-	mulMagnitudesU64(stack_a[0..a_padded_len], stack_b[0..b_padded_len], stack_r[0..r_padded_len]);
-	@memcpy(r[0 .. a.len + b.len], stack_r[0 .. a.len + b.len]);
+	mulMagnitudesU64Unaligned(a, b, r);
 }
 
 // ── Karatsuba multiplication ─────────────────────────────────────────────────
@@ -631,39 +675,63 @@ pub fn karatsubaScratchNeed(n: usize) usize {
 // ── Helpers for Toom-Cook (sign-magnitude byte arithmetic) ──────────────────
 
 /// Multiply unsigned LE byte array by a small constant c (1..255).
-/// Output: out[0..a_len+1] receives result; returns canonical len.
+/// Chunked u64 inner loop: each iteration multiplies an 8-byte chunk by c
+/// (u64 * u8 = u72, fits in u128) and produces an 8-byte result chunk + 1
+/// carry byte. ~8× faster than per-byte for large `a_len`.
 pub fn mulSmallConst(a: []const u8, a_len: usize, c: u8, out: []u8) usize {
 	std.debug.assert(out.len > a_len);
-	if (c == 0 or a_len == 0) {
-		return 0;
-	}
-	var carry: u32 = 0;
+	if (c == 0 or a_len == 0) return 0;
+
+	var carry: u64 = 0;
 	var i: usize = 0;
+	const aligned_end = a_len - (a_len % 8);
+	while (i < aligned_end) : (i += 8) {
+		const word = std.mem.readInt(u64, a[i..][0..8], .little);
+		const prod: u128 = @as(u128, word) * @as(u128, c) + @as(u128, carry);
+		std.mem.writeInt(u64, out[i..][0..8], @truncate(prod), .little);
+		carry = @intCast(prod >> 64);
+	}
+	// Per-byte tail (< 8 bytes remaining).
 	while (i < a_len) : (i += 1) {
-		const prod: u32 = @as(u32, a[i]) * @as(u32, c) + carry;
+		const prod: u32 = @as(u32, a[i]) * @as(u32, c) + @as(u32, @intCast(carry & 0xFF));
 		out[i] = @truncate(prod);
-		carry = prod >> 8;
+		carry = (carry >> 8) + (prod >> 8);
 	}
 	if (carry != 0) {
-		out[i] = @intCast(carry);
+		out[i] = @intCast(carry & 0xFF);
 		i += 1;
+		// At most 1 extra byte for u8 c (carry ≤ 255).
 	}
 	while (i > 0 and out[i - 1] == 0) i -= 1;
 	return i;
 }
 
-/// In-place exact division by 2 of an unsigned LE byte array (caller
-/// guarantees a is even). Returns canonical (trimmed) length.
+/// In-place exact division by 2 of an unsigned LE byte array.
+/// Chunked u64: each iteration shifts an 8-byte word right by 1, with the
+/// low bit of the next-higher word's previous value carrying in via OR
+/// at the high bit. Walks high-to-low.
 pub fn divExactBy2(a: []u8, a_len: usize) usize {
 	if (a_len == 0) return 0;
+	var carry_bit: u64 = 0; // 0 or 0x8000_0000_0000_0000
+	// Process 8-byte chunks from high end down.
+	const aligned_high = a_len - (a_len % 8);
 	var i: usize = a_len;
-	var carry: u8 = 0;
-	while (i > 0) {
+	// Per-byte tail at the high end (above aligned_high).
+	while (i > aligned_high) {
 		i -= 1;
 		const cur = a[i];
-		const new_carry: u8 = if ((cur & 1) != 0) 0x80 else 0;
-		a[i] = (cur >> 1) | carry;
-		carry = new_carry;
+		const new_carry_byte: u8 = if ((cur & 1) != 0) 0x80 else 0;
+		a[i] = (cur >> 1) | @as(u8, @intCast(carry_bit >> 56));
+		carry_bit = @as(u64, new_carry_byte) << 56;
+	}
+	// Chunked high-to-low.
+	while (i >= 8) {
+		i -= 8;
+		const word = std.mem.readInt(u64, a[i..][0..8], .little);
+		const new_carry: u64 = (word & 1) << 63;
+		const shifted = (word >> 1) | carry_bit;
+		std.mem.writeInt(u64, a[i..][0..8], shifted, .little);
+		carry_bit = new_carry;
 	}
 	var n = a_len;
 	while (n > 0 and a[n - 1] == 0) n -= 1;
@@ -707,22 +775,41 @@ fn cmpUnsignedLE(a: []const u8, a_len: usize, b: []const u8, b_len: usize) i8 {
 	return 0;
 }
 
-/// Add two unsigned LE byte arrays. out has capacity ≥ max(a,b)+1. Returns canon len.
+/// Add two unsigned LE byte arrays. out has capacity ≥ max(a,b)+1. Chunked u64.
 pub fn addUnsignedLE(a: []const u8, a_len: usize, b: []const u8, b_len: usize, out: []u8) usize {
 	const longer_len = @max(a_len, b_len);
 	std.debug.assert(out.len > longer_len);
 	const longer: []const u8 = if (a_len >= b_len) a else b;
 	const shorter: []const u8 = if (a_len >= b_len) b else a;
 	const shorter_len = @min(a_len, b_len);
-	var carry: u16 = 0;
+	var carry: u64 = 0;
 	var i: usize = 0;
+	// Chunked u64 path for the both-have-real-bytes prefix.
+	const both_aligned = shorter_len - (shorter_len % 8);
+	while (i < both_aligned) : (i += 8) {
+		const av = std.mem.readInt(u64, longer[i..][0..8], .little);
+		const bv = std.mem.readInt(u64, shorter[i..][0..8], .little);
+		const s1 = @addWithOverflow(av, bv);
+		const s2 = @addWithOverflow(s1[0], carry);
+		std.mem.writeInt(u64, out[i..][0..8], s2[0], .little);
+		carry = @as(u64, s1[1]) + @as(u64, s2[1]);
+	}
+	// Per-byte tail of shorter.
 	while (i < shorter_len) : (i += 1) {
-		const sum: u16 = @as(u16, longer[i]) + @as(u16, shorter[i]) + carry;
+		const sum: u16 = @as(u16, longer[i]) + @as(u16, shorter[i]) + @as(u16, @intCast(carry));
 		out[i] = @truncate(sum);
 		carry = sum >> 8;
 	}
+	// Chunked propagation through longer-only region.
+	const longer_aligned = longer_len - ((longer_len - i) % 8);
+	while (i + 8 <= longer_aligned) : (i += 8) {
+		const av = std.mem.readInt(u64, longer[i..][0..8], .little);
+		const s = @addWithOverflow(av, carry);
+		std.mem.writeInt(u64, out[i..][0..8], s[0], .little);
+		carry = s[1];
+	}
 	while (i < longer_len) : (i += 1) {
-		const sum: u16 = @as(u16, longer[i]) + carry;
+		const sum: u16 = @as(u16, longer[i]) + @as(u16, @intCast(carry));
 		out[i] = @truncate(sum);
 		carry = sum >> 8;
 	}
@@ -735,19 +822,35 @@ pub fn addUnsignedLE(a: []const u8, a_len: usize, b: []const u8, b_len: usize, o
 	return n;
 }
 
-/// Subtract: out = a - b (unsigned). Caller guarantees a >= b. Returns canon len.
+/// Subtract: out = a - b (unsigned). Caller guarantees a >= b. Chunked u64.
 pub fn subUnsignedLE(a: []const u8, a_len: usize, b: []const u8, b_len: usize, out: []u8) usize {
 	std.debug.assert(out.len >= a_len);
 	std.debug.assert(b_len <= a_len);
-	var borrow: i32 = 0;
+	var borrow: u64 = 0;
 	var i: usize = 0;
+	const b_aligned = b_len - (b_len % 8);
+	while (i < b_aligned) : (i += 8) {
+		const av = std.mem.readInt(u64, a[i..][0..8], .little);
+		const bv = std.mem.readInt(u64, b[i..][0..8], .little);
+		const d1 = @subWithOverflow(av, bv);
+		const d2 = @subWithOverflow(d1[0], borrow);
+		std.mem.writeInt(u64, out[i..][0..8], d2[0], .little);
+		borrow = @as(u64, d1[1]) + @as(u64, d2[1]);
+	}
 	while (i < b_len) : (i += 1) {
-		const diff: i32 = @as(i32, a[i]) - @as(i32, b[i]) - borrow;
+		const diff: i32 = @as(i32, a[i]) - @as(i32, b[i]) - @as(i32, @intCast(borrow));
 		out[i] = @truncate(@as(u32, @bitCast(diff)) & 0xFF);
 		borrow = if (diff < 0) 1 else 0;
 	}
+	const a_aligned = a_len - ((a_len - i) % 8);
+	while (i + 8 <= a_aligned) : (i += 8) {
+		const av = std.mem.readInt(u64, a[i..][0..8], .little);
+		const d = @subWithOverflow(av, borrow);
+		std.mem.writeInt(u64, out[i..][0..8], d[0], .little);
+		borrow = d[1];
+	}
 	while (i < a_len) : (i += 1) {
-		const diff: i32 = @as(i32, a[i]) - borrow;
+		const diff: i32 = @as(i32, a[i]) - @as(i32, @intCast(borrow));
 		out[i] = @truncate(@as(u32, @bitCast(diff)) & 0xFF);
 		borrow = if (diff < 0) 1 else 0;
 	}
@@ -801,7 +904,7 @@ pub fn smAdd(
 //
 // Below TOOM3_THRESHOLD bytes the constant overhead exceeds the savings.
 
-pub const TOOM3_THRESHOLD: usize = 256;
+pub const TOOM3_THRESHOLD: usize = 2048;
 
 /// Conservative scratch for `mulToom3` on n-byte equal-length operands.
 /// Each level needs ~12 buffers of size m+1 (where m ≈ n/3) plus
@@ -1088,18 +1191,11 @@ pub fn mulRawBlip(
 	if (b_neg) negateInPlace(scratch_b[0..b_pay.len]);
 
 	const r_len = a_pay.len + b_pay.len;
-	// Algorithm selection: Karatsuba → chunked schoolbook (with pad-to-
-	// multiple-of-8) → byte schoolbook (huge unaligned fallback).
-	//
-	// Toom-3 is implemented (mulToom3) AND correct (cross-check passes),
-	// but disabled in the dispatcher because its constant overhead exceeds
-	// its asymptotic gain at our test sizes (up to 32K-bit). The 5 sub-mults
-	// + interpolation overhead + non-power-of-2 sub-mult sizes (slot = m+2
-	// where m = ⌈n/3⌉) keep it slower than direct Karatsuba below ~64K-bit.
-	// GMP's Toom-3 wins because they bottom out into hand-tuned mpn_*
-	// inner loops; ours bottoms out into chunked u64 schoolbook which has
-	// higher per-call overhead per recursion level.
-	if (a_pay.len == b_pay.len and a_pay.len >= KARATSUBA_THRESHOLD and scratch_k.len >= karatsubaScratchNeed(a_pay.len)) {
+	// Algorithm selection: Toom-3 (≥ 1024 bytes) → Karatsuba → chunked u64.
+	if (a_pay.len == b_pay.len and a_pay.len >= TOOM3_THRESHOLD and scratch_k.len >= toom3ScratchNeed(a_pay.len)) {
+		@memset(scratch_r[0..r_len], 0);
+		mulToom3(scratch_a[0..a_pay.len], scratch_b[0..b_pay.len], scratch_r[0..r_len], scratch_k);
+	} else if (a_pay.len == b_pay.len and a_pay.len >= KARATSUBA_THRESHOLD and scratch_k.len >= karatsubaScratchNeed(a_pay.len)) {
 		@memset(scratch_r[0..r_len], 0);
 		mulKaratsuba(scratch_a[0..a_pay.len], scratch_b[0..b_pay.len], scratch_r[0..r_len], scratch_k);
 	} else {

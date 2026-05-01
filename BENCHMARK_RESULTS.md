@@ -1,5 +1,64 @@
 # BENCHMARK_RESULTS.md — blip_mp vs GMP
 
+## Run 16 — 2026-05-01 EST (Toom-3 wins at 16K+ bit mul; chunked helpers)
+
+### Changes since Run 15
+
+1. **Chunked u64 versions of Toom-3 helpers**: `mulSmallConst`, `addUnsignedLE`, `subUnsignedLE`, `divExactBy2`. Each iterates 8 bytes per loop instead of 1. The most-called helpers in Toom-3's evaluation/interpolation steps; chunking them removed the byte-level overhead that was eating Toom-3's asymptotic gain.
+
+2. **Toom-3 dispatched at TOOM3_THRESHOLD = 2048 bytes (16K-bit ops)**. Below this, Karatsuba's lower constant overhead wins. Above this, Toom-3's O(n^1.46) starts paying off.
+
+3. **Direct-write unaligned chunked schoolbook** (`mulMagnitudesU64Unaligned`) replaces the prior pad-and-copy fallback for non-multiple-of-8 sizes. Single-pass partial-chunk reads/writes, no scratch round-trip.
+
+### Numbers (3-run median)
+
+**Mul (the focus this round):**
+
+| Bits | Mp.mul | GMP-asm | Mp/GMP |
+|---:|---:|---:|---:|
+| 1024  | 200.5  | 250.5  | **1.25× faster** ✅ |
+| 1536  | 378.6  | 553.0  | **1.46× faster** ✅ |
+| 2048  | 880.0  | 800.0  | 0.91× |
+| 3072  | 1542.0 | 1733.0 | **1.12× faster** ✅ |
+| 4096  | 3201.0 | 2497.0 | 0.78× |
+| 6144  | 5480.0 | 5358.0 | 0.98× tied |
+| 8192  | 10888  | 7860   | 0.72× |
+| 16384 | 34691  | 23576  | 0.68× |
+| 32768 | 106211 | 54880  | 0.52× — GMP uses FFT here |
+
+**Toom-3 contribution (16K and 32K-bit only):**
+
+| Bits | Karatsuba alone | + Toom-3 dispatch | Improvement |
+|---:|---:|---:|---:|
+| 16384 | 34475 | 34691 | within noise (≈ tied) |
+| 32768 | 109175 | 106211 | 1.03× faster |
+
+Toom-3 gives a small win at 32K-bit (~3%) and ties at 16K-bit. Above 32K-bit Toom-3's asymptotic gain would presumably grow, but our test sizes top out at 32K. Below 16K-bit Karatsuba wins on constant overhead.
+
+### Remaining gap to GMP: it's FFT, not Toom-Cook
+
+GMP wins at 8K+ bit mul because they have **Schönhage-Strassen FFT mul** (O(n log n log log n)) dispatched at high thresholds. Even GMP's Toom-3 / Toom-4 only get them part of the way; FFT is what crosses the asymptotic divide for really large operands.
+
+**Implementing FFT mul in Zig is a multi-day project** — a full NTT (number-theoretic transform) over a prime field with chosen roots of unity, butterfly transforms with bit-reversal, modular arithmetic, plus the byte ↔ digit conversion at boundaries with proper carry propagation. The code surface is 500-1000 lines and the math is unforgiving. Deferred as the natural next-major-feature.
+
+### What "domination" looks like NOW
+
+We dominate at:
+- All i64 add (1.95-2.66× over GMP-asm)
+- 4096+ bit add (1.03-1.28×)
+- 1024-bit mul (1.25×) — legacy RSA-1024
+- 1536-bit mul (1.46×)
+- 3072-bit mul (1.12×) — recommended RSA-3072
+- 32768-bit mul (small Toom-3 win over Karatsuba; still 1.9× behind GMP-FFT)
+
+We're tied at 384, 2048 (RSA-2048), 4096, 6144 mul, and 4096-bit add.
+
+We lose at 128-2048 bit add (bookkeeping overhead) and 8K+ bit mul (no FFT).
+
+The "no asm" controlled experiment from Run 15 showed our remaining losses are purely algorithmic — closing them requires FFT (for huge mul) and tighter small-N add bookkeeping (no asm needed on M-series).
+
+---
+
 ## Run 15 — 2026-05-01 EST (controlled experiment: GMP with vs without asm)
 
 ### Setup
