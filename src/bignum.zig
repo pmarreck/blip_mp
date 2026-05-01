@@ -363,10 +363,13 @@ fn tier3MulOp(r: *Mp, a: *const Mp, b: *const Mp) ArithError!void {
 	var stack_b: [STACK_BYTES]u8 = undefined;
 	var stack_r: [STACK_BYTES * 2 + 1]u8 = undefined;
 	var stack_out: [STACK_BYTES * 2 + 16]u8 = undefined;
-	// Karatsuba scratch — sized for the larger operand.
+	// Toom-3 / Karatsuba scratch — sized for the larger operand.
 	const max_pay = @max(a_pay_len, b_pay_len);
-	const k_need = if (a_pay_len == b_pay_len) tier3.karatsubaScratchNeed(max_pay) else 0;
-	var stack_k: [STACK_BYTES * 4 + 64]u8 = undefined;
+	const k_need = if (a_pay_len == b_pay_len)
+		(if (max_pay >= tier3.TOOM3_THRESHOLD) tier3.toom3ScratchNeed(max_pay) else tier3.karatsubaScratchNeed(max_pay))
+	else
+		0;
+	var stack_k: [STACK_BYTES * 16 + 256]u8 = undefined;
 	var heap_a: ?[]u8 = null;
 	var heap_b: ?[]u8 = null;
 	var heap_r: ?[]u8 = null;
