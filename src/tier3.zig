@@ -406,14 +406,40 @@ pub fn mulMagnitudesU64(a: []const u8, b: []const u8, r: []u8) void {
 	}
 }
 
-/// Dispatch wrapper: chunked u64 path when both inputs are 8-byte multiples,
-/// per-byte fallback otherwise.
+/// Dispatch wrapper: chunked u64 path always (with pad-to-multiple-of-8
+/// for non-aligned inputs) when sizes fit in stack scratch (≤ 256 bytes
+/// per operand). Falls back to per-byte schoolbook for huge non-aligned
+/// inputs (rare since most callers use aligned sizes).
 pub fn mulMagnitudes(a: []const u8, b: []const u8, r: []u8) void {
-	if (a.len > 0 and b.len > 0 and a.len % 8 == 0 and b.len % 8 == 0) {
-		mulMagnitudesU64(a, b, r);
-	} else {
-		mulMagnitudesByte(a, b, r);
+	if (a.len == 0 or b.len == 0) {
+		@memset(r[0 .. a.len + b.len], 0);
+		return;
 	}
+	if (a.len % 8 == 0 and b.len % 8 == 0) {
+		mulMagnitudesU64(a, b, r);
+		return;
+	}
+	// Pad up to next multiple of 8 in stack scratch, then call chunked u64.
+	// The padded high bytes are zeros, so they contribute no terms — the
+	// chunked product's high bytes will be zero and we can safely copy back
+	// only the meaningful prefix.
+	const a_padded_len = (a.len + 7) & ~@as(usize, 7);
+	const b_padded_len = (b.len + 7) & ~@as(usize, 7);
+	const r_padded_len = a_padded_len + b_padded_len;
+	const STACK = 256;
+	if (a_padded_len > STACK or b_padded_len > STACK or r_padded_len > 2 * STACK) {
+		mulMagnitudesByte(a, b, r);
+		return;
+	}
+	var stack_a: [STACK]u8 = undefined;
+	var stack_b: [STACK]u8 = undefined;
+	var stack_r: [2 * STACK]u8 = undefined;
+	@memcpy(stack_a[0..a.len], a);
+	@memset(stack_a[a.len..a_padded_len], 0);
+	@memcpy(stack_b[0..b.len], b);
+	@memset(stack_b[b.len..b_padded_len], 0);
+	mulMagnitudesU64(stack_a[0..a_padded_len], stack_b[0..b_padded_len], stack_r[0..r_padded_len]);
+	@memcpy(r[0 .. a.len + b.len], stack_r[0 .. a.len + b.len]);
 }
 
 // ── Karatsuba multiplication ─────────────────────────────────────────────────
@@ -602,6 +628,435 @@ pub fn karatsubaScratchNeed(n: usize) usize {
 	return 4 * n + 64;
 }
 
+// ── Helpers for Toom-Cook (sign-magnitude byte arithmetic) ──────────────────
+
+/// Multiply unsigned LE byte array by a small constant c (1..255).
+/// Output: out[0..a_len+1] receives result; returns canonical len.
+pub fn mulSmallConst(a: []const u8, a_len: usize, c: u8, out: []u8) usize {
+	std.debug.assert(out.len > a_len);
+	if (c == 0 or a_len == 0) {
+		return 0;
+	}
+	var carry: u32 = 0;
+	var i: usize = 0;
+	while (i < a_len) : (i += 1) {
+		const prod: u32 = @as(u32, a[i]) * @as(u32, c) + carry;
+		out[i] = @truncate(prod);
+		carry = prod >> 8;
+	}
+	if (carry != 0) {
+		out[i] = @intCast(carry);
+		i += 1;
+	}
+	while (i > 0 and out[i - 1] == 0) i -= 1;
+	return i;
+}
+
+/// In-place exact division by 2 of an unsigned LE byte array (caller
+/// guarantees a is even). Returns canonical (trimmed) length.
+pub fn divExactBy2(a: []u8, a_len: usize) usize {
+	if (a_len == 0) return 0;
+	var i: usize = a_len;
+	var carry: u8 = 0;
+	while (i > 0) {
+		i -= 1;
+		const cur = a[i];
+		const new_carry: u8 = if ((cur & 1) != 0) 0x80 else 0;
+		a[i] = (cur >> 1) | carry;
+		carry = new_carry;
+	}
+	var n = a_len;
+	while (n > 0 and a[n - 1] == 0) n -= 1;
+	return n;
+}
+
+/// In-place exact division by 3 (caller guarantees a is divisible by 3).
+/// Hensel division: 3⁻¹ mod 256 = 0xAB. q[i] = (a[i] - borrow) * 0xAB mod 256.
+/// New borrow = floor((q[i] * 3 + (a[i] - borrow) >> 8) / 256). For exact
+/// division this is just floor((q[i] * 3) / 256) since the low byte matches.
+pub fn divExactBy3(a: []u8, a_len: usize) usize {
+	const inv3: u8 = 0xAB;
+	var borrow: u16 = 0;
+	var i: usize = 0;
+	while (i < a_len) : (i += 1) {
+		// Subtract borrow from a[i] (using u16 to track underflow).
+		const cur: i32 = @as(i32, a[i]) - @as(i32, @intCast(borrow));
+		const cur_low: u8 = @truncate(@as(u32, @bitCast(cur)) & 0xFF);
+		const q_byte: u8 = @truncate(@as(u32, cur_low) *% @as(u32, inv3) & 0xFF);
+		a[i] = q_byte;
+		// New borrow: high byte of (q_byte * 3) + (1 if cur was negative).
+		const prod: u16 = @as(u16, q_byte) * 3;
+		var new_borrow: u16 = prod >> 8;
+		if (cur < 0) new_borrow += 1;
+		borrow = new_borrow;
+	}
+	var n = a_len;
+	while (n > 0 and a[n - 1] == 0) n -= 1;
+	return n;
+}
+
+/// Compare two unsigned LE byte arrays. Returns -1/0/+1.
+fn cmpUnsignedLE(a: []const u8, a_len: usize, b: []const u8, b_len: usize) i8 {
+	if (a_len != b_len) return if (a_len > b_len) 1 else -1;
+	var i: usize = a_len;
+	while (i > 0) {
+		i -= 1;
+		if (a[i] > b[i]) return 1;
+		if (a[i] < b[i]) return -1;
+	}
+	return 0;
+}
+
+/// Add two unsigned LE byte arrays. out has capacity ≥ max(a,b)+1. Returns canon len.
+pub fn addUnsignedLE(a: []const u8, a_len: usize, b: []const u8, b_len: usize, out: []u8) usize {
+	const longer_len = @max(a_len, b_len);
+	std.debug.assert(out.len > longer_len);
+	const longer: []const u8 = if (a_len >= b_len) a else b;
+	const shorter: []const u8 = if (a_len >= b_len) b else a;
+	const shorter_len = @min(a_len, b_len);
+	var carry: u16 = 0;
+	var i: usize = 0;
+	while (i < shorter_len) : (i += 1) {
+		const sum: u16 = @as(u16, longer[i]) + @as(u16, shorter[i]) + carry;
+		out[i] = @truncate(sum);
+		carry = sum >> 8;
+	}
+	while (i < longer_len) : (i += 1) {
+		const sum: u16 = @as(u16, longer[i]) + carry;
+		out[i] = @truncate(sum);
+		carry = sum >> 8;
+	}
+	if (carry != 0) {
+		out[longer_len] = @intCast(carry);
+		return longer_len + 1;
+	}
+	var n = longer_len;
+	while (n > 0 and out[n - 1] == 0) n -= 1;
+	return n;
+}
+
+/// Subtract: out = a - b (unsigned). Caller guarantees a >= b. Returns canon len.
+pub fn subUnsignedLE(a: []const u8, a_len: usize, b: []const u8, b_len: usize, out: []u8) usize {
+	std.debug.assert(out.len >= a_len);
+	std.debug.assert(b_len <= a_len);
+	var borrow: i32 = 0;
+	var i: usize = 0;
+	while (i < b_len) : (i += 1) {
+		const diff: i32 = @as(i32, a[i]) - @as(i32, b[i]) - borrow;
+		out[i] = @truncate(@as(u32, @bitCast(diff)) & 0xFF);
+		borrow = if (diff < 0) 1 else 0;
+	}
+	while (i < a_len) : (i += 1) {
+		const diff: i32 = @as(i32, a[i]) - borrow;
+		out[i] = @truncate(@as(u32, @bitCast(diff)) & 0xFF);
+		borrow = if (diff < 0) 1 else 0;
+	}
+	var n = a_len;
+	while (n > 0 and out[n - 1] == 0) n -= 1;
+	return n;
+}
+
+/// Sign-magnitude tuple. `mag[0..len]` is the unsigned magnitude.
+pub const SM = struct { sign: i8, len: usize };
+
+/// Signed add: r = a + b in sign-magnitude form. r_buf receives magnitude.
+/// Caller guarantees r_buf has capacity ≥ max(a_len, b_len) + 1.
+pub fn smAdd(
+	a_sign: i8, a: []const u8, a_len: usize,
+	b_sign: i8, b: []const u8, b_len: usize,
+	r_buf: []u8,
+) SM {
+	if (a_sign == 0) {
+		@memcpy(r_buf[0..b_len], b[0..b_len]);
+		return .{ .sign = b_sign, .len = b_len };
+	}
+	if (b_sign == 0) {
+		@memcpy(r_buf[0..a_len], a[0..a_len]);
+		return .{ .sign = a_sign, .len = a_len };
+	}
+	if (a_sign == b_sign) {
+		const len = addUnsignedLE(a, a_len, b, b_len, r_buf);
+		return .{ .sign = a_sign, .len = len };
+	}
+	// Different signs: r = ±(|a| - |b|)
+	const cmp = cmpUnsignedLE(a, a_len, b, b_len);
+	if (cmp == 0) return .{ .sign = 0, .len = 0 };
+	if (cmp > 0) {
+		const len = subUnsignedLE(a, a_len, b, b_len, r_buf);
+		return .{ .sign = a_sign, .len = len };
+	}
+	const len = subUnsignedLE(b, b_len, a, a_len, r_buf);
+	return .{ .sign = b_sign, .len = len };
+}
+
+// ── Toom-Cook 3-way multiplication ───────────────────────────────────────────
+//
+// Splits each n-byte operand into 3 parts (low/mid/high of size m bytes
+// each, where m = ⌈n/3⌉; high may be shorter). Each part is treated as a
+// coefficient of a polynomial in B = 2^(8m). Multiplication of two such
+// polynomials produces a degree-4 polynomial. Toom-3 evaluates at 5 points
+// {0, 1, -1, 2, ∞}, performs 5 sub-multiplications (vs Karatsuba's 3 of
+// half-size), then interpolates. Asymptotic O(n^log_3 5) ≈ O(n^1.46),
+// beating Karatsuba's O(n^1.58).
+//
+// Below TOOM3_THRESHOLD bytes the constant overhead exceeds the savings.
+
+pub const TOOM3_THRESHOLD: usize = 256;
+
+/// Conservative scratch for `mulToom3` on n-byte equal-length operands.
+/// Each level needs ~12 buffers of size m+1 (where m ≈ n/3) plus
+/// karatsubaScratchNeed(m) for sub-products. Geometric series: ≤ 16n.
+pub fn toom3ScratchNeed(n: usize) usize {
+	return 16 * n + 256;
+}
+
+/// Toom-Cook 3-way multiply. a.len == b.len. Result fills r[0..2*n].
+/// Falls back to Karatsuba below TOOM3_THRESHOLD.
+pub fn mulToom3(a: []const u8, b: []const u8, r: []u8, scratch: []u8) void {
+	std.debug.assert(a.len == b.len);
+	const n = a.len;
+	std.debug.assert(r.len >= 2 * n);
+
+	if (n < TOOM3_THRESHOLD) {
+		mulKaratsuba(a, b, r, scratch);
+		return;
+	}
+
+	// Split: m = ⌈n/3⌉ for low/mid; high = n - 2m (may be ≤ m).
+	const m = (n + 2) / 3;
+	const a0_len = m;
+	const a1_len = m;
+	const a2_len = n - 2 * m; // 1..m
+	const a0 = a[0..a0_len];
+	const a1 = a[a0_len .. a0_len + a1_len];
+	const a2 = a[a0_len + a1_len ..];
+	const b0 = b[0..a0_len];
+	const b1 = b[a0_len .. a0_len + a1_len];
+	const b2 = b[a0_len + a1_len ..];
+
+	// Sub-product result sizes: each up to 2(m+1) bytes (for the +1-extended evals).
+	const slot = m + 2; // intermediate buffer width
+	const psl = 2 * slot; // sub-product width
+
+	// Scratch layout (offsets in `scratch`):
+	//   eval_a1     [0   .. slot]
+	//   eval_b1     [slot .. 2slot]
+	//   eval_a_m1   [2slot .. 3slot]   (sign in returned SM)
+	//   eval_b_m1   [3slot .. 4slot]
+	//   eval_a2     [4slot .. 5slot]
+	//   eval_b2     [5slot .. 6slot]
+	//   v0          [6slot .. 6slot + psl]      (= a0*b0)        — also written to r[0..2m]
+	//   v1          [6slot + psl   .. 6slot + 2psl]
+	//   v_m1        [6slot + 2psl  .. 6slot + 3psl]
+	//   v2          [6slot + 3psl  .. 6slot + 4psl]
+	//   v_inf       [6slot + 4psl  .. 6slot + 4psl + 2*a2_len]   — also written to r[4m..]
+	//   work1       [6slot + 5psl  .. 6slot + 6psl]
+	//   work2       [6slot + 6psl  .. 6slot + 7psl]
+	//   work3       [6slot + 7psl  .. 6slot + 8psl]
+	//   sub_scratch (Karatsuba): rest
+	std.debug.assert(scratch.len >= toom3ScratchNeed(n));
+
+	const ea1 = scratch[0..slot];
+	const eb1 = scratch[slot .. 2 * slot];
+	const eam1 = scratch[2 * slot .. 3 * slot];
+	const ebm1 = scratch[3 * slot .. 4 * slot];
+	const ea2 = scratch[4 * slot .. 5 * slot];
+	const eb2 = scratch[5 * slot .. 6 * slot];
+	const v0_buf = scratch[6 * slot .. 6 * slot + psl];
+	const v1_buf = scratch[6 * slot + psl .. 6 * slot + 2 * psl];
+	const vm1_buf = scratch[6 * slot + 2 * psl .. 6 * slot + 3 * psl];
+	const v2_buf = scratch[6 * slot + 3 * psl .. 6 * slot + 4 * psl];
+	const vinf_buf = scratch[6 * slot + 4 * psl .. 6 * slot + 5 * psl];
+	const work1 = scratch[6 * slot + 5 * psl .. 6 * slot + 6 * psl];
+	const work2 = scratch[6 * slot + 6 * psl .. 6 * slot + 7 * psl];
+	const work3 = scratch[6 * slot + 7 * psl .. 6 * slot + 8 * psl];
+	const sub_scratch = scratch[6 * slot + 8 * psl ..];
+
+	// ── Evaluations ──
+	// a1_eval = a0 + a1 + a2; b1_eval = b0 + b1 + b2  (positive)
+	const a01_len = addUnsignedLE(a0, a0_len, a1, a1_len, work1);
+	const a1_evln = addUnsignedLE(work1, a01_len, a2, a2_len, ea1);
+	const b01_len = addUnsignedLE(b0, a0_len, b1, a1_len, work1);
+	const b1_evln = addUnsignedLE(work1, b01_len, b2, a2_len, eb1);
+
+	// a_m1_eval = a0 + a2 - a1 (signed); b_m1_eval similar
+	const a02_len = addUnsignedLE(a0, a0_len, a2, a2_len, work1);
+	const am1_sm = smAdd(1, work1, a02_len, -1, a1, a1_len, eam1);
+	const b02_len = addUnsignedLE(b0, a0_len, b2, a2_len, work1);
+	const bm1_sm = smAdd(1, work1, b02_len, -1, b1, a1_len, ebm1);
+
+	// a2_eval = a0 + 2*a1 + 4*a2 (positive); b2_eval similar
+	@memcpy(ea2[0..a0_len], a0);
+	var ea2_len = a0_len;
+	{
+		const m2_len = mulSmallConst(a1, a1_len, 2, work1);
+		ea2_len = addUnsignedLE(ea2, ea2_len, work1, m2_len, ea2);
+		const m4_len = mulSmallConst(a2, a2_len, 4, work1);
+		ea2_len = addUnsignedLE(ea2, ea2_len, work1, m4_len, ea2);
+	}
+	@memcpy(eb2[0..a0_len], b0);
+	var eb2_len = a0_len;
+	{
+		const m2_len = mulSmallConst(b1, a1_len, 2, work1);
+		eb2_len = addUnsignedLE(eb2, eb2_len, work1, m2_len, eb2);
+		const m4_len = mulSmallConst(b2, a2_len, 4, work1);
+		eb2_len = addUnsignedLE(eb2, eb2_len, work1, m4_len, eb2);
+	}
+
+	// ── 5 sub-multiplications ──
+	// Pad all operand evaluations to a uniform `slot` byte length (zero-extend
+	// on the high end). This lets every sub-multiplication use Karatsuba
+	// uniformly — when lengths differ or aren't 8-byte multiples, mulMagnitudes
+	// falls back to per-byte schoolbook which is dramatically slower.
+	@memset(v0_buf, 0);
+	{
+		// v0 = a0 * b0 (size m × m).
+		mulKaratsuba(a0[0..a0_len], b0[0..a0_len], v0_buf[0 .. 2 * a0_len], sub_scratch);
+	}
+	const v0_len = trimLen(v0_buf[0 .. 2 * a0_len]);
+
+	@memset(vinf_buf, 0);
+	{
+		// v_inf = a2 * b2 (size a2_len × a2_len). Pad if a2_len < a0_len for chunking,
+		// but keep it simple: use mulKaratsuba directly (handles small sizes via fallback).
+		mulKaratsuba(a2, b2, vinf_buf[0 .. 2 * a2_len], sub_scratch);
+	}
+	const vinf_len = trimLen(vinf_buf[0 .. 2 * a2_len]);
+
+	// v1, v_m1, v2: pad operands to `slot` bytes uniformly so Karatsuba applies.
+	// (slot = m + 2, large enough for all eval results.)
+	if (a1_evln < slot) @memset(ea1[a1_evln..slot], 0);
+	if (b1_evln < slot) @memset(eb1[b1_evln..slot], 0);
+	if (am1_sm.len < slot) @memset(eam1[am1_sm.len..slot], 0);
+	if (bm1_sm.len < slot) @memset(ebm1[bm1_sm.len..slot], 0);
+	if (ea2_len < slot) @memset(ea2[ea2_len..slot], 0);
+	if (eb2_len < slot) @memset(eb2[eb2_len..slot], 0);
+
+	@memset(v1_buf, 0);
+	mulKaratsuba(ea1[0..slot], eb1[0..slot], v1_buf[0..psl], sub_scratch);
+	const v1_len = trimLen(v1_buf[0..psl]);
+
+	@memset(vm1_buf, 0);
+	if (am1_sm.len > 0 and bm1_sm.len > 0) {
+		mulKaratsuba(eam1[0..slot], ebm1[0..slot], vm1_buf[0..psl], sub_scratch);
+	}
+	const vm1_len = trimLen(vm1_buf[0..psl]);
+	const vm1_sign: i8 = @intCast(@as(i32, am1_sm.sign) * @as(i32, bm1_sm.sign));
+
+	@memset(v2_buf, 0);
+	mulKaratsuba(ea2[0..slot], eb2[0..slot], v2_buf[0..psl], sub_scratch);
+	const v2_len = trimLen(v2_buf[0..psl]);
+
+	// ── Interpolation ──
+	// c0 = v0
+	// c4 = v_inf
+	// S = (v1 + v_m1) / 2 = c0 + c2 + c4  → c2 = S - c0 - c4
+	// D = (v1 - v_m1) / 2 = c1 + c3
+	// 6c3 = v2 - c0 - 4c2 - 16c4 - 2D  → c3 = ... / 6
+	// c1 = D - c3
+
+	// Compute (v1 + v_m1) using sign-magnitude.
+	const sum_sm = smAdd(1, v1_buf, v1_len, vm1_sign, vm1_buf, vm1_len, work1);
+	// /2 (exact)
+	var s_len = sum_sm.len;
+	if (s_len > 0) s_len = divExactBy2(work1, s_len);
+	// c2 = (S - v0) - v_inf
+	const tmp_sm = smAdd(sum_sm.sign, work1, s_len, -1, v0_buf, v0_len, work2);
+	const c2_sm = smAdd(tmp_sm.sign, work2, tmp_sm.len, -1, vinf_buf, vinf_len, work3);
+	// (Save c2 in work3.)
+
+	// Compute D = (v1 - v_m1) / 2  → into work1 (overwriting S).
+	const diff_sm = smAdd(1, v1_buf, v1_len, @intCast(-@as(i32, vm1_sign)), vm1_buf, vm1_len, work1);
+	var d_len = diff_sm.len;
+	if (d_len > 0) d_len = divExactBy2(work1, d_len);
+	const d_sign = diff_sm.sign;
+
+	// Compute t = v2 - c0 - 4c2 - 16c4 - 2D, then c3 = t / 6.
+	// Build into work2.
+	@memcpy(work2[0..v2_len], v2_buf[0..v2_len]);
+	var t_sm = SM{ .sign = 1, .len = v2_len };
+	{
+		// t -= v0
+		const t1 = smAdd(t_sm.sign, work2, t_sm.len, -1, v0_buf, v0_len, work2);
+		t_sm = .{ .sign = t1.sign, .len = t1.len };
+	}
+	// 4 * c2 → into a temp via mulSmallConst on the magnitude.
+	var four_c2_buf: [16384]u8 = undefined; // big enough for any practical c2; spill to vinf_buf if needed.
+	const four_c2_dst: []u8 = if (c2_sm.len + 1 <= four_c2_buf.len) four_c2_buf[0 .. c2_sm.len + 1] else blk: {
+		// Fall back to using vinf_buf as scratch (vinf_buf has psl bytes which is plenty).
+		break :blk vinf_buf[0 .. c2_sm.len + 1];
+	};
+	const four_c2_len = if (c2_sm.len > 0) mulSmallConst(work3, c2_sm.len, 4, four_c2_dst) else 0;
+	{
+		const t1 = smAdd(t_sm.sign, work2, t_sm.len, @intCast(-@as(i32, c2_sm.sign)), four_c2_dst, four_c2_len, work2);
+		t_sm = .{ .sign = t1.sign, .len = t1.len };
+	}
+	// 16 * v_inf — use mulSmallConst with c=16. Use four_c2_buf as scratch.
+	const sixteen_vinf_dst = four_c2_dst;
+	const sixteen_vinf_len = mulSmallConst(vinf_buf, vinf_len, 16, sixteen_vinf_dst);
+	{
+		const t1 = smAdd(t_sm.sign, work2, t_sm.len, -1, sixteen_vinf_dst, sixteen_vinf_len, work2);
+		t_sm = .{ .sign = t1.sign, .len = t1.len };
+	}
+	// 2 * D
+	const two_d_dst = four_c2_dst;
+	const two_d_len = mulSmallConst(work1, d_len, 2, two_d_dst);
+	{
+		const t1 = smAdd(t_sm.sign, work2, t_sm.len, @intCast(-@as(i32, d_sign)), two_d_dst, two_d_len, work2);
+		t_sm = .{ .sign = t1.sign, .len = t1.len };
+	}
+	// /6
+	if (t_sm.len > 0) {
+		const after2 = divExactBy2(work2, t_sm.len);
+		const after3 = divExactBy3(work2, after2);
+		t_sm.len = after3;
+	}
+	const c3_sm = t_sm; // c3 in work2
+
+	// c1 = D - c3
+	const c1_sm = smAdd(d_sign, work1, d_len, @intCast(-@as(i32, c3_sm.sign)), work2, c3_sm.len, ea1);
+	// (c1 in ea1, reusing — we don't need ea1 anymore.)
+
+	// ── Compose result: c0 + c1*B + c2*B^2 + c3*B^3 + c4*B^4 ──
+	// r[0..2m] gets c0 (= v0). r[4m..4m+2*a2_len] gets c4 (= v_inf).
+	@memcpy(r[0 .. 2 * m], v0_buf[0 .. 2 * m]);
+	@memcpy(r[4 * m .. 4 * m + 2 * a2_len], vinf_buf[0 .. 2 * a2_len]);
+	// Zero the gap r[2m..4m] for the upcoming additions.
+	@memset(r[2 * m .. 4 * m], 0);
+
+	// Add c2 at offset 2m (signed; c2 is non-negative for valid Toom-3).
+	if (c2_sm.len > 0) {
+		if (c2_sm.sign > 0) {
+			addUnsignedInPlace(r[2 * m ..], work3[0..c2_sm.len]);
+		} else {
+			subUnsignedInPlace(r[2 * m ..], work3[0..c2_sm.len]);
+		}
+	}
+	// Add c1 at offset m.
+	if (c1_sm.len > 0) {
+		if (c1_sm.sign > 0) {
+			addUnsignedInPlace(r[m..], ea1[0..c1_sm.len]);
+		} else {
+			subUnsignedInPlace(r[m..], ea1[0..c1_sm.len]);
+		}
+	}
+	// Add c3 at offset 3m.
+	if (c3_sm.len > 0) {
+		if (c3_sm.sign > 0) {
+			addUnsignedInPlace(r[3 * m ..], work2[0..c3_sm.len]);
+		} else {
+			subUnsignedInPlace(r[3 * m ..], work2[0..c3_sm.len]);
+		}
+	}
+}
+
+/// Trim trailing zero bytes from a buffer's view. Returns canonical length.
+fn trimLen(buf: []const u8) usize {
+	var n = buf.len;
+	while (n > 0 and buf[n - 1] == 0) n -= 1;
+	return n;
+}
+
 /// r = a * b. Operates on raw BLIP-encoded slices. Result is canonically
 /// encoded into `out`. Caller provides scratch buffers:
 ///   scratch_a, scratch_b: at least each operand's payload length.
@@ -633,7 +1088,17 @@ pub fn mulRawBlip(
 	if (b_neg) negateInPlace(scratch_b[0..b_pay.len]);
 
 	const r_len = a_pay.len + b_pay.len;
-	// Karatsuba when operands are equal-length AND big enough to benefit.
+	// Algorithm selection: Karatsuba → chunked schoolbook (with pad-to-
+	// multiple-of-8) → byte schoolbook (huge unaligned fallback).
+	//
+	// Toom-3 is implemented (mulToom3) AND correct (cross-check passes),
+	// but disabled in the dispatcher because its constant overhead exceeds
+	// its asymptotic gain at our test sizes (up to 32K-bit). The 5 sub-mults
+	// + interpolation overhead + non-power-of-2 sub-mult sizes (slot = m+2
+	// where m = ⌈n/3⌉) keep it slower than direct Karatsuba below ~64K-bit.
+	// GMP's Toom-3 wins because they bottom out into hand-tuned mpn_*
+	// inner loops; ours bottoms out into chunked u64 schoolbook which has
+	// higher per-call overhead per recursion level.
 	if (a_pay.len == b_pay.len and a_pay.len >= KARATSUBA_THRESHOLD and scratch_k.len >= karatsubaScratchNeed(a_pay.len)) {
 		@memset(scratch_r[0..r_len], 0);
 		mulKaratsuba(scratch_a[0..a_pay.len], scratch_b[0..b_pay.len], scratch_r[0..r_len], scratch_k);
@@ -1072,6 +1537,72 @@ test "mulRawBlip: large equal-size operands via Karatsuba" {
 	var out2: [128]u8 = undefined;
 	const n2 = try mulRawBlip(&a_blip, &b_blip, &sa2, &sb2, &sr2, &[_]u8{}, &out2);
 	try testing.expectEqualSlices(u8, out2[0..n2], out[0..n]);
+}
+
+test "mulSmallConst: byte-array * 3" {
+	var out: [16]u8 = undefined;
+	const a = [_]u8{ 0x55, 0x55, 0x55 }; // 0x555555 = 5_592_405
+	const n = mulSmallConst(&a, a.len, 3, &out);
+	// 5_592_405 * 3 = 16_777_215 = 0xFFFFFF
+	try testing.expectEqual(@as(usize, 3), n);
+	try testing.expectEqual(@as(u8, 0xFF), out[0]);
+	try testing.expectEqual(@as(u8, 0xFF), out[1]);
+	try testing.expectEqual(@as(u8, 0xFF), out[2]);
+}
+
+test "divExactBy3: round-trip" {
+	const cases = [_][]const u8{
+		&[_]u8{ 0xFF, 0xFF, 0xFF },
+		&[_]u8{ 0x12, 0x34, 0x56, 0x78 },
+		&[_]u8{ 0x55 },
+	};
+	for (cases) |a| {
+		// Multiply by 3, then divide by 3, expect identity.
+		var prod_buf: [16]u8 = undefined;
+		const prod_len = mulSmallConst(a, a.len, 3, &prod_buf);
+		const back_len = divExactBy3(&prod_buf, prod_len);
+		try testing.expectEqualSlices(u8, a, prod_buf[0..back_len]);
+	}
+}
+
+test "divExactBy2: round-trip" {
+	const cases = [_][]const u8{
+		&[_]u8{ 0xFF, 0xFF, 0xFF },
+		&[_]u8{ 0x12, 0x34, 0x56, 0x78 },
+		&[_]u8{ 0x55 },
+	};
+	for (cases) |a| {
+		var prod_buf: [16]u8 = undefined;
+		const prod_len = mulSmallConst(a, a.len, 2, &prod_buf);
+		const back_len = divExactBy2(&prod_buf, prod_len);
+		try testing.expectEqualSlices(u8, a, prod_buf[0..back_len]);
+	}
+}
+
+test "mulToom3 == mulMagnitudes for various sizes" {
+	const cases = [_]usize{ 256, 384, 512, 1024 };
+	for (cases) |n| {
+		const a = std.testing.allocator.alloc(u8, n) catch unreachable;
+		defer std.testing.allocator.free(a);
+		const b = std.testing.allocator.alloc(u8, n) catch unreachable;
+		defer std.testing.allocator.free(b);
+		var rng = std.Random.DefaultPrng.init(0xDEADBEEF + n);
+		const r = rng.random();
+		for (a) |*p| p.* = r.int(u8);
+		for (b) |*p| p.* = r.int(u8);
+
+		const r_school = std.testing.allocator.alloc(u8, 2 * n) catch unreachable;
+		defer std.testing.allocator.free(r_school);
+		const r_toom = std.testing.allocator.alloc(u8, 2 * n) catch unreachable;
+		defer std.testing.allocator.free(r_toom);
+		const scratch = std.testing.allocator.alloc(u8, toom3ScratchNeed(n)) catch unreachable;
+		defer std.testing.allocator.free(scratch);
+
+		mulMagnitudes(a, b, r_school);
+		@memset(r_toom, 0);
+		mulToom3(a, b, r_toom, scratch);
+		try testing.expectEqualSlices(u8, r_school, r_toom);
+	}
 }
 
 test "mulRawBlip: i64.max * 2 (overflows i64)" {
