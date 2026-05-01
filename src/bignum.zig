@@ -18,10 +18,18 @@
 // Struct layout (72 bytes total on 64-bit):
 //   [0..24)   inline_buf    — encoded bytes when in inline mode
 //   [24]      inline_len    — 0..INLINE_CAP if inline; SENTINEL_HEAP if heap
-//   [25..32)  padding
-//   [32..40)  heap_used     — active length within heap_buf (heap mode only)
+//   [25]      heap_offset   — start offset within heap_buf (heap mode only)
+//   [26..32)  padding
+//   [32..40)  heap_used     — active length within heap_buf starting at heap_offset
 //   [40..56)  heap_buf      — full allocation (slice ptr + cap)
 //   [56..72)  allocator     — std.mem.Allocator (ptr + vtable ptr)
+//
+// heap_offset enables tier3Op's direct-write optimisation: write the canonical
+// payload at a fixed offset (HDR_RESERVE = 10) inside heap_buf, compute the
+// header length, then write the header at HDR_RESERVE - hdr_len. Set
+// heap_offset = HDR_RESERVE - hdr_len. bytes() returns the contiguous slice
+// from heap_offset of length heap_used. This eliminates the scratch+memcpy
+// chain that previously dominated 128-512 bit tier-3 add (~5-7 ns/op saved).
 
 const std = @import("std");
 const encoding = @import("encoding.zig");
@@ -47,14 +55,16 @@ pub const ArithError = SetError || GetError || error{
 pub const Mp = struct {
 	inline_buf: [INLINE_CAP]u8 align(8),
 	inline_len: u8,
+	heap_offset: u8, // start offset within heap_buf (active = heap_buf[offset..offset+used])
 	heap_used: usize,
-	heap_buf: []u8, // FULL allocation; .len is capacity. Active value = heap_buf[0..heap_used].
+	heap_buf: []u8, // FULL allocation; .len is capacity.
 	allocator: std.mem.Allocator,
 
 	pub fn init(allocator: std.mem.Allocator) Mp {
 		return .{
 			.inline_buf = [_]u8{0} ** INLINE_CAP,
 			.inline_len = 0,
+			.heap_offset = 0,
 			.heap_used = 0,
 			.heap_buf = &[_]u8{},
 			.allocator = allocator,
@@ -66,6 +76,7 @@ pub const Mp = struct {
 			self.allocator.free(self.heap_buf);
 			self.heap_buf = &[_]u8{};
 			self.heap_used = 0;
+			self.heap_offset = 0;
 		}
 		self.inline_len = 0;
 	}
@@ -76,7 +87,7 @@ pub const Mp = struct {
 		if (self.inline_len != SENTINEL_HEAP) {
 			return self.inline_buf[0..self.inline_len];
 		}
-		return self.heap_buf[0..self.heap_used];
+		return self.heap_buf[self.heap_offset .. self.heap_offset + self.heap_used];
 	}
 
 	pub fn isInline(self: *const Mp) bool {
@@ -114,6 +125,9 @@ pub const Mp = struct {
 		// Single u64 store covers inline_buf[1..9] regardless of L.
 		std.mem.writeInt(u64, self.inline_buf[1..9], @bitCast(value), .little);
 		self.inline_len = @intCast(need);
+		// Reset heap_offset so a future bytes() call returning heap_buf would
+		// start at the right place (we're inline now, but be defensive).
+		self.heap_offset = 0;
 	}
 
 	/// Ensure heap_buf has at least `cap` bytes. If a realloc happens it
@@ -229,11 +243,13 @@ pub const Mp = struct {
 				while (i < 8) : (i += 1) self.inline_buf[1 + i] = sign_fill;
 			}
 			self.inline_len = @intCast(slice.len);
+			self.heap_offset = 0;
 			return;
 		}
 		try self.ensureHeapCapacity(slice.len);
 		@memcpy(self.heap_buf[0..slice.len], slice);
 		self.heap_used = slice.len;
+		self.heap_offset = 0;
 		self.inline_len = SENTINEL_HEAP;
 	}
 };
@@ -313,46 +329,128 @@ fn tier3MulOp(r: *Mp, a: *const Mp, b: *const Mp) ArithError!void {
 	try r.setBytes(out_buf[0..written]);
 }
 
-/// Internal tier-3 dispatch. Operates DIRECTLY on the BLIP payload bytes —
-/// no limb-array conversion. Two's-complement arithmetic is bit-position-
-/// local, so per-byte add/sub with carry produces correct results across
-/// any sign combination.
+/// Internal tier-3 dispatch. Operates DIRECTLY on the BLIP payload bytes
+/// (no limb-array conversion) AND writes the result directly into r.heap_buf
+/// (no scratch + setBytes copy chain). Two's-complement arithmetic is
+/// bit-position-local, so per-byte add/sub with carry produces correct
+/// results across any sign combination.
+///
+/// Layout strategy in r.heap_buf:
+///   [0..HDR_RESERVE)               — pre-reserved header room
+///   [HDR_RESERVE..HDR_RESERVE+canon) — canonical payload (computed in place)
+/// After computing canon, write the header at offset (HDR_RESERVE - hdr_len),
+/// set heap_offset = (HDR_RESERVE - hdr_len), heap_used = hdr_len + canon.
+/// `bytes()` returns heap_buf[heap_offset..heap_offset+heap_used] — the
+/// contiguous header || payload region. No shift, no extra memcpy.
 const TierOp = enum { add, sub };
+const HDR_RESERVE: usize = 10; // max BLIP header (continuation up to L≈2^77)
 
 fn tier3Op(r: *Mp, a: *const Mp, b: *const Mp, comptime op: TierOp) ArithError!void {
 	const a_bytes = a.bytes();
 	const b_bytes = b.bytes();
-	const max_payload = @max(a_bytes.len, b_bytes.len);
-	const scratch_need = max_payload + 1;
-	const out_need = max_payload + 1 + 10;
 
-	// 8 KB stack scratch covers operands up to 65536-bit. Bigger spills to
-	// the allocator. Stack frames at this size are fine on macOS/Linux
-	// (default ~8 MB stack); per-op malloc was the dominant cost when this
-	// limit was lower (jumped 8192-bit from ~60 ns to ~113 ns in the sweep).
-	const STACK_BYTES = 8192;
-	var stack_scratch: [STACK_BYTES]u8 = undefined;
-	var stack_out: [STACK_BYTES]u8 = undefined;
-	var heap_scratch: ?[]u8 = null;
-	var heap_out: ?[]u8 = null;
-	defer {
-		if (heap_scratch) |slice| r.allocator.free(slice);
-		if (heap_out) |slice| r.allocator.free(slice);
+	// Aliasing safeguard: if r is a or b, ensureHeapCapacity may move the
+	// underlying buffer. Capture inputs into stack scratch first in that
+	// case. For tight loops with stable sizes the realloc happens once
+	// (first iteration); subsequent ops take the hot path.
+	const a_pay_pre = try tier3.payloadOf(a_bytes);
+	const b_pay_pre = try tier3.payloadOf(b_bytes);
+	const max_payload = @max(a_pay_pre.len, b_pay_pre.len);
+	const out_need = HDR_RESERVE + max_payload + 1; // header room + payload + carry byte
+
+	const may_realloc = r.heap_buf.len < out_need;
+	const r_aliases_input = (a_bytes.ptr == r.heap_buf.ptr) or (b_bytes.ptr == r.heap_buf.ptr);
+	if (may_realloc or r_aliases_input) {
+		// Cold path: snapshot inputs to stack scratch, ensureHeapCapacity, then operate.
+		const STACK_IN = 8192;
+		var stack_a: [STACK_IN]u8 = undefined;
+		var stack_b: [STACK_IN]u8 = undefined;
+		var heap_a_in: ?[]u8 = null;
+		var heap_b_in: ?[]u8 = null;
+		defer {
+			if (heap_a_in) |s| r.allocator.free(s);
+			if (heap_b_in) |s| r.allocator.free(s);
+		}
+		const a_copy: []u8 = if (a_bytes.len <= STACK_IN) stack_a[0..a_bytes.len] else blk: {
+			heap_a_in = try r.allocator.alloc(u8, a_bytes.len);
+			break :blk heap_a_in.?;
+		};
+		const b_copy: []u8 = if (b_bytes.len <= STACK_IN) stack_b[0..b_bytes.len] else blk: {
+			heap_b_in = try r.allocator.alloc(u8, b_bytes.len);
+			break :blk heap_b_in.?;
+		};
+		@memcpy(a_copy, a_bytes);
+		@memcpy(b_copy, b_bytes);
+		try r.ensureHeapCapacity(out_need);
+		try tier3OpInto(r, a_copy, b_copy, op);
+		return;
 	}
-	const scratch: []u8 = if (scratch_need <= STACK_BYTES) stack_scratch[0..scratch_need] else blk: {
-		heap_scratch = try r.allocator.alloc(u8, scratch_need);
-		break :blk heap_scratch.?;
-	};
-	const out_buf: []u8 = if (out_need <= STACK_BYTES) stack_out[0..out_need] else blk: {
-		heap_out = try r.allocator.alloc(u8, out_need);
-		break :blk heap_out.?;
-	};
+	// Hot path: r.heap_buf has capacity AND no aliasing. Direct write.
+	try tier3OpInto(r, a_bytes, b_bytes, op);
+}
 
-	const written = switch (op) {
-		.add => try tier3.addRawBlip(a_bytes, b_bytes, scratch, out_buf),
-		.sub => try tier3.subRawBlip(a_bytes, b_bytes, scratch, out_buf),
+/// Compute op(a_bytes, b_bytes) directly into r.heap_buf using the
+/// pre-reserved-header layout. Caller has guaranteed r.heap_buf has at least
+/// `HDR_RESERVE + max_payload + 1` bytes capacity AND no aliasing.
+fn tier3OpInto(r: *Mp, a_bytes: []const u8, b_bytes: []const u8, comptime op: TierOp) ArithError!void {
+	const a_pay = try tier3.payloadOf(a_bytes);
+	const b_pay = try tier3.payloadOf(b_bytes);
+	const n = @max(a_pay.len, b_pay.len);
+
+	const payload_dst = r.heap_buf[HDR_RESERVE..];
+	const result_len = switch (op) {
+		.add => tier3.addPayloads(a_pay, b_pay, n, payload_dst),
+		.sub => tier3.subPayloads(a_pay, b_pay, n, payload_dst),
 	};
-	try r.setBytes(out_buf[0..written]);
+	const canon = tier3.canonicalLen(payload_dst[0..result_len]);
+
+	// Immediate-result fast path (rare for tier-3 but possible after cancellation).
+	if (canon == 1 and payload_dst[0] < 0x80) {
+		r.inline_buf[0] = payload_dst[0];
+		r.inline_len = 1;
+		r.heap_offset = 0;
+		return;
+	}
+	// Inline-fits fast path (result shrunk back below INLINE_CAP after sub
+	// or sign cancellation). Copy canonical encoding into inline_buf.
+	const total = canon + headerByteCount(canon);
+	if (total <= INLINE_CAP) {
+		// Build header + payload in inline_buf.
+		var hdr_buf: [HDR_RESERVE]u8 = undefined;
+		const hdr_len = tier3.writeHeader(&hdr_buf, canon) catch unreachable;
+		@memcpy(r.inline_buf[0..hdr_len], hdr_buf[0..hdr_len]);
+		@memcpy(r.inline_buf[hdr_len .. hdr_len + canon], payload_dst[0..canon]);
+		// Maintain the i64-in-tail invariant if the result fits in i64.
+		if (total >= 2 and total <= 9) {
+			const L = total - 1;
+			const high_byte = r.inline_buf[1 + L - 1];
+			const sign_fill: u8 = if ((high_byte & 0x80) != 0) 0xFF else 0x00;
+			var i: usize = L;
+			while (i < 8) : (i += 1) r.inline_buf[1 + i] = sign_fill;
+		}
+		r.inline_len = @intCast(total);
+		r.heap_offset = 0;
+		return;
+	}
+
+	// Heap fast path: write the header at HDR_RESERVE - hdr_len so it sits
+	// directly before the payload; no shift needed.
+	const hdr_len = headerByteCount(canon);
+	const hdr_start = HDR_RESERVE - hdr_len;
+	_ = tier3.writeHeader(r.heap_buf[hdr_start .. hdr_start + hdr_len], canon) catch unreachable;
+	r.heap_offset = @intCast(hdr_start);
+	r.heap_used = hdr_len + canon;
+	r.inline_len = SENTINEL_HEAP;
+}
+
+/// Cheap helper: how many bytes will writeHeader produce for L?
+inline fn headerByteCount(L: usize) usize {
+	if (L < 32) return 1;
+	// L ≥ 32: header byte + varint for (L >> 5).
+	var n: usize = 2;
+	var L_rem: usize = L >> 5;
+	while (L_rem >= 128) : (L_rem >>= 7) n += 1;
+	return n;
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
@@ -666,6 +764,91 @@ test "arithmetic with aliasing (r = a; r.add(&r, &b))" {
 
 test "Mp struct size: 72 bytes (one cache line + 8 for heap_used)" {
 	try testing.expectEqual(@as(usize, 72), @sizeOf(Mp));
+}
+
+test "tier-3 add via direct-write produces correct bytes()" {
+	// Build two 256-bit values that are simple to verify after the add.
+	// Each byte = 0x01 except the high byte = 0x10 (positive); add yields
+	// each byte = 0x02 except high = 0x20.
+	var a_pay: [32]u8 = [_]u8{0x01} ** 32;
+	a_pay[31] = 0x10;
+	var blip: [34]u8 = undefined;
+	blip[0] = 0xA0;
+	blip[1] = 0x01;
+	@memcpy(blip[2..], &a_pay);
+
+	var a = Mp.init(testing.allocator);
+	defer a.deinit();
+	var b = Mp.init(testing.allocator);
+	defer b.deinit();
+	var r = Mp.init(testing.allocator);
+	defer r.deinit();
+	try a.setBytes(&blip);
+	try b.setBytes(&blip);
+	try r.add(&a, &b);
+
+	const r_bytes = r.bytes();
+	// Header for L=32: continuation-bit set, low-5 of L=0, then varint 0x01.
+	try testing.expectEqual(@as(usize, 34), r_bytes.len);
+	try testing.expectEqual(@as(u8, 0xA0), r_bytes[0]);
+	try testing.expectEqual(@as(u8, 0x01), r_bytes[1]);
+	for (r_bytes[2..34], 0..) |byte, i| {
+		try testing.expectEqual(@as(u8, 2 * a_pay[i]), byte);
+	}
+}
+
+test "tier-3 result fits in inline when ≤ INLINE_CAP bytes" {
+	// (i64.max + 1) goes through tier-3 (i64 add overflows) and encodes as
+	// 10 bytes (L=9 + 1-byte header). 10 ≤ INLINE_CAP(24), so the result
+	// takes the inline-fits fast path and r ends up inline. Subtract 1 →
+	// i64.max (9 bytes), still inline. Both should be reachable via
+	// getI64 for the inline-fits-i64 case.
+	var a = Mp.init(testing.allocator);
+	defer a.deinit();
+	var one = Mp.init(testing.allocator);
+	defer one.deinit();
+	var r = Mp.init(testing.allocator);
+	defer r.deinit();
+	try a.setI64(std.math.maxInt(i64));
+	try one.setI64(1);
+	try r.add(&a, &one); // r = 2^63 (tier-3 path; result fits inline at 10 bytes)
+	try testing.expect(r.isInline());
+	try testing.expectEqual(@as(usize, 10), r.bytes().len);
+	// 2^63 doesn't fit in i64 (positive value of i64.min's magnitude).
+	try testing.expectError(error.OverlongEncoding, r.getI64());
+	try r.sub(&r, &one); // r = i64.max (9 bytes, fits inline AND fits i64)
+	try testing.expect(r.isInline());
+	try testing.expectEqual(@as(i64, std.math.maxInt(i64)), try r.getI64());
+}
+
+test "tier-3 add stable across many ops in same r (heap_offset doesn't drift)" {
+	// Repeated add into the same r should stay correct — the heap_offset
+	// gets reset/recomputed correctly each call.
+	var a = Mp.init(testing.allocator);
+	defer a.deinit();
+	var r = Mp.init(testing.allocator);
+	defer r.deinit();
+	// Build a 256-bit value.
+	var pay: [32]u8 = .{0x01} ** 32;
+	pay[31] = 0x01; // small positive
+	var blip: [34]u8 = undefined;
+	blip[0] = 0xA0;
+	blip[1] = 0x01;
+	@memcpy(blip[2..], &pay);
+	try a.setBytes(&blip);
+	try r.setI64(0);
+	// r = 0 + a + a + a + ... + a (10 times) = 10 * a
+	for (0..10) |_| {
+		try r.add(&r, &a);
+	}
+	const r_bytes = r.bytes();
+	// 10 * each byte = 10 (no carry between bytes). High byte = 10. Total 32 bytes payload.
+	// Result fits in L=32 → header [0xA0, 0x01], payload bytes = 10 each.
+	try testing.expectEqual(@as(u8, 0xA0), r_bytes[0]);
+	try testing.expectEqual(@as(u8, 0x01), r_bytes[1]);
+	for (r_bytes[2..]) |byte| {
+		try testing.expectEqual(@as(u8, 10), byte);
+	}
 }
 
 // ── Tier-3 cross-tier promotion tests ────────────────────────────────────────
