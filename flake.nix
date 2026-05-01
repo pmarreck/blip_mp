@@ -32,6 +32,10 @@
 			in {
 				devShells.default = pkgs.mkShell {
 					buildInputs = with pkgs; [ zig hyperfine gmp jujutsu ];
+					shellHook = ''
+						export GMP_INCLUDE_PATH="${pkgs.gmp.dev}/include"
+						export GMP_LIB_PATH="${pkgs.gmp}/lib"
+					'';
 				};
 
 				packages.default = pkgs.stdenv.mkDerivation {
@@ -43,7 +47,25 @@
 					dontFixup = true;
 					buildPhase = ''
 						${commonBuild}
-						zig build --prefix "$out" -Doptimize=ReleaseFast
+						zig build --prefix "$out" -Doptimize=ReleaseFast \
+							-Dgmp-include-path=${pkgs.gmp.dev}/include \
+							-Dgmp-lib-path=${pkgs.gmp}/lib
+					'';
+				};
+
+				packages.bench = pkgs.stdenv.mkDerivation {
+					pname = "${pname}-bench";
+					inherit version;
+					src = self;
+					inherit nativeBuildInputs buildInputs;
+					dontConfigure = true;
+					dontInstall = true;
+					dontFixup = true;
+					buildPhase = ''
+						${commonBuild}
+						zig build bench --prefix "$out" -Doptimize=ReleaseFast \
+							-Dgmp-include-path=${pkgs.gmp.dev}/include \
+							-Dgmp-lib-path=${pkgs.gmp}/lib
 					'';
 				};
 
