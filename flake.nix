@@ -24,6 +24,14 @@
 				# The core blip_mp library has no external dependencies.
 				buildInputs = [ pkgs.gmp ];
 
+				# A second GMP build with hand-tuned assembly DISABLED, so the
+				# inner mpn_* loops use only the C reference code. This isolates
+				# the BLIP-vs-limb-storage question from Zig-vs-aarch64-asm.
+				# blip_mp vs gmp-noasm = controlled storage-paradigm comparison.
+				gmp-noasm = pkgs.gmp.overrideAttrs (old: {
+					configureFlags = (old.configureFlags or []) ++ [ "--disable-assembly" ];
+				});
+
 				commonBuild = ''
 					export HOME="$TMPDIR"
 					export ZIG_GLOBAL_CACHE_DIR="$TMPDIR/zig-cache"
@@ -57,7 +65,8 @@
 					pname = "${pname}-bench";
 					inherit version;
 					src = self;
-					inherit nativeBuildInputs buildInputs;
+					nativeBuildInputs = nativeBuildInputs;
+					buildInputs = buildInputs ++ [ gmp-noasm ];
 					dontConfigure = true;
 					dontInstall = true;
 					dontFixup = true;
@@ -65,7 +74,9 @@
 						${commonBuild}
 						zig build bench --prefix "$out" -Doptimize=ReleaseFast \
 							-Dgmp-include-path=${pkgs.gmp.dev}/include \
-							-Dgmp-lib-path=${pkgs.gmp}/lib
+							-Dgmp-lib-path=${pkgs.gmp}/lib \
+							-Dgmp-noasm-include-path=${gmp-noasm.dev}/include \
+							-Dgmp-noasm-lib-path=${gmp-noasm}/lib
 					'';
 				};
 

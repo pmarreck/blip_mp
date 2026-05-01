@@ -14,6 +14,10 @@ pub fn build(b: *std.Build) void {
 	// benchmark exe.
 	const gmp_include_path = b.option([]const u8, "gmp-include-path", "Path to GMP headers (gmp.h) — bench comparison only");
 	const gmp_lib_path = b.option([]const u8, "gmp-lib-path", "Path to GMP library directory — bench comparison only");
+	// Optional: path to GMP built with --disable-assembly (pure C). Used to
+	// isolate the BLIP-vs-limb-storage question from Zig-vs-aarch64-asm.
+	const gmp_noasm_include_path = b.option([]const u8, "gmp-noasm-include-path", "Path to GMP-noasm headers");
+	const gmp_noasm_lib_path = b.option([]const u8, "gmp-noasm-lib-path", "Path to GMP-noasm library directory");
 
 	// Core module: pure Zig, no external link deps.
 	const core_module = b.createModule(.{
@@ -84,7 +88,32 @@ pub fn build(b: *std.Build) void {
 		bench_step.dependOn(&install_cc.step);
 	}
 
-	// gmp_bench — pure C exe linking GMP.
+	// gmp_noasm_bench — same C source as gmp_bench but linking against GMP
+	// built with --disable-assembly. Lets us measure pure-C GMP performance
+	// to isolate the storage-paradigm question from the asm-tuning question.
+	if (gmp_noasm_include_path != null and gmp_noasm_lib_path != null) {
+		const gmp_noasm_module = b.createModule(.{
+			.root_source_file = null,
+			.target = target,
+			.optimize = optimize,
+			.link_libc = true,
+		});
+		gmp_noasm_module.addCSourceFile(.{
+			.file = b.path("tests/benchmark/gmp_bench.c"),
+			.flags = &.{ "-O3", "-Wall", "-Wextra" },
+		});
+		gmp_noasm_module.addIncludePath(.{ .cwd_relative = gmp_noasm_include_path.? });
+		gmp_noasm_module.addLibraryPath(.{ .cwd_relative = gmp_noasm_lib_path.? });
+		gmp_noasm_module.linkSystemLibrary("gmp", .{});
+		const gmp_noasm_bench = b.addExecutable(.{
+			.name = "gmp_noasm_bench",
+			.root_module = gmp_noasm_module,
+		});
+		const install_gmp_noasm = b.addInstallArtifact(gmp_noasm_bench, .{});
+		bench_step.dependOn(&install_gmp_noasm.step);
+	}
+
+	// gmp_bench — pure C exe linking GMP (with hand-tuned asm by default).
 	if (gmp_include_path != null and gmp_lib_path != null) {
 		const gmp_module = b.createModule(.{
 			.root_source_file = null,
