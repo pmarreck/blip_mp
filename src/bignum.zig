@@ -429,6 +429,8 @@ fn tier3Op(r: *Mp, a: *const Mp, b: *const Mp, comptime op: TierOp) ArithError!v
 	const b_pay_off: usize = b.cached_pay_off;
 	const a_pay_len: usize = a.cached_pay_len;
 	const b_pay_len: usize = b.cached_pay_len;
+	const a_sign: i8 = a.cached_sign;
+	const b_sign: i8 = b.cached_sign;
 
 	const max_payload = @max(a_pay_len, b_pay_len);
 	const out_need = HDR_RESERVE + max_payload + 1;
@@ -436,46 +438,56 @@ fn tier3Op(r: *Mp, a: *const Mp, b: *const Mp, comptime op: TierOp) ArithError!v
 	const may_realloc = r.heap_buf.len < out_need;
 	const r_aliases_input = (a_bytes.ptr == r.heap_buf.ptr) or (b_bytes.ptr == r.heap_buf.ptr);
 	if (may_realloc or r_aliases_input) {
-		// Cold path: snapshot input PAYLOADS (not full bytes()) to stack
-		// scratch, ensureHeapCapacity, then operate directly on the snapshots.
-		const STACK_IN = 8192;
-		var stack_a: [STACK_IN]u8 = undefined;
-		var stack_b: [STACK_IN]u8 = undefined;
-		var heap_a_in: ?[]u8 = null;
-		var heap_b_in: ?[]u8 = null;
-		defer {
-			if (heap_a_in) |s| r.allocator.free(s);
-			if (heap_b_in) |s| r.allocator.free(s);
-		}
-		const a_copy: []u8 = if (a_pay_len <= STACK_IN) stack_a[0..a_pay_len] else blk: {
-			heap_a_in = try r.allocator.alloc(u8, a_pay_len);
-			break :blk heap_a_in.?;
-		};
-		const b_copy: []u8 = if (b_pay_len <= STACK_IN) stack_b[0..b_pay_len] else blk: {
-			heap_b_in = try r.allocator.alloc(u8, b_pay_len);
-			break :blk heap_b_in.?;
-		};
-		@memcpy(a_copy, a_bytes[a_pay_off .. a_pay_off + a_pay_len]);
-		@memcpy(b_copy, b_bytes[b_pay_off .. b_pay_off + b_pay_len]);
-		try r.ensureHeapCapacity(out_need);
-		try tier3OpIntoPayload(r, a_copy, b_copy, op);
+		try tier3OpCold(r, a_bytes, b_bytes, a_pay_off, a_pay_len, b_pay_off, b_pay_len, out_need, op);
 		return;
 	}
-	// Hot path: pass payload slices directly using cached offsets — no parse.
-	try tier3OpIntoPayload(
-		r,
-		a_bytes[a_pay_off .. a_pay_off + a_pay_len],
-		b_bytes[b_pay_off .. b_pay_off + b_pay_len],
-		op,
-	);
+
+	// Hot path: inlined applyTier3Op via the `inline fn` keyword.
+	_ = a_sign;
+	_ = b_sign;
+	const a_pay = a_bytes[a_pay_off .. a_pay_off + a_pay_len];
+	const b_pay = b_bytes[b_pay_off .. b_pay_off + b_pay_len];
+	try applyTier3Op(r, a_pay, b_pay, op);
 }
 
-/// Compute op(a_pay, b_pay) directly into r.heap_buf using the
-/// pre-reserved-header layout. Caller passes payloads pre-extracted via
-/// the cached payload offsets — no header parse on the hot path.
-fn tier3OpIntoPayload(r: *Mp, a_pay: []const u8, b_pay: []const u8, comptime op: TierOp) ArithError!void {
-	const n = @max(a_pay.len, b_pay.len);
+/// Cold path: ensureHeapCapacity may realloc r.heap_buf, OR r aliases an
+/// input. Snapshot input payloads to stack scratch first.
+fn tier3OpCold(
+	r: *Mp,
+	a_bytes: []const u8, b_bytes: []const u8,
+	a_pay_off: usize, a_pay_len: usize,
+	b_pay_off: usize, b_pay_len: usize,
+	out_need: usize,
+	comptime op: TierOp,
+) ArithError!void {
+	const STACK_IN = 8192;
+	var stack_a: [STACK_IN]u8 = undefined;
+	var stack_b: [STACK_IN]u8 = undefined;
+	var heap_a_in: ?[]u8 = null;
+	var heap_b_in: ?[]u8 = null;
+	defer {
+		if (heap_a_in) |s| r.allocator.free(s);
+		if (heap_b_in) |s| r.allocator.free(s);
+	}
+	const a_copy: []u8 = if (a_pay_len <= STACK_IN) stack_a[0..a_pay_len] else blk: {
+		heap_a_in = try r.allocator.alloc(u8, a_pay_len);
+		break :blk heap_a_in.?;
+	};
+	const b_copy: []u8 = if (b_pay_len <= STACK_IN) stack_b[0..b_pay_len] else blk: {
+		heap_b_in = try r.allocator.alloc(u8, b_pay_len);
+		break :blk heap_b_in.?;
+	};
+	@memcpy(a_copy, a_bytes[a_pay_off .. a_pay_off + a_pay_len]);
+	@memcpy(b_copy, b_bytes[b_pay_off .. b_pay_off + b_pay_len]);
+	try r.ensureHeapCapacity(out_need);
+	try applyTier3Op(r, a_copy, b_copy, op);
+}
 
+/// Compute op(a_pay, b_pay) → r.heap_buf using the pre-reserved-header layout.
+/// Marked `inline` so both the hot path (in tier3Op) and the cold path (in
+/// tier3OpCold) get the body inlined directly with no function-call overhead.
+inline fn applyTier3Op(r: *Mp, a_pay: []const u8, b_pay: []const u8, comptime op: TierOp) ArithError!void {
+	const n = @max(a_pay.len, b_pay.len);
 	const payload_dst = r.heap_buf[HDR_RESERVE..];
 	const result_len = switch (op) {
 		.add => tier3.addPayloads(a_pay, b_pay, n, payload_dst),
@@ -483,7 +495,6 @@ fn tier3OpIntoPayload(r: *Mp, a_pay: []const u8, b_pay: []const u8, comptime op:
 	};
 	const canon = tier3.canonicalLen(payload_dst[0..result_len]);
 
-	// Immediate-result fast path.
 	if (canon == 1 and payload_dst[0] < 0x80) {
 		r.inline_buf[0] = payload_dst[0];
 		r.inline_len = 1;
@@ -493,7 +504,6 @@ fn tier3OpIntoPayload(r: *Mp, a_pay: []const u8, b_pay: []const u8, comptime op:
 		r.cached_sign = if (payload_dst[0] == 0) 0 else 1;
 		return;
 	}
-	// Inline-fits fast path.
 	const total = canon + headerByteCount(canon);
 	if (total <= INLINE_CAP) {
 		var hdr_buf: [HDR_RESERVE]u8 = undefined;
@@ -503,7 +513,7 @@ fn tier3OpIntoPayload(r: *Mp, a_pay: []const u8, b_pay: []const u8, comptime op:
 		if (total >= 2 and total <= 9) {
 			const L = total - 1;
 			const high_byte = r.inline_buf[1 + L - 1];
-			const sign_fill: u8 = if ((high_byte & 0x80) != 0) 0xFF else 0x00;
+			const sign_fill: u8 = if ((high_byte & 0x80) != 0) 0xFF else 0;
 			var i: usize = L;
 			while (i < 8) : (i += 1) r.inline_buf[1 + i] = sign_fill;
 		}
@@ -515,7 +525,6 @@ fn tier3OpIntoPayload(r: *Mp, a_pay: []const u8, b_pay: []const u8, comptime op:
 		return;
 	}
 
-	// Heap fast path.
 	const hdr_len = headerByteCount(canon);
 	const hdr_start = HDR_RESERVE - hdr_len;
 	_ = tier3.writeHeader(r.heap_buf[hdr_start .. hdr_start + hdr_len], canon) catch unreachable;
@@ -526,6 +535,7 @@ fn tier3OpIntoPayload(r: *Mp, a_pay: []const u8, b_pay: []const u8, comptime op:
 	r.cached_pay_len = @intCast(canon);
 	r.cached_sign = signFromPayload(r.heap_buf[hdr_start + hdr_len .. hdr_start + hdr_len + canon]);
 }
+
 
 /// How many header bytes does a length-prefixed BLIP value occupy?
 /// Reads only from the buffer — uses the lookup table for the first byte
