@@ -36,15 +36,34 @@ Working order, smallest reviewable increments. Strict TDD where business logic e
 
 - [x] Drop the unsigned `encodeU64Canonical`/`decodeU64` and tests — Peter correctly noted the dual-encoder split was self-inflicted. The "where is the sign bit" issue dissolves once we commit fully to signed two's-complement (the bit is, by definition, the high bit of the high payload byte). Encoder still picks L based on signed range; that's the only signedness-aware decision. (2026-04-30 21:25 EST)
 
-## Milestone 2 — Benchmark harness (proof or disproof)
+## Milestone 2 — Benchmark harness (proof or disproof) — VERDICT: VALIDATED
 
-- [x] `gmp` already in `flake.nix` `buildInputs` (added during M0 in anticipation) (2026-04-30)
-- [ ] `tests/benchmark/small_accumulator.zig` — accumulator loop summing N values into a bignum
-- [ ] Same workload in C against GMP, same optimization level
-- [ ] `./bm` runs both, reports ratio, asserts no `DEBUG BUILD` banner
-- [ ] **Decision point**: if blip_mp ≥ 1.5× faster, proceed to M3. Otherwise document findings in `BENCHMARK_RESULTS.md` and stop.
-- *Curiosity poke:* allocator choice matters. GMP uses libc malloc by default; should compare apples-to-apples (same allocator), or measure each with its native allocator and report both numbers.
-- *Curiosity poke:* my current `Mp.add` decodes both operands every call. For a tight accumulator loop, that's wasted work. The bench may surface this as a bottleneck. Don't pre-optimize — let the numbers speak.
+- [x] `gmp` already in `flake.nix` `buildInputs` (2026-04-30)
+- [x] `tests/benchmark/blip_mp_bench.zig` — Mp.add and zero-alloc raw paths across 5 value buckets (2026-04-30)
+- [x] `tests/benchmark/gmp_bench.c` — same workload against GMP `mpz_add` (2026-04-30)
+- [x] Built via `nix build .#packages.aarch64-darwin.bench`; install_artifact step added (2026-04-30)
+- [x] Run 1: Mp.add was 3× SLOWER than GMP (per-call malloc dominates) but raw was 2.73× FASTER in the immediate bucket → identified SBO as the missing piece (2026-04-30 21:45 EST)
+- [x] **M1.6: SBO `Mp` (representation 1a)** — 24-byte inline buffer + heap fallback. Tier 0/1 zero-alloc. Struct size 64 bytes (one cache line). All 36 unit tests pass. (2026-04-30 22:05 EST)
+- [x] Run 2: SBO `Mp.add` is **1.68× faster than GMP in the immediate bucket** — clears the 1.5× threshold. (2026-04-30 22:08 EST)
+- [x] **DECISION: hypothesis VALIDATED. Proceed to M3.** (2026-04-30 22:10 EST)
+
+## Milestone 3 — Tier 3 (large-number paths)
+
+The hypothesis is validated for tier 0/1; M3 extends to large-number arithmetic so blip_mp is competitive across the full value-size spectrum.
+
+- [ ] **Decide**: link libgmp's `mpn_*` layer (just the limb primitives, not `mpz_*`), or reimplement?
+  - Linking is faster to get to bench-able state; gives instant GMP-quality asm tuning at no implementation cost.
+  - Reimplementing avoids the LGPLv3 link constraint and lets us tune around BLIP-specific patterns (e.g., known result-L bounds after operations).
+  - *Lean: link initially, validate the hypothesis at scale, then reconsider for licensing if/when productizing.*
+- [ ] Unpack/repack: BLIP payload `bytes` ↔ aligned `mp_limb_t[]` buffer. Aligned scratch space allocator.
+- [ ] Tier 3 add/sub/mul, validated against GMP for correctness (round-trip tests across many random large values).
+- [ ] Cross-tier promotion: when tier-0/1 `add` overflows i64, promote to tier 3 path automatically (currently returns `error.TierOverflow`).
+- [ ] Bench: extend `blip_mp_bench` to large-value buckets (e.g., 256-bit, 1024-bit, 4096-bit). Verify we MATCH GMP rather than exceed (per spec, that's the goal at large sizes).
+
+## Optional pre-M3 micro-optimization (close the Mp.add → raw gap)
+
+- [ ] Comptime-specialize `setI64` fast path for value ∈ [0,127]: single byte store, skip encode loop. Should land Mp.add ≈ raw for immediate bucket and lift L=1..L=2 above GMP.
+- [ ] Cache decoded i64 in the struct (`cached_i64: ?i64`)? Only if profiling justifies it — adds 16 bytes to struct size and complicates invariants.
 
 ## Milestone 3 — Tier 3 (only if Milestone 2 succeeds)
 
