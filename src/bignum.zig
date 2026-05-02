@@ -58,6 +58,8 @@ pub const GetError = encoding.Error || error{
 pub const ArithError = SetError || GetError || error{
 	TierOverflow, // currently unused — tier 3 promotion handles all in-range cases
 	OutputBufferTooSmall, // tier-3 result wouldn't fit in target Mp's heap or inline buffer
+	DivisionByZero, // div / mod / divMod / powm with zero divisor or modulus
+	NotImplementedTier3, // div / mod / powm tier-3 path not yet shipped (M7-2 / M7-3 / M7-4)
 };
 
 pub const Mp = struct {
@@ -239,6 +241,44 @@ pub const Mp = struct {
 			}
 		}
 		try tier3MulOp(r, a, b);
+	}
+
+	/// Truncated division: writes a / b into `q` and a %% b into `rem`.
+	/// Sign convention matches GMP `mpz_tdiv_qr`:
+	///   sign(q) = sign(a) XOR sign(b); sign(rem) = sign(a) (or zero).
+	/// Identity: a == q * b + rem; |rem| < |b|.
+	/// Returns error.DivisionByZero when b == 0.
+	/// `q` and `rem` may alias each other or `a`/`b` (caller's responsibility
+	/// to think about that, but the inline-i64 fast path snapshots both
+	/// operand values before writing).
+	pub fn divMod(q: *Mp, rem: *Mp, a: *const Mp, b: *const Mp) ArithError!void {
+		if (a.inline_len <= 9 and b.inline_len <= 9) {
+			const av = decodeInlineSmall(a);
+			const bv = decodeInlineSmall(b);
+			if (bv == 0) return error.DivisionByZero;
+			// i64 minInt / -1 overflows i64 — promote to tier-3 (NYI).
+			if (av == std.math.minInt(i64) and bv == -1) return error.NotImplementedTier3;
+			const qv = @divTrunc(av, bv);
+			const rv = @rem(av, bv);
+			try q.setI64(qv);
+			try rem.setI64(rv);
+			return;
+		}
+		return error.NotImplementedTier3;
+	}
+
+	/// Truncated quotient: writes a / b into `q`. See `divMod` for sign convention.
+	pub fn div(q: *Mp, a: *const Mp, b: *const Mp) ArithError!void {
+		var rem_tmp = Mp.init(q.allocator);
+		defer rem_tmp.deinit();
+		try divMod(q, &rem_tmp, a, b);
+	}
+
+	/// Truncated remainder: writes a %% b into `rem`. See `divMod` for sign convention.
+	pub fn mod(rem: *Mp, a: *const Mp, b: *const Mp) ArithError!void {
+		var q_tmp = Mp.init(rem.allocator);
+		defer q_tmp.deinit();
+		try divMod(&q_tmp, rem, a, b);
 	}
 
 	/// Returns true iff this Mp's encoded form fits in the i64 universe
@@ -1030,4 +1070,138 @@ test "tier-3 round-trip: (i64.max + 1) - 1 = i64.max (back to tier 0/1)" {
 	try r.add(&a, &one); // r = 2^63 (tier 3)
 	try r.sub(&r, &one); // r = 2^63 - 1 = i64.max (back to tier 0/1, encoded in 9 bytes)
 	try testing.expectEqual(@as(i64, std.math.maxInt(i64)), try r.getI64());
+}
+
+// ── M7-1: Tier 0/1 division (i64 fast path) ───────────────────────────────────
+
+test "divMod: 8 sign combinations match GMP truncated semantics" {
+	// (a, b, expected_q, expected_rem) — sign(q) = sign(a) XOR sign(b);
+	// sign(rem) = sign(a). Identity: a == q*b + rem.
+	const cases = [_]struct { a: i64, b: i64, q: i64, rem: i64 }{
+		.{ .a = 7, .b = 3, .q = 2, .rem = 1 },
+		.{ .a = -7, .b = 3, .q = -2, .rem = -1 },
+		.{ .a = 7, .b = -3, .q = -2, .rem = 1 },
+		.{ .a = -7, .b = -3, .q = 2, .rem = -1 },
+		.{ .a = 0, .b = 5, .q = 0, .rem = 0 },
+		.{ .a = 1_000_000_000, .b = 7, .q = 142_857_142, .rem = 6 },
+		.{ .a = -1_000_000_000, .b = 7, .q = -142_857_142, .rem = -6 },
+		.{ .a = std.math.maxInt(i64), .b = 1, .q = std.math.maxInt(i64), .rem = 0 },
+		.{ .a = std.math.minInt(i64) + 1, .b = -1, .q = std.math.maxInt(i64), .rem = 0 },
+	};
+	var a_mp = Mp.init(testing.allocator);
+	defer a_mp.deinit();
+	var b_mp = Mp.init(testing.allocator);
+	defer b_mp.deinit();
+	var q_mp = Mp.init(testing.allocator);
+	defer q_mp.deinit();
+	var r_mp = Mp.init(testing.allocator);
+	defer r_mp.deinit();
+	for (cases) |c| {
+		try a_mp.setI64(c.a);
+		try b_mp.setI64(c.b);
+		try Mp.divMod(&q_mp, &r_mp, &a_mp, &b_mp);
+		try testing.expectEqual(c.q, try q_mp.getI64());
+		try testing.expectEqual(c.rem, try r_mp.getI64());
+	}
+}
+
+test "div / mod thin wrappers: produce same numbers as divMod" {
+	var a = Mp.init(testing.allocator);
+	defer a.deinit();
+	var b = Mp.init(testing.allocator);
+	defer b.deinit();
+	var q = Mp.init(testing.allocator);
+	defer q.deinit();
+	var r = Mp.init(testing.allocator);
+	defer r.deinit();
+	try a.setI64(1234567);
+	try b.setI64(89);
+	try Mp.div(&q, &a, &b);
+	try testing.expectEqual(@as(i64, 13871), try q.getI64()); // 1234567 / 89
+	try Mp.mod(&r, &a, &b);
+	try testing.expectEqual(@as(i64, 48), try r.getI64()); // 1234567 % 89 = 48 (since 13871*89 = 1234519)
+}
+
+test "divMod: division by zero returns error.DivisionByZero" {
+	var a = Mp.init(testing.allocator);
+	defer a.deinit();
+	var b = Mp.init(testing.allocator);
+	defer b.deinit();
+	var q = Mp.init(testing.allocator);
+	defer q.deinit();
+	var r = Mp.init(testing.allocator);
+	defer r.deinit();
+	try a.setI64(42);
+	try b.setI64(0);
+	try testing.expectError(error.DivisionByZero, Mp.divMod(&q, &r, &a, &b));
+	try testing.expectError(error.DivisionByZero, Mp.div(&q, &a, &b));
+	try testing.expectError(error.DivisionByZero, Mp.mod(&r, &a, &b));
+}
+
+test "divMod: i64.min / -1 overflows i64, returns NotImplementedTier3" {
+	var a = Mp.init(testing.allocator);
+	defer a.deinit();
+	var b = Mp.init(testing.allocator);
+	defer b.deinit();
+	var q = Mp.init(testing.allocator);
+	defer q.deinit();
+	var r = Mp.init(testing.allocator);
+	defer r.deinit();
+	try a.setI64(std.math.minInt(i64));
+	try b.setI64(-1);
+	try testing.expectError(error.NotImplementedTier3, Mp.divMod(&q, &r, &a, &b));
+}
+
+test "divMod: tier-3 operands return NotImplementedTier3 (M7-2/3 placeholder)" {
+	var a = Mp.init(testing.allocator);
+	defer a.deinit();
+	var b = Mp.init(testing.allocator);
+	defer b.deinit();
+	var q = Mp.init(testing.allocator);
+	defer q.deinit();
+	var r = Mp.init(testing.allocator);
+	defer r.deinit();
+	// Build a tier-3 operand (> i64): i64.max + 1.
+	try a.setI64(std.math.maxInt(i64));
+	var one = Mp.init(testing.allocator);
+	defer one.deinit();
+	try one.setI64(1);
+	try a.add(&a, &one); // a = 2^63, tier 3
+	try b.setI64(7);
+	try testing.expectError(error.NotImplementedTier3, Mp.divMod(&q, &r, &a, &b));
+}
+
+test "divMod: identity a == q*b + rem on 1000 random i64 pairs" {
+	var prng = std.Random.DefaultPrng.init(0xD1D_D0D_5EED);
+	const rand = prng.random();
+	var a = Mp.init(testing.allocator);
+	defer a.deinit();
+	var b = Mp.init(testing.allocator);
+	defer b.deinit();
+	var q = Mp.init(testing.allocator);
+	defer q.deinit();
+	var r = Mp.init(testing.allocator);
+	defer r.deinit();
+	var iter: usize = 0;
+	while (iter < 1000) : (iter += 1) {
+		// Bound dividend to leave room for tier-0/1 q*b verification.
+		const av = rand.intRangeAtMost(i64, -1_000_000_000_000, 1_000_000_000_000);
+		var bv = rand.intRangeAtMost(i64, -1_000_000, 1_000_000);
+		if (bv == 0) bv = 1;
+		try a.setI64(av);
+		try b.setI64(bv);
+		try Mp.divMod(&q, &r, &a, &b);
+		const qv = try q.getI64();
+		const rv = try r.getI64();
+		// Identity: a == q*b + r
+		try testing.expectEqual(av, qv * bv + rv);
+		// |r| < |b|
+		const r_abs = if (rv < 0) -rv else rv;
+		const b_abs = if (bv < 0) -bv else bv;
+		try testing.expect(r_abs < b_abs);
+		// Sign of r matches sign of a (or r is zero)
+		if (rv != 0) {
+			try testing.expectEqual(@as(bool, av < 0), rv < 0);
+		}
+	}
 }
