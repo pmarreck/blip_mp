@@ -30,8 +30,13 @@ run "cross-validation vs GMP" bash -c '
 	./result/bin/cross_check
 '
 
-# CLI tests come later when there's a CLI. Add them here:
-# run "cli tests" tests/cli/run_all.sh
+# C FFI smoke test — dogfoods include/blip_mp.h via a pure-C consumer.
+# Builds the c-smoke binary (which links against libblip_mp_c.a) and runs it.
+# Per CLAUDE.md, this validates the FFI boundary that downstream Rust/Lua/
+# Python bindings will depend on.
+run "c FFI smoke" bash -c '
+	nix develop -c zig build c-smoke-run --summary none 2>&1
+'
 
 if [ "$fail_count" -eq 0 ]; then
 	printf '\nAll test groups passed.\n'

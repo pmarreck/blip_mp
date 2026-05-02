@@ -33,6 +33,51 @@ pub fn build(b: *std.Build) void {
 	});
 	b.installArtifact(static_lib);
 
+	// C FFI library — exports the symbols declared in include/blip_mp.h.
+	// Uses libc via std.heap.c_allocator; the Zig core itself doesn't link
+	// libc, but the FFI consumer surface does.
+	const c_api_module = b.createModule(.{
+		.root_source_file = b.path("src/c_api.zig"),
+		.target = target,
+		.optimize = optimize,
+		.link_libc = true,
+	});
+	const c_api_lib = b.addLibrary(.{
+		.name = "blip_mp_c",
+		.linkage = .static,
+		.root_module = c_api_module,
+	});
+	c_api_lib.installHeader(b.path("include/blip_mp.h"), "blip_mp.h");
+	b.installArtifact(c_api_lib);
+
+	// C smoke test — dogfoods the FFI exactly as a downstream binding would.
+	// Pure-C source; links against the static C-API library.
+	const c_smoke_module = b.createModule(.{
+		.root_source_file = null,
+		.target = target,
+		.optimize = optimize,
+		.link_libc = true,
+	});
+	c_smoke_module.addCSourceFile(.{
+		.file = b.path("tests/cli/c_smoke.c"),
+		.flags = &.{ "-O2", "-Wall", "-Wextra", "-Werror", "-std=c11" },
+	});
+	c_smoke_module.addIncludePath(b.path("include"));
+	c_smoke_module.linkLibrary(c_api_lib);
+	const c_smoke = b.addExecutable(.{
+		.name = "c-smoke",
+		.root_module = c_smoke_module,
+	});
+	const install_c_smoke = b.addInstallArtifact(c_smoke, .{});
+	const c_smoke_step = b.step("c-smoke", "Build the C-FFI smoke test");
+	c_smoke_step.dependOn(&install_c_smoke.step);
+
+	// Wire the run step too so `zig build c-smoke-run` exercises the FFI.
+	const run_c_smoke = b.addRunArtifact(c_smoke);
+	run_c_smoke.step.dependOn(&install_c_smoke.step);
+	const run_c_smoke_step = b.step("c-smoke-run", "Run the C-FFI smoke test");
+	run_c_smoke_step.dependOn(&run_c_smoke.step);
+
 	const unit_tests = b.addTest(.{
 		.root_module = b.createModule(.{
 			.root_source_file = b.path("src/blip_mp.zig"),
