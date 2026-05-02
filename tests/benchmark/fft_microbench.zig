@@ -233,6 +233,36 @@ fn benchNttMontVec(orig_m: *const [NTT_N]u64, work: *[NTT_N]u64, tw_m: *const [N
 	return @as(f64, @floatFromInt(elapsed)) / @as(f64, @floatFromInt(NTT_ITERS));
 }
 
+// Stockham auto-sort vec NTT — needs scratch ping-pong buffer.
+fn benchNttStockhamVec(orig: *const [NTT_N]u64, work: *[NTT_N]u64, scratch: *[NTT_N]u64, tw: *const [NTT_N / 2]u64) f64 {
+	var elapsed: u64 = 0;
+	var i: usize = 0;
+	while (i < NTT_ITERS) : (i += 1) {
+		@memcpy(work, orig);
+		const t0 = nowNs();
+		fft.nttStockhamVec(work, scratch, tw);
+		elapsed += nowNs() - t0;
+	}
+	std.mem.doNotOptimizeAway(work);
+	return @as(f64, @floatFromInt(elapsed)) / @as(f64, @floatFromInt(NTT_ITERS));
+}
+
+// Radix-4 NTT (M6-4-D): mixed-radix at N=8192 (one initial radix-2 pass +
+// 6 radix-4 passes). Same in-place, bit-reversal-based call shape as
+// nttWithTwiddlesVec.
+fn benchNttRadix4Vec(orig: *const [NTT_N]u64, work: *[NTT_N]u64, tw: *const [NTT_N / 2]u64) f64 {
+	var elapsed: u64 = 0;
+	var i: usize = 0;
+	while (i < NTT_ITERS) : (i += 1) {
+		@memcpy(work, orig);
+		const t0 = nowNs();
+		fft.nttRadix4Vec(work, tw);
+		elapsed += nowNs() - t0;
+	}
+	std.mem.doNotOptimizeAway(work);
+	return @as(f64, @floatFromInt(elapsed)) / @as(f64, @floatFromInt(NTT_ITERS));
+}
+
 pub fn main() !void {
 	if (comptime @import("builtin").mode == .Debug) {
 		std.debug.print("\x1b[33mDEBUG BUILD — bench numbers will be meaningless!\x1b[0m\n", .{});
@@ -324,4 +354,22 @@ pub fn main() !void {
 	std.debug.print("RESULT impl=nttWithTwiddlesMontVec n={d} ns_per_pass={d:.0}\n", .{ NTT_N, ns_ntt_mont_vec });
 	std.debug.print("Mont NTT speedup (mont_vec vs scalar): {d:.2}x\n", .{ns_ntt_scalar / ns_ntt_mont_vec});
 	std.debug.print("Mont NTT speedup (mont_vec vs %P_vec): {d:.2}x\n", .{ns_ntt_vec / ns_ntt_mont_vec});
+
+	// Stockham auto-sort vec NTT — eliminates the bit-reversal pass at the
+	// cost of a second N-element buffer for ping-ponging.
+	var st_scratch: [NTT_N]u64 = undefined;
+	_ = benchNttStockhamVec(&orig, &work, &st_scratch, &tw); // warm-up
+	const ns_ntt_stockham_vec = benchNttStockhamVec(&orig, &work, &st_scratch, &tw);
+	std.debug.print("RESULT impl=nttStockhamVec n={d} ns_per_pass={d:.0}\n", .{ NTT_N, ns_ntt_stockham_vec });
+	std.debug.print("Stockham vs Cooley-Tukey vec ({d}x) — lower is better\n", .{1});
+	std.debug.print("Stockham NTT speedup (stockham_vec vs %P_vec): {d:.2}x\n", .{ns_ntt_vec / ns_ntt_stockham_vec});
+	std.debug.print("Stockham NTT speedup (stockham_vec vs scalar): {d:.2}x\n", .{ns_ntt_scalar / ns_ntt_stockham_vec});
+
+	// Radix-4 mixed-radix vec NTT (M6-4-D): same call shape as
+	// nttWithTwiddlesVec; in-place, bit-reversal-based, fused two-stage radix-2.
+	_ = benchNttRadix4Vec(&orig, &work, &tw); // warm-up
+	const ns_ntt_r4_vec = benchNttRadix4Vec(&orig, &work, &tw);
+	std.debug.print("RESULT impl=nttRadix4Vec n={d} ns_per_pass={d:.0}\n", .{ NTT_N, ns_ntt_r4_vec });
+	std.debug.print("Radix-4 NTT speedup (r4_vec vs %P_vec): {d:.2}x\n", .{ns_ntt_vec / ns_ntt_r4_vec});
+	std.debug.print("Radix-4 NTT speedup (r4_vec vs scalar): {d:.2}x\n", .{ns_ntt_scalar / ns_ntt_r4_vec});
 }

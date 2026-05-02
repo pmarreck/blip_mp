@@ -778,6 +778,334 @@ pub fn nttWithTwiddlesVec(a: []u64, twiddles: []const u64) void {
 	}
 }
 
+// ── Stockham auto-sort NTT (M6-4-C) ─────────────────────────────────────────
+//
+// Cooley-Tukey requires a separate bit-reversal permutation pass before the
+// butterflies. Stockham's variant interleaves the permutation INTO the
+// butterflies by reading from one buffer and writing to another, with output
+// indices computed so that the result lands in natural order. After log2(N)
+// passes (ping-ponging buffers each pass), the data is naturally ordered. No
+// explicit permutation pass.
+//
+// Trade-off: requires a second N-element scratch buffer (in-place is impossible
+// with this index pattern). The cost-saving is the bit-reversal pass at N=8192
+// is ~8K memory swaps; eliminating it across 3 NTT calls per multiply saves
+// real time at large N.
+//
+// Buffer plumbing: pass `s` reads from `src` and writes to `dst`, then we swap
+// pointers. After log2(N) passes, the natural-order output lives in:
+//   - `a` if log2(N) is even (after even number of swaps)
+//   - `scratch` if log2(N) is odd (we memcpy back to `a` so the output is
+//     always in `a`).
+//
+// Index pattern (decimation-in-time, radix-2):
+//   At pass s with m = 2^(s+1), m2 = m/2, L = N/m groups:
+//     for q in 0..L, j in 0..m2:
+//       w = twiddles[j * (N/m)]
+//       x = src[q*m2 + j]              (lower half of group, source-side)
+//       y = src[q*m2 + j + N/2]        (partner is N/2 away in source)
+//       dst[q*m + j]      = x + w*y
+//       dst[q*m + j + m2] = x - w*y
+//
+// We linearize the (q, j) pairs as p = 0..N/2 with q = p / m2, j = p % m2.
+
+/// Scalar Stockham auto-sort NTT. `a` and `scratch` must be the same length
+/// (a power of 2). `twiddles[j] = omega_n^j` for j in 0..n/2 (same convention
+/// as `nttWithTwiddles`). On return, the natural-order transform lives in `a`;
+/// `scratch` is clobbered.
+pub fn nttStockham(a: []u64, scratch: []u64, twiddles: []const u64) void {
+	const n = a.len;
+	if (n <= 1) return;
+	std.debug.assert(n & (n - 1) == 0);
+	std.debug.assert(scratch.len == n);
+	std.debug.assert(twiddles.len >= n / 2);
+
+	const half_n = n >> 1;
+	var src: []u64 = a;
+	var dst: []u64 = scratch;
+
+	var m: usize = 2;
+	while (m <= n) : (m <<= 1) {
+		const m2 = m >> 1;
+		const stride = n / m; // twiddle stride at this pass
+		// L = n / m groups. Each group consumes m2 source pairs (lo at
+		// q*m2+j, hi at q*m2+j+half_n) and writes m destinations.
+		var q: usize = 0;
+		while (q < n) : (q += m) {
+			// q here is the destination block start (q*m in the formula
+			// above maps to this loop's q because we iterate q_idx by m).
+			const q_idx = q / m; // 0..L-1
+			const src_base = q_idx * m2;
+			var j: usize = 0;
+			while (j < m2) : (j += 1) {
+				const w = twiddles[j * stride];
+				const x = src[src_base + j];
+				const y = src[src_base + j + half_n];
+				const t = mulModP(y, w);
+				dst[q + j] = addModP(x, t);
+				dst[q + j + m2] = subModP(x, t);
+			}
+		}
+		// Ping-pong.
+		const tmp = src;
+		src = dst;
+		dst = tmp;
+	}
+
+	// After log2(n) swaps, `src` holds the result. If log2(n) is even,
+	// `src == a` already (last swap put it back). If odd, `src == scratch`
+	// and we must copy into `a` so callers find the result in `a`.
+	if (src.ptr != a.ptr) {
+		@memcpy(a, src);
+	}
+}
+
+/// Vectorized Stockham auto-sort NTT. Same algorithm as `nttStockham`, but the
+/// inner butterfly loop is unrolled by 2 and run through `@Vector(2, u64)` SIMD
+/// modular primitives — exactly mirroring the relationship between
+/// `nttWithTwiddles` and `nttWithTwiddlesVec`.
+///
+/// At pass `m == 2` (m2 == 1), there is no pair to vectorize; we fall back to
+/// scalar for that one level.
+///
+/// Note: `dst[q + j]` and `dst[q + j + m2]` are stored to two destination lanes
+/// that are `m2` apart. For `m2 >= 2` we can vectorize across `j` and
+/// `j+1` (which are adjacent in `dst` for both halves), exactly as the
+/// Cooley-Tukey vec form does. Source loads at `src_base + j` and
+/// `src_base + j + 1` are also adjacent.
+pub fn nttStockhamVec(a: []u64, scratch: []u64, twiddles: []const u64) void {
+	const n = a.len;
+	if (n <= 1) return;
+	std.debug.assert(n & (n - 1) == 0);
+	std.debug.assert(scratch.len == n);
+	std.debug.assert(twiddles.len >= n / 2);
+
+	const half_n = n >> 1;
+	var src: []u64 = a;
+	var dst: []u64 = scratch;
+
+	var m: usize = 2;
+	while (m <= n) : (m <<= 1) {
+		const m2 = m >> 1;
+		const stride = n / m;
+		if (m2 == 1) {
+			// Scalar fallback at the smallest level.
+			var q: usize = 0;
+			while (q < n) : (q += m) {
+				const q_idx = q / m;
+				const src_base = q_idx * m2;
+				const w = twiddles[0]; // == 1
+				const x = src[src_base];
+				const y = src[src_base + half_n];
+				const t = mulModP(y, w);
+				dst[q] = addModP(x, t);
+				dst[q + 1] = subModP(x, t);
+			}
+		} else {
+			// m2 >= 2 (and is a power of 2) so we can step j by 2.
+			var q: usize = 0;
+			while (q < n) : (q += m) {
+				const q_idx = q / m;
+				const src_base = q_idx * m2;
+				var j: usize = 0;
+				while (j < m2) : (j += 2) {
+					const w_pair: @Vector(2, u64) = .{
+						twiddles[j * stride],
+						twiddles[(j + 1) * stride],
+					};
+					const x_pair: @Vector(2, u64) = .{
+						src[src_base + j],
+						src[src_base + j + 1],
+					};
+					const y_pair: @Vector(2, u64) = .{
+						src[src_base + j + half_n],
+						src[src_base + j + 1 + half_n],
+					};
+					const t_pair = mulModP_x2(y_pair, w_pair);
+					const new_lo = addModP_x2(x_pair, t_pair);
+					const new_hi = subModP_x2(x_pair, t_pair);
+					dst[q + j] = new_lo[0];
+					dst[q + j + 1] = new_lo[1];
+					dst[q + j + m2] = new_hi[0];
+					dst[q + j + 1 + m2] = new_hi[1];
+				}
+			}
+		}
+		// Ping-pong.
+		const tmp = src;
+		src = dst;
+		dst = tmp;
+	}
+
+	if (src.ptr != a.ptr) {
+		@memcpy(a, src);
+	}
+}
+
+// ── Radix-4 NTT (M6-4-D) ───────────────────────────────────────────────────
+//
+// Cooley-Tukey radix-4 in-place NTT, expressed as a *fused pair of radix-2
+// stages*. After bit-reversal, two consecutive radix-2 levels (call them
+// inner=2M and outer=L=4M) operate on the same 4-element stride pattern:
+//   indices (i+k, i+k+M, i+k+2M, i+k+3M)  — call them (a, b, c, d)
+//
+// The two-stage radix-2 sequence is:
+//   Stage 2M (twiddle w2k = ω_L^(2k)):
+//     A = a + w2k·b      B = a - w2k·b
+//     C = c + w2k·d      D = c - w2k·d
+//   Stage L (twiddles w_k = ω_L^k for the (A,C) pair,
+//                     w_kM = ω_L^(k+M) = ω_L^k · ω_4 for the (B,D) pair):
+//     a' = A + w_k·C     c' = A - w_k·C
+//     b' = B + w_kM·D    d' = B - w_kM·D
+//
+// Mul count vs naive radix-2 two-stage (no k=0 skip): both = 4 muls per
+// 4-element group.  Memory I/O per group: 4 reads + 4 writes vs 8 reads +
+// 8 writes for the two separate radix-2 passes — i.e. ~2× reduction in
+// L1/L2 traffic at outer levels, which is where wall-clock time lives at
+// N≈8192 (working set ~64KB exceeds L1).
+//
+// Mixed-radix handling for log2(N) ODD (e.g. N=8192 → log2=13):
+//   - bit-reverse
+//   - one initial radix-2 pass at len=2  (consumes 1 stage)
+//   - log4(N/2) radix-4 fused passes from L=8 up to L=N  (consumes the rest)
+//
+// Twiddle table convention is unchanged: twiddles[j] = ω_N^j for j ∈ [0, N/2).
+// Twiddle reads at the radix-4 stage:
+//   w_k   = twiddles[k     · (N/L)]
+//   w_2k  = twiddles[(2k)  · (N/L)]
+//   w_kM  = twiddles[(k+M) · (N/L)]   ; note (k+M)·(N/L) = k·(N/L) + N/4
+// For (k+M)·(N/L) we precompute the additive constant `i_off = N/4` once.
+//
+// SIMD layout: process two groups (k and k+1) per inner-loop iteration via
+// `@Vector(2, u64)` lanes, exactly mirroring `nttWithTwiddlesVec`. At
+// `M == 1` (the smallest radix-4 stage, only present when log2(N) is even),
+// adjacent groups are NOT contiguous in memory — index pattern is
+// (i, i+1, i+2, i+3) per group with i stepping by 4 — so we vectorize
+// across pairs of groups within an L-block, falling back to scalar when
+// only 1 group fits.
+pub fn nttRadix4Vec(a: []u64, twiddles: []const u64) void {
+	const n = a.len;
+	if (n <= 1) return;
+	std.debug.assert(n & (n - 1) == 0);
+	std.debug.assert(twiddles.len >= n / 2);
+
+	bitReversePermute(a);
+
+	const log2_n = std.math.log2_int(usize, n);
+	var cur_L: usize = 1;
+
+	// If log2(N) is odd, do one radix-2 stage at len=2 first so the
+	// remaining stages fit a clean log4 ladder.
+	if (log2_n & 1 == 1) {
+		var i: usize = 0;
+		while (i < n) : (i += 2) {
+			const u = a[i];
+			const t = a[i + 1]; // twiddle = 1
+			a[i] = addModP(u, t);
+			a[i + 1] = subModP(u, t);
+		}
+		cur_L = 2;
+	}
+
+	// Radix-4 fused stages: L = 4·cur_L each pass.
+	while (cur_L < n) {
+		const L = cur_L * 4;
+		const M = L / 4;
+		const stride = n / L;
+		// (k+M)·stride = k·stride + M·stride = k·stride + N/4. Since the
+		// twiddle table indexes ω_N^j, the offset for w_{k+M} is N/4.
+		const i_off: usize = n / 4;
+
+		var i: usize = 0;
+		while (i < n) : (i += L) {
+			// Per group at offset k: we touch (i+k, i+k+M, i+k+2M, i+k+3M).
+			// Two consecutive groups (k, k+1) use the same stride pattern
+			// shifted by 1, so their loads/stores compress to vector pairs.
+			if (M == 1) {
+				// Only one group per L-block — no pair to vectorize.
+				const a_v = a[i];
+				const b_v = a[i + 1];
+				const c_v = a[i + 2];
+				const d_v = a[i + 3];
+				const w_k = twiddles[0];   // = 1
+				const w_2k = twiddles[0];  // = 1
+				const w_kM = twiddles[i_off]; // ω_4
+				// Stage 2M butterflies (twiddle = 1, so multiply skipped here
+				// by virtue of identity — but we keep the form for clarity).
+				const tb = mulModP(b_v, w_2k);
+				const A = addModP(a_v, tb);
+				const B = subModP(a_v, tb);
+				const td0 = mulModP(d_v, w_2k);
+				const C = addModP(c_v, td0);
+				const D = subModP(c_v, td0);
+				// Stage L butterflies.
+				const tC = mulModP(C, w_k);
+				const out_a = addModP(A, tC);
+				const out_c = subModP(A, tC);
+				const tD = mulModP(D, w_kM);
+				const out_b = addModP(B, tD);
+				const out_d = subModP(B, tD);
+				a[i] = out_a;
+				a[i + 1] = out_b;
+				a[i + 2] = out_c;
+				a[i + 3] = out_d;
+			} else {
+				// M >= 2 (and a power of 2): vectorize two adjacent groups.
+				var k: usize = 0;
+				while (k < M) : (k += 2) {
+					// Twiddle pairs: w_k for (k, k+1); w_2k for (2k, 2k+2);
+					// w_kM for (k+M, k+1+M).
+					const w_k_pair: @Vector(2, u64) = .{
+						twiddles[k * stride],
+						twiddles[(k + 1) * stride],
+					};
+					const w_2k_pair: @Vector(2, u64) = .{
+						twiddles[(2 * k) * stride],
+						twiddles[(2 * (k + 1)) * stride],
+					};
+					const w_kM_pair: @Vector(2, u64) = .{
+						twiddles[k * stride + i_off],
+						twiddles[(k + 1) * stride + i_off],
+					};
+
+					// Load 4-element group for k and k+1, packed into pairs.
+					const av: @Vector(2, u64) = .{ a[i + k], a[i + k + 1] };
+					const bv: @Vector(2, u64) = .{ a[i + k + M], a[i + k + 1 + M] };
+					const cv: @Vector(2, u64) = .{ a[i + k + 2 * M], a[i + k + 1 + 2 * M] };
+					const dv: @Vector(2, u64) = .{ a[i + k + 3 * M], a[i + k + 1 + 3 * M] };
+
+					// Stage 2M butterflies (twiddle w_2k for both (a,b) and (c,d)).
+					const tb = mulModP_x2(bv, w_2k_pair);
+					const A = addModP_x2(av, tb);
+					const B = subModP_x2(av, tb);
+					const td0 = mulModP_x2(dv, w_2k_pair);
+					const C = addModP_x2(cv, td0);
+					const D = subModP_x2(cv, td0);
+
+					// Stage L butterflies.
+					const tC = mulModP_x2(C, w_k_pair);
+					const out_a = addModP_x2(A, tC);
+					const out_c = subModP_x2(A, tC);
+					const tD = mulModP_x2(D, w_kM_pair);
+					const out_b = addModP_x2(B, tD);
+					const out_d = subModP_x2(B, tD);
+
+					// Store back into the same 4-element-per-group layout.
+					a[i + k] = out_a[0];
+					a[i + k + 1] = out_a[1];
+					a[i + k + M] = out_b[0];
+					a[i + k + 1 + M] = out_b[1];
+					a[i + k + 2 * M] = out_c[0];
+					a[i + k + 1 + 2 * M] = out_c[1];
+					a[i + k + 3 * M] = out_d[0];
+					a[i + k + 1 + 3 * M] = out_d[1];
+				}
+			}
+		}
+		cur_L = L;
+	}
+}
+
 // ── Tests ───────────────────────────────────────────────────────────────────
 
 const testing = std.testing;
@@ -1371,4 +1699,290 @@ test "nttWithTwiddlesMontVec: matches nttWithTwiddles after Mont conversion acro
 			try testing.expectEqual(x_expected, fromMont(xm));
 		}
 	}
+}
+
+// ── M6-4-C Stockham auto-sort NTT tests ────────────────────────────────────
+
+test "nttStockham: bit-exact match vs nttWithTwiddles across sizes" {
+	// Stockham must produce IDENTICAL output to Cooley-Tukey for the same
+	// input + twiddles. (Both compute the natural-order forward NTT.)
+	const sizes = [_]usize{ 2, 4, 8, 16, 32, 64, 256, 1024, 4096, 8192 };
+	for (sizes) |n| {
+		const a_ref = try testing.allocator.alloc(u64, n);
+		defer testing.allocator.free(a_ref);
+		const a_st = try testing.allocator.alloc(u64, n);
+		defer testing.allocator.free(a_st);
+		const scratch = try testing.allocator.alloc(u64, n);
+		defer testing.allocator.free(scratch);
+		const tw = try testing.allocator.alloc(u64, n / 2);
+		defer testing.allocator.free(tw);
+
+		var prng = std.Random.DefaultPrng.init(0x5704C7A4 ^ n);
+		const rand = prng.random();
+		for (a_ref) |*x| x.* = rand.uintLessThan(u64, P);
+		@memcpy(a_st, a_ref);
+
+		// Build forward twiddle table.
+		const omega_n = nthRootOfUnity(n);
+		if (tw.len > 0) tw[0] = 1;
+		var j: usize = 1;
+		while (j < tw.len) : (j += 1) tw[j] = mulModP(tw[j - 1], omega_n);
+
+		nttWithTwiddles(a_ref, tw);
+		nttStockham(a_st, scratch, tw);
+
+		try testing.expectEqualSlices(u64, a_ref, a_st);
+	}
+}
+
+test "nttStockhamVec: bit-exact match vs nttWithTwiddlesVec across sizes" {
+	const sizes = [_]usize{ 2, 4, 8, 16, 32, 64, 256, 1024, 4096, 8192 };
+	for (sizes) |n| {
+		const a_ref = try testing.allocator.alloc(u64, n);
+		defer testing.allocator.free(a_ref);
+		const a_st = try testing.allocator.alloc(u64, n);
+		defer testing.allocator.free(a_st);
+		const scratch = try testing.allocator.alloc(u64, n);
+		defer testing.allocator.free(scratch);
+		const tw = try testing.allocator.alloc(u64, n / 2);
+		defer testing.allocator.free(tw);
+
+		var prng = std.Random.DefaultPrng.init(0x57C7A4_BEEF ^ n);
+		const rand = prng.random();
+		for (a_ref) |*x| x.* = rand.uintLessThan(u64, P);
+		@memcpy(a_st, a_ref);
+
+		const omega_n = nthRootOfUnity(n);
+		if (tw.len > 0) tw[0] = 1;
+		var j: usize = 1;
+		while (j < tw.len) : (j += 1) tw[j] = mulModP(tw[j - 1], omega_n);
+
+		nttWithTwiddlesVec(a_ref, tw);
+		nttStockhamVec(a_st, scratch, tw);
+
+		try testing.expectEqualSlices(u64, a_ref, a_st);
+	}
+}
+
+test "nttStockham[Vec]: round-trip with inverse equals identity" {
+	const sizes = [_]usize{ 2, 4, 16, 256, 1024, 4096 };
+	for (sizes) |n| {
+		const a = try testing.allocator.alloc(u64, n);
+		defer testing.allocator.free(a);
+		const a_v = try testing.allocator.alloc(u64, n);
+		defer testing.allocator.free(a_v);
+		const orig = try testing.allocator.alloc(u64, n);
+		defer testing.allocator.free(orig);
+		const scratch = try testing.allocator.alloc(u64, n);
+		defer testing.allocator.free(scratch);
+		const tw_fwd = try testing.allocator.alloc(u64, n / 2);
+		defer testing.allocator.free(tw_fwd);
+		const tw_inv = try testing.allocator.alloc(u64, n / 2);
+		defer testing.allocator.free(tw_inv);
+
+		var prng = std.Random.DefaultPrng.init(0xCAFE_57C7 ^ n);
+		const rand = prng.random();
+		for (a) |*x| x.* = rand.uintLessThan(u64, P);
+		@memcpy(orig, a);
+		@memcpy(a_v, a);
+
+		const omega_n = nthRootOfUnity(n);
+		const omega_n_inv = invModP(omega_n);
+		tw_fwd[0] = 1;
+		tw_inv[0] = 1;
+		var j: usize = 1;
+		while (j < n / 2) : (j += 1) {
+			tw_fwd[j] = mulModP(tw_fwd[j - 1], omega_n);
+			tw_inv[j] = mulModP(tw_inv[j - 1], omega_n_inv);
+		}
+
+		// Scalar Stockham round-trip.
+		nttStockham(a, scratch, tw_fwd);
+		nttStockham(a, scratch, tw_inv);
+		const n_inv = invModP(@intCast(n));
+		for (a) |*x| x.* = mulModP(x.*, n_inv);
+		try testing.expectEqualSlices(u64, orig, a);
+
+		// Vec Stockham round-trip.
+		nttStockhamVec(a_v, scratch, tw_fwd);
+		nttStockhamVec(a_v, scratch, tw_inv);
+		for (a_v) |*x| x.* = mulModP(x.*, n_inv);
+		try testing.expectEqualSlices(u64, orig, a_v);
+	}
+}
+
+test "nttStockham convolution theorem: invStockham(stockham(a) * stockham(b)) = a ⊛ b" {
+	const a_in = [_]u64{ 3, 1, 4, 1, 5, 9, 2, 6 };
+	const b_in = [_]u64{ 2, 7, 1, 8, 2, 8, 1, 8 };
+	const M = a_in.len + b_in.len; // 16
+
+	var a = [_]u64{0} ** M;
+	var b = [_]u64{0} ** M;
+	var scratch = [_]u64{0} ** M;
+	for (a_in, 0..) |v, i| a[i] = v;
+	for (b_in, 0..) |v, i| b[i] = v;
+
+	// Build twiddles.
+	var tw_fwd: [M / 2]u64 = undefined;
+	var tw_inv: [M / 2]u64 = undefined;
+	const omega = nthRootOfUnity(M);
+	const omega_inv = invModP(omega);
+	tw_fwd[0] = 1;
+	tw_inv[0] = 1;
+	var j: usize = 1;
+	while (j < M / 2) : (j += 1) {
+		tw_fwd[j] = mulModP(tw_fwd[j - 1], omega);
+		tw_inv[j] = mulModP(tw_inv[j - 1], omega_inv);
+	}
+
+	nttStockham(&a, &scratch, &tw_fwd);
+	nttStockham(&b, &scratch, &tw_fwd);
+	var c: [M]u64 = undefined;
+	for (0..M) |i| c[i] = mulModP(a[i], b[i]);
+	nttStockham(&c, &scratch, &tw_inv);
+	const n_inv = invModP(@intCast(M));
+	for (&c) |*x| x.* = mulModP(x.*, n_inv);
+
+	// Schoolbook reference.
+	var ref = [_]u64{0} ** M;
+	for (a_in, 0..) |av, i| {
+		for (b_in, 0..) |bv, k| {
+			ref[i + k] += av * bv;
+		}
+	}
+	for (0..M) |i| try testing.expectEqual(ref[i], c[i]);
+}
+
+// ── Radix-4 NTT tests (M6-4-D) ──────────────────────────────────────────────
+
+test "nttRadix4Vec: bit-exact match vs nttWithTwiddlesVec across pure-radix-4 sizes" {
+	// Pure radix-4 (log2(N) even): no initial radix-2 stage needed.
+	const sizes = [_]usize{ 4, 16, 64, 256, 1024, 4096 };
+	for (sizes) |n| {
+		const a_ref = try testing.allocator.alloc(u64, n);
+		defer testing.allocator.free(a_ref);
+		const a_r4 = try testing.allocator.alloc(u64, n);
+		defer testing.allocator.free(a_r4);
+		const tw = try testing.allocator.alloc(u64, n / 2);
+		defer testing.allocator.free(tw);
+
+		var prng = std.Random.DefaultPrng.init(0xAAAA_BBBB_CCCC ^ n);
+		const rand = prng.random();
+		for (a_ref) |*x| x.* = rand.uintLessThan(u64, P);
+		@memcpy(a_r4, a_ref);
+
+		const omega_n = nthRootOfUnity(n);
+		if (tw.len > 0) tw[0] = 1;
+		var j: usize = 1;
+		while (j < tw.len) : (j += 1) tw[j] = mulModP(tw[j - 1], omega_n);
+
+		nttWithTwiddlesVec(a_ref, tw);
+		nttRadix4Vec(a_r4, tw);
+
+		try testing.expectEqualSlices(u64, a_ref, a_r4);
+	}
+}
+
+test "nttRadix4Vec: bit-exact match vs nttWithTwiddlesVec across mixed-radix sizes" {
+	// log2(N) odd → mixed radix: one initial radix-2 + log4(N/2) radix-4 passes.
+	const sizes = [_]usize{ 2, 8, 32, 128, 512, 2048, 8192 };
+	for (sizes) |n| {
+		const a_ref = try testing.allocator.alloc(u64, n);
+		defer testing.allocator.free(a_ref);
+		const a_r4 = try testing.allocator.alloc(u64, n);
+		defer testing.allocator.free(a_r4);
+		const tw = try testing.allocator.alloc(u64, n / 2);
+		defer testing.allocator.free(tw);
+
+		var prng = std.Random.DefaultPrng.init(0xCCCC_DDDD_EEEE ^ n);
+		const rand = prng.random();
+		for (a_ref) |*x| x.* = rand.uintLessThan(u64, P);
+		@memcpy(a_r4, a_ref);
+
+		const omega_n = nthRootOfUnity(n);
+		if (tw.len > 0) tw[0] = 1;
+		var j: usize = 1;
+		while (j < tw.len) : (j += 1) tw[j] = mulModP(tw[j - 1], omega_n);
+
+		nttWithTwiddlesVec(a_ref, tw);
+		nttRadix4Vec(a_r4, tw);
+
+		try testing.expectEqualSlices(u64, a_ref, a_r4);
+	}
+}
+
+test "nttRadix4Vec: round-trip with inverse equals identity" {
+	const sizes = [_]usize{ 4, 8, 16, 64, 256, 1024, 2048, 4096, 8192 };
+	for (sizes) |n| {
+		const a = try testing.allocator.alloc(u64, n);
+		defer testing.allocator.free(a);
+		const orig = try testing.allocator.alloc(u64, n);
+		defer testing.allocator.free(orig);
+		const tw_fwd = try testing.allocator.alloc(u64, n / 2);
+		defer testing.allocator.free(tw_fwd);
+		const tw_inv = try testing.allocator.alloc(u64, n / 2);
+		defer testing.allocator.free(tw_inv);
+
+		var prng = std.Random.DefaultPrng.init(0xEEEE_FFFF_1111 ^ n);
+		const rand = prng.random();
+		for (a) |*x| x.* = rand.uintLessThan(u64, P);
+		@memcpy(orig, a);
+
+		const omega_n = nthRootOfUnity(n);
+		const omega_n_inv = invModP(omega_n);
+		tw_fwd[0] = 1;
+		tw_inv[0] = 1;
+		var j: usize = 1;
+		while (j < n / 2) : (j += 1) {
+			tw_fwd[j] = mulModP(tw_fwd[j - 1], omega_n);
+			tw_inv[j] = mulModP(tw_inv[j - 1], omega_n_inv);
+		}
+
+		nttRadix4Vec(a, tw_fwd);
+		nttRadix4Vec(a, tw_inv);
+		const n_inv = invModP(@intCast(n));
+		for (a) |*x| x.* = mulModP(x.*, n_inv);
+
+		try testing.expectEqualSlices(u64, orig, a);
+	}
+}
+
+test "nttRadix4Vec convolution theorem: invR4(R4(a) * R4(b)) = a ⊛ b" {
+	const a_in = [_]u64{ 3, 1, 4, 1, 5, 9, 2, 6 };
+	const b_in = [_]u64{ 2, 7, 1, 8, 2, 8, 1, 8 };
+	const M = a_in.len + b_in.len; // 16, log2=4 (pure radix-4)
+
+	var a = [_]u64{0} ** M;
+	var b = [_]u64{0} ** M;
+	for (a_in, 0..) |v, i| a[i] = v;
+	for (b_in, 0..) |v, i| b[i] = v;
+
+	var tw_fwd: [M / 2]u64 = undefined;
+	var tw_inv: [M / 2]u64 = undefined;
+	const omega = nthRootOfUnity(M);
+	const omega_inv = invModP(omega);
+	tw_fwd[0] = 1;
+	tw_inv[0] = 1;
+	var j: usize = 1;
+	while (j < M / 2) : (j += 1) {
+		tw_fwd[j] = mulModP(tw_fwd[j - 1], omega);
+		tw_inv[j] = mulModP(tw_inv[j - 1], omega_inv);
+	}
+
+	nttRadix4Vec(&a, &tw_fwd);
+	nttRadix4Vec(&b, &tw_fwd);
+	var c: [M]u64 = undefined;
+	for (0..M) |i| c[i] = mulModP(a[i], b[i]);
+	nttRadix4Vec(&c, &tw_inv);
+	const n_inv = invModP(@intCast(M));
+	for (&c) |*x| x.* = mulModP(x.*, n_inv);
+
+	// Schoolbook reference.
+	var ref = [_]u64{0} ** M;
+	for (a_in, 0..) |av, i| {
+		for (b_in, 0..) |bv, k| {
+			ref[i + k] += av * bv;
+		}
+	}
+	for (0..M) |i| try testing.expectEqual(ref[i], c[i]);
 }
