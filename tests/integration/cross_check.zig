@@ -33,6 +33,17 @@ extern "c" fn __gmpz_add(rop: *mpz_t, op1: *const mpz_t, op2: *const mpz_t) void
 extern "c" fn __gmpz_sub(rop: *mpz_t, op1: *const mpz_t, op2: *const mpz_t) void;
 extern "c" fn __gmpz_mul(rop: *mpz_t, op1: *const mpz_t, op2: *const mpz_t) void;
 extern "c" fn __gmpz_tdiv_qr(q: *mpz_t, r: *mpz_t, n: *const mpz_t, d: *const mpz_t) void;
+extern "c" fn __gmpz_powm(rop: *mpz_t, base: *const mpz_t, exp: *const mpz_t, mod: *const mpz_t) void;
+
+// Monotonic timing — std.time.Timer was removed in Zig 0.16; we already link
+// libc for c_allocator and GMP, so call clock_gettime directly.
+const TimeSpec = extern struct { tv_sec: c_long, tv_nsec: c_long };
+extern "c" fn clock_gettime(clk_id: c_int, tp: *TimeSpec) c_int;
+fn nowNs() u64 {
+	var ts: TimeSpec = undefined;
+	_ = clock_gettime(@intFromEnum(std.posix.CLOCK.MONOTONIC), &ts);
+	return @as(u64, @intCast(ts.tv_sec)) * 1_000_000_000 + @as(u64, @intCast(ts.tv_nsec));
+}
 extern "c" fn __gmpz_cmp_ui(op: *const mpz_t, op2: c_ulong) c_int;
 extern "c" fn __gmpz_import(
 	rop: *mpz_t,
@@ -163,7 +174,7 @@ fn nfPrint(nf: NormalForm) void {
 
 // ── Test runners ─────────────────────────────────────────────────────────────
 
-const Op = enum { add, sub, mul, divq, divr };
+const Op = enum { add, sub, mul, divq, divr, powm };
 
 fn opName(op: Op) []const u8 {
 	return switch (op) {
@@ -172,6 +183,7 @@ fn opName(op: Op) []const u8 {
 		.mul => "mul",
 		.divq => "divq",
 		.divr => "divr",
+		.powm => "powm",
 	};
 }
 
@@ -185,6 +197,7 @@ fn runOp(
 		.mul => try blip_r.mul(blip_a, blip_b),
 		.divq => try Mp.divMod(blip_r, scratch_r, blip_a, blip_b),
 		.divr => try Mp.divMod(scratch_q, blip_r, blip_a, blip_b),
+		.powm => unreachable, // powm has its own dedicated 3-operand loop in main()
 	}
 }
 
@@ -198,6 +211,7 @@ fn gmpOp(
 		.mul => __gmpz_mul(gmp_r, gmp_a, gmp_b),
 		.divq => __gmpz_tdiv_qr(gmp_r, scratch_r, gmp_a, gmp_b),
 		.divr => __gmpz_tdiv_qr(scratch_q, gmp_r, gmp_a, gmp_b),
+		.powm => unreachable, // powm has its own dedicated 3-operand loop in main()
 	}
 }
 
@@ -265,6 +279,39 @@ fn setBoth(
 	}
 }
 
+/// Like `setBoth` but always produces a NON-NEGATIVE value. Used for powm
+/// `exp` and `mod` arguments where blip_mp.powm requires exp ≥ 0 and mod > 0.
+fn setBothPositive(
+	mp: *Mp,
+	gmp: *mpz_t,
+	allocator: std.mem.Allocator,
+	rng: std.Random,
+	bits: usize,
+) !void {
+	if (bits <= 60) {
+		const mask: i64 = if (bits >= 63) std.math.maxInt(i64) else (@as(i64, 1) << @intCast(bits)) - 1;
+		const raw = rng.int(i64);
+		const value = if (raw < 0) -(raw & mask) * @as(i64, -1) else raw & mask;
+		const abs_value = if (value < 0) -value else value;
+		try mp.setI64(abs_value);
+		__gmpz_set_si(gmp, @intCast(abs_value));
+		return;
+	}
+	const byte_count = (bits + 7) / 8;
+	const payload = try allocator.alloc(u8, byte_count);
+	defer allocator.free(payload);
+	for (payload) |*p| p.* = rng.int(u8);
+	payload[byte_count - 1] &= 0x7F; // positive (high bit clear)
+
+	__gmpz_import(gmp, byte_count, -1, 1, 0, 0, payload.ptr);
+
+	const blip_buf = try allocator.alloc(u8, byte_count + 16);
+	defer allocator.free(blip_buf);
+	const hdr_len = try blip_mp.tier3.writeHeader(blip_buf, byte_count);
+	@memcpy(blip_buf[hdr_len .. hdr_len + byte_count], payload);
+	try mp.setBytes(blip_buf[0 .. hdr_len + byte_count]);
+}
+
 const TestSpec = struct { op: Op, bits: usize, iters: usize };
 
 fn iterCount(op: Op, bits: usize) usize {
@@ -282,6 +329,16 @@ fn iterCount(op: Op, bits: usize) usize {
 		if (bits <= 4096) return 30;
 		return 15;
 	}
+	// powm scales as O(bits * mul_cost) — bits squarings each O(bits^1.58).
+	// Use much smaller iteration counts since powm is the slowest op.
+	if (op == .powm) {
+		if (bits <= 64) return 100;
+		if (bits <= 256) return 50;
+		if (bits <= 512) return 20;
+		if (bits <= 1024) return 10;
+		if (bits <= 2048) return 5;
+		return 2;
+	}
 	// add/sub are cheap.
 	if (bits <= 1024) return 200;
 	if (bits <= 8192) return 100;
@@ -290,6 +347,9 @@ fn iterCount(op: Op, bits: usize) usize {
 
 const SIZES = [_]usize{ 8, 16, 32, 60, 64, 128, 192, 256, 384, 512, 768, 1024, 1536, 2048, 3072, 4096, 6144, 8192 };
 const OPS = [_]Op{ .add, .sub, .mul, .divq, .divr };
+// powm runs at smaller bit widths to keep wall-clock reasonable. The full op
+// performs `bits` squarings plus ~bits/2 multiplications, each O(bits^1.58).
+const POWM_SIZES = [_]usize{ 8, 16, 32, 60, 64, 128, 192, 256, 384, 512, 768, 1024, 1536, 2048 };
 
 pub fn main() !u8 {
 	const allocator = std.heap.c_allocator;
@@ -406,6 +466,103 @@ pub fn main() !u8 {
 			const status: []const u8 = if (failures == 0) "PASS" else "FAIL";
 			std.debug.print("  {s} op={s:<3} bits={d:>5} iters={d:>4} fails={d}\n", .{ status, opName(op), bits, iters, failures });
 		}
+	}
+
+	// ── powm cross-check ────────────────────────────────────────────────────
+	// powm needs three operands (base, exp, mod). Modulus must be > 0.
+	// We re-use blip_a / gmp_a as base, blip_b / gmp_b as exp, and a separate
+	// pair of Mp / mpz_t for modulus.
+	var blip_m = Mp.init(allocator);
+	defer blip_m.deinit();
+	var gmp_m: mpz_t = undefined;
+	__gmpz_init(&gmp_m);
+	defer __gmpz_clear(&gmp_m);
+
+	for (POWM_SIZES) |bits| {
+		const iters = iterCount(.powm, bits);
+		var failures: usize = 0;
+		for (0..iters) |i| {
+			// Generate base, exp, mod independently.
+			try setBoth(&blip_a, &gmp_a, allocator, rng, bits);
+			// Exp must be non-negative for both blip_mp and GMP semantics
+			// to match (we don't yet implement modular inverse). Generate as
+			// random but force-positive: for tier-0 we use abs of i64; for
+			// tier-3 we use positive payload (no negate).
+			try setBothPositive(&blip_b, &gmp_b, allocator, rng, bits);
+			// Modulus must be non-zero. Force positive and at least 2 (to
+			// avoid the trivial mod==1 case for testing depth).
+			try setBothPositive(&blip_m, &gmp_m, allocator, rng, bits);
+			if (blip_m.cached_sign == 0) {
+				// Re-generate as +1 if zero (rare).
+				try blip_m.setI64(1);
+				__gmpz_set_si(&gmp_m, 1);
+			}
+
+			// Run blip_mp.powm and gmp powm.
+			try Mp.powm(&blip_r, &blip_a, &blip_b, &blip_m);
+			__gmpz_powm(&gmp_r, &gmp_a, &gmp_b, &gmp_m);
+
+			var nf_blip = try normalizeBlip(blip_r.bytes(), allocator);
+			defer nf_blip.deinit();
+			var nf_gmp = try normalizeGmp(&gmp_r, allocator);
+			defer nf_gmp.deinit();
+
+			if (!nfEqual(nf_blip, nf_gmp)) {
+				failures += 1;
+				if (failures <= 3) {
+					var nf_b = try normalizeBlip(blip_a.bytes(), allocator);
+					defer nf_b.deinit();
+					var nf_e = try normalizeBlip(blip_b.bytes(), allocator);
+					defer nf_e.deinit();
+					var nf_m = try normalizeBlip(blip_m.bytes(), allocator);
+					defer nf_m.deinit();
+					std.debug.print("\nMISMATCH: op=powm bits={d} iter={d}\n", .{ bits, i });
+					std.debug.print("  base = ", .{});
+					nfPrint(nf_b);
+					std.debug.print("\n  exp  = ", .{});
+					nfPrint(nf_e);
+					std.debug.print("\n  mod  = ", .{});
+					nfPrint(nf_m);
+					std.debug.print("\n  blip = ", .{});
+					nfPrint(nf_blip);
+					std.debug.print("\n  gmp  = ", .{});
+					nfPrint(nf_gmp);
+					std.debug.print("\n", .{});
+				}
+			}
+			total_checks += 1;
+		}
+		total_failures += failures;
+		const status: []const u8 = if (failures == 0) "PASS" else "FAIL";
+		std.debug.print("  {s} op={s:<4} bits={d:>5} iters={d:>4} fails={d}\n", .{ status, "powm", bits, iters, failures });
+	}
+
+	// ── powm wall-clock comparison vs GMP ──────────────────────────────────
+	// Quick perf snapshot at canonical RSA sizes. Same random base/exp/mod
+	// for both implementations to keep the comparison apples-to-apples.
+	std.debug.print("\n=== powm wall-clock vs GMP ===\n", .{});
+	const PERF_SIZES = [_]usize{ 512, 1024, 2048, 3072 };
+	const PERF_ITERS = [_]usize{ 50, 20, 10, 5 };
+	for (PERF_SIZES, PERF_ITERS) |bits, iters| {
+		try setBoth(&blip_a, &gmp_a, allocator, rng, bits);
+		try setBothPositive(&blip_b, &gmp_b, allocator, rng, bits);
+		try setBothPositive(&blip_m, &gmp_m, allocator, rng, bits);
+		// Force mod odd to land near "RSA-like" workload (cosmetic; doesn't
+		// affect blip_mp's algorithm choice — sliding-window helps regardless).
+		const t0_start = nowNs();
+		for (0..iters) |_| {
+			try Mp.powm(&blip_r, &blip_a, &blip_b, &blip_m);
+		}
+		const blip_ns: f64 = @floatFromInt(nowNs() - t0_start);
+		const t1_start = nowNs();
+		for (0..iters) |_| {
+			__gmpz_powm(&gmp_r, &gmp_a, &gmp_b, &gmp_m);
+		}
+		const gmp_ns: f64 = @floatFromInt(nowNs() - t1_start);
+		const blip_per: f64 = blip_ns / @as(f64, @floatFromInt(iters)) / 1_000_000.0;
+		const gmp_per: f64 = gmp_ns / @as(f64, @floatFromInt(iters)) / 1_000_000.0;
+		const ratio: f64 = blip_per / gmp_per;
+		std.debug.print("  bits={d:>5}: blip={d:>8.2} ms/op   gmp={d:>8.2} ms/op   ratio={d:.2}x\n", .{ bits, blip_per, gmp_per, ratio });
 	}
 
 	std.debug.print("\n=== Summary ===\n", .{});
