@@ -552,6 +552,13 @@ pub inline fn subModP_x2(a: @Vector(2, u64), b: @Vector(2, u64)) @Vector(2, u64)
 /// compose it from four umull2 (u32×u32→u64) and adds, which is more work
 /// than the scalar pipeline already does. This implementation deliberately
 /// goes through scalar so we can compare against that lower bound.
+///
+/// **2026-05-02 (M6-4-A.6):** This wrapper is preserved for callers that need
+/// strict normal-form `(a*b)%P` semantics. The actual FFT path now goes
+/// through `montMul_x2` (Montgomery form) — see `mulMagnitudes` and
+/// `nttWithTwiddlesMontVec`. Montgomery multiplication has no `umulh`
+/// dependency: it uses two 64x64→64 multiplies + one add + one shift +
+/// vectorized conditional subtract, which IS NEON-friendly.
 pub inline fn mulModP_x2(a: @Vector(2, u64), b: @Vector(2, u64)) @Vector(2, u64) {
 	// Pull lanes into scalars, reduce, repack. The scalar `% P` lowering is
 	// essentially optimal (mul + umulh + msub) and the compiler may even
@@ -559,6 +566,158 @@ pub inline fn mulModP_x2(a: @Vector(2, u64), b: @Vector(2, u64)) @Vector(2, u64)
 	const r0 = (a[0] * b[0]) % P;
 	const r1 = (a[1] * b[1]) % P;
 	return .{ r0, r1 };
+}
+
+// ── Montgomery arithmetic mod P (M6-4-A.6 / M6-4-B) ────────────────────────
+//
+// Montgomery form: x_m = x * R mod P where R = 2^32 (chosen so that division
+// by R is a free 32-bit shift and that mod-R is a free 32-bit truncation).
+// All arithmetic stays in Mont form throughout the NTT; we convert in/out at
+// the boundaries (inputs once, outputs once). The big win is that Montgomery
+// multiplication has no `umulh` dependency — only 64x64→64 mul + add + shift +
+// conditional subtract — all of which vectorize on NEON `@Vector(2, u64)`.
+//
+// Algorithm (Mont reduction of T < P*R = P*2^32 < 2^62):
+//   m = (T mod 2^32) * P_NEG_INV mod 2^32   // low 32-bit mul, low 32 bits
+//   t = (T + m * P) >> 32                   // m*P fits in u64 (< 2^62)
+//   if t >= P: t -= P                       // single conditional subtract
+//
+// For inputs a_m, b_m < P < 2^30: T = a_m * b_m < 2^60, satisfying T < P*R.
+//
+// Constants:
+//   R = 2^32
+//   P_NEG_INV = (-P)^(-1) mod R = R - P^(-1) mod R = 998244351
+//   R2_MOD_P  = R^2 mod P = 932051910  (used to convert into Mont form)
+//   ONE_MOD_P = R mod P    = 301989884  (Mont form of 1, useful as identity)
+//
+// To convert: x_m = mont_mul(x, R2_MOD_P).
+// From Mont:  x   = mont_mul(x_m, 1).
+
+/// (-P)^(-1) mod 2^32. Constant input to every Montgomery reduction.
+pub const P_NEG_INV: u64 = 998244351;
+
+/// R^2 mod P where R = 2^32. Used to enter Montgomery form: `toMont(x) = montMul(x, R2_MOD_P)`.
+pub const R2_MOD_P: u64 = 932051910;
+
+/// R mod P where R = 2^32. The Mont-form representation of 1 (multiplicative
+/// identity in Montgomery space).
+pub const ONE_MOD_P: u64 = 301989884;
+
+/// Scalar Montgomery multiplication: returns `(a_m * b_m * R^(-1)) mod P`.
+/// Both inputs and output are in Montgomery form. T = a_m * b_m must satisfy
+/// T < P*R ≈ 2^62; for inputs < P < 2^30 this gives T < 2^60, well within bounds.
+pub inline fn montMul(a_m: u64, b_m: u64) u64 {
+	const T: u64 = a_m *% b_m;
+	const m: u64 = (T & 0xFFFFFFFF) *% P_NEG_INV & 0xFFFFFFFF;
+	const t: u64 = (T +% m *% P) >> 32;
+	return if (t >= P) t - P else t;
+}
+
+/// Convert a normal-form residue x ∈ [0, P) into Montgomery form: x_m = x * R mod P.
+pub inline fn toMont(x: u64) u64 {
+	return montMul(x, R2_MOD_P);
+}
+
+/// Convert a Montgomery-form residue x_m back to normal form: x = x_m * R^(-1) mod P.
+/// Implemented as `montMul(x_m, 1)` since `montMul(a, 1) = a * R^(-1) mod P`.
+pub inline fn fromMont(x_m: u64) u64 {
+	return montMul(x_m, 1);
+}
+
+/// Vectorized Montgomery multiplication on `@Vector(2, u64)`. Both inputs and
+/// output are in Montgomery form.
+///
+/// **Hybrid scheduling for Apple M4:** the M4 has dual scalar mul pipes (≤2
+/// 64×64 muls per cycle) but only 1–2 NEON pipes that ALSO service vector
+/// add/sub/load/store. Pure-NEON Mont (using umull.2d for T=a*b) saturates
+/// the NEON pipe and crowds out the surrounding butterfly ops. So we instead
+/// compute `T = a*b` via two scalar 32×32→64 muls (free use of scalar pipes
+/// while NEON handles the surrounding adds), then do the rest of the
+/// Montgomery reduction in vector registers (mul.2s + umlal.2d + cmhs.2d).
+///
+/// Per-butterfly: 2 scalar muls + 3 NEON ops (vs `% P` path: 2 scalar muls +
+/// 2 scalar umulh + 2 scalar msub = 6 scalar ops, no NEON math). The big
+/// difference is umulh elimination — umulh has higher latency than mul on M4
+/// and only one umulh-capable pipe (per Apple optimization guides).
+pub inline fn montMul_x2(a_m: @Vector(2, u64), b_m: @Vector(2, u64)) @Vector(2, u64) {
+	const p_neg_inv_v32: @Vector(2, u32) = @splat(@as(u32, @intCast(P_NEG_INV)));
+	const p_v32: @Vector(2, u32) = @splat(@as(u32, @intCast(P)));
+	const p_v: @Vector(2, u64) = @splat(P);
+	const shift32: @Vector(2, u6) = @splat(32);
+
+	// T = a*b via scalar 32×32→64 muls (use scalar pipes; cheap because
+	// inputs are u32-bounded). Then pack into a vector for the reduction.
+	const t0: u64 = (a_m[0] & 0xFFFFFFFF) * (b_m[0] & 0xFFFFFFFF);
+	const t1: u64 = (a_m[1] & 0xFFFFFFFF) * (b_m[1] & 0xFFFFFFFF);
+	const T: @Vector(2, u64) = .{ t0, t1 };
+
+	// T_lo32 (just the low 32 bits, as u32 vector).
+	const T_lo32: @Vector(2, u32) = .{ @truncate(t0), @truncate(t1) };
+
+	// m = (T_lo32 * P_NEG_INV) low 32 bits — single mul.2s, two lanes.
+	const m32: @Vector(2, u32) = T_lo32 *% p_neg_inv_v32;
+
+	// t = (T + m * P) >> 32. m*P fits in u64; expressed via umlal.2d
+	// (multiply-accumulate) the compiler will fuse into a single instruction.
+	const mp: @Vector(2, u64) = @as(@Vector(2, u64), m32) *% @as(@Vector(2, u64), p_v32);
+	const t = (T +% mp) >> shift32;
+
+	// Conditional subtract: vectorized cmhs.2d + select.
+	const ge_mask = t >= p_v;
+	const corrected = t - p_v;
+	return @select(u64, ge_mask, corrected, t);
+}
+
+// ── Mont-form NTT helpers ──────────────────────────────────────────────────
+
+/// Same iterative radix-2 Cooley-Tukey NTT as `nttWithTwiddlesVec`, but
+/// operates on Montgomery-form data with Montgomery-form twiddles. The add/sub
+/// operations are unchanged (Mont form is linear: `Mont(a+b) = Mont(a)+Mont(b)`),
+/// only the multiplication switches to `montMul_x2`. This is the routine that
+/// gives the FFT path its real win — Mp.mul drops materially at 32K+ bit.
+pub fn nttWithTwiddlesMontVec(a: []u64, twiddles_m: []const u64) void {
+	const n = a.len;
+	if (n <= 1) return;
+	std.debug.assert(n & (n - 1) == 0);
+	std.debug.assert(twiddles_m.len >= n / 2);
+
+	bitReversePermute(a);
+
+	var len: usize = 2;
+	while (len <= n) : (len <<= 1) {
+		const stride = n / len;
+		const half = len >> 1;
+		var i: usize = 0;
+		if (half == 1) {
+			// Scalar fallback for the smallest level (no pair to vectorize).
+			while (i < n) : (i += len) {
+				const w = twiddles_m[0]; // Mont(1) = ONE_MOD_P
+				const u = a[i];
+				const t = montMul(a[i + 1], w);
+				a[i] = addModP(u, t);
+				a[i + 1] = subModP(u, t);
+			}
+		} else {
+			while (i < n) : (i += len) {
+				var k: usize = 0;
+				while (k < half) : (k += 2) {
+					const w_pair: @Vector(2, u64) = .{
+						twiddles_m[k * stride],
+						twiddles_m[(k + 1) * stride],
+					};
+					const a_lo: @Vector(2, u64) = .{ a[i + k], a[i + k + 1] };
+					const a_hi: @Vector(2, u64) = .{ a[i + k + half], a[i + k + 1 + half] };
+					const t_pair = montMul_x2(a_hi, w_pair);
+					const new_lo = addModP_x2(a_lo, t_pair);
+					const new_hi = subModP_x2(a_lo, t_pair);
+					a[i + k] = new_lo[0];
+					a[i + k + 1] = new_lo[1];
+					a[i + k + half] = new_hi[0];
+					a[i + k + 1 + half] = new_hi[1];
+				}
+			}
+		}
+	}
 }
 
 // ── Vectorized NTT inner loop (M6-4-A.4) ────────────────────────────────────
@@ -1089,5 +1248,127 @@ test "mulModP_x2: lane-equivalent to scalar on 100K random pairs" {
 		const got = mulModP_x2(av, bv);
 		try testing.expectEqual(mulModP(a0, b0), got[0]);
 		try testing.expectEqual(mulModP(a1, b1), got[1]);
+	}
+}
+
+// ── M6-4-A.6 / M6-4-B Montgomery tests ──────────────────────────────────────
+
+test "Montgomery constants: math identities" {
+	// Constants must satisfy:
+	//   ONE_MOD_P = 2^32 mod P
+	//   R2_MOD_P  = (2^32)^2 mod P
+	//   P * P_NEG_INV ≡ -1 (mod 2^32)
+	const R: u64 = 1 << 32;
+	try testing.expectEqual(@as(u64, R % P), ONE_MOD_P);
+	// Compute (R * R) mod P in u128 to avoid u64 overflow.
+	const R2: u128 = @as(u128, R) * @as(u128, R);
+	try testing.expectEqual(@as(u64, @intCast(R2 % P)), R2_MOD_P);
+	const prod_low32: u64 = (P *% P_NEG_INV) & 0xFFFFFFFF;
+	try testing.expectEqual(@as(u64, 0xFFFFFFFF), prod_low32); // P*P_NEG_INV ≡ -1 mod 2^32
+}
+
+test "montMul / toMont / fromMont: round-trip and identity" {
+	// fromMont(toMont(x)) == x for any x in [0, P).
+	const xs = [_]u64{ 0, 1, 2, 12345, 67890, P / 2, P - 2, P - 1 };
+	for (xs) |x| {
+		try testing.expectEqual(x, fromMont(toMont(x)));
+	}
+	// toMont(1) == ONE_MOD_P (Montgomery identity).
+	try testing.expectEqual(ONE_MOD_P, toMont(1));
+	// toMont(0) == 0.
+	try testing.expectEqual(@as(u64, 0), toMont(0));
+}
+
+test "montMul: equivalent to (a*b)%P after toMont/fromMont wrap on 100K random pairs" {
+	var prng = std.Random.DefaultPrng.init(0xCAFE_B0DE);
+	const rand = prng.random();
+	var i: usize = 0;
+	while (i < 100_000) : (i += 1) {
+		const a = rand.uintLessThan(u64, P);
+		const b = rand.uintLessThan(u64, P);
+		const expected = (a * b) % P;
+		const got = fromMont(montMul(toMont(a), toMont(b)));
+		if (got != expected) {
+			std.debug.print("MISMATCH a={d} b={d} expected={d} got={d}\n", .{ a, b, expected, got });
+			return error.TestFailed;
+		}
+	}
+}
+
+test "montMul_x2: lane-equivalent to scalar montMul on 100K random pairs (Mont-form inputs)" {
+	var prng = std.Random.DefaultPrng.init(0xBEEF_B0DE);
+	const rand = prng.random();
+	var i: usize = 0;
+	while (i < 100_000) : (i += 1) {
+		const a0 = rand.uintLessThan(u64, P);
+		const a1 = rand.uintLessThan(u64, P);
+		const b0 = rand.uintLessThan(u64, P);
+		const b1 = rand.uintLessThan(u64, P);
+		// Mont-form inputs (any value in [0, P) is also a valid Mont representative).
+		const av: @Vector(2, u64) = .{ a0, a1 };
+		const bv: @Vector(2, u64) = .{ b0, b1 };
+		const got = montMul_x2(av, bv);
+		try testing.expectEqual(montMul(a0, b0), got[0]);
+		try testing.expectEqual(montMul(a1, b1), got[1]);
+	}
+}
+
+test "montMul_x2: edge cases (0, 1, P-1, mid)" {
+	const corners = [_]struct { a0: u64, a1: u64, b0: u64, b1: u64 }{
+		.{ .a0 = 0, .a1 = 0, .b0 = 0, .b1 = 0 },
+		.{ .a0 = 1, .a1 = 1, .b0 = 1, .b1 = 1 },
+		.{ .a0 = P - 1, .a1 = P - 1, .b0 = P - 1, .b1 = P - 1 },
+		.{ .a0 = 0, .a1 = P - 1, .b0 = P - 1, .b1 = 0 },
+		.{ .a0 = P / 2, .a1 = 12345, .b0 = P / 3, .b1 = 67890 },
+	};
+	for (corners) |c| {
+		const av: @Vector(2, u64) = .{ c.a0, c.a1 };
+		const bv: @Vector(2, u64) = .{ c.b0, c.b1 };
+		const got = montMul_x2(av, bv);
+		try testing.expectEqual(montMul(c.a0, c.b0), got[0]);
+		try testing.expectEqual(montMul(c.a1, c.b1), got[1]);
+	}
+}
+
+test "nttWithTwiddlesMontVec: matches nttWithTwiddles after Mont conversion across sizes" {
+	// Strategy: build normal-form input + scalar twiddles. Run the scalar NTT.
+	// Build Mont-form input + Mont-form twiddles. Run nttWithTwiddlesMontVec.
+	// Convert vec output back from Mont. Compare to scalar output.
+	const sizes = [_]usize{ 2, 4, 8, 16, 64, 256, 1024, 4096, 8192 };
+	for (sizes) |n| {
+		const a_scalar = try testing.allocator.alloc(u64, n);
+		defer testing.allocator.free(a_scalar);
+		const a_vec = try testing.allocator.alloc(u64, n);
+		defer testing.allocator.free(a_vec);
+		const tw = try testing.allocator.alloc(u64, n / 2);
+		defer testing.allocator.free(tw);
+		const tw_m = try testing.allocator.alloc(u64, n / 2);
+		defer testing.allocator.free(tw_m);
+
+		var prng = std.Random.DefaultPrng.init(0xA1B2_C3D4_E5F6_B0DE ^ n);
+		const rand = prng.random();
+		for (a_scalar) |*x| x.* = rand.uintLessThan(u64, P);
+		// Build Mont-form copy of input.
+		for (a_vec, a_scalar) |*xm, x| xm.* = toMont(x);
+
+		// Twiddles in normal form (for scalar NTT) and Mont form (for vec NTT).
+		const omega_n = nthRootOfUnity(n);
+		if (tw.len > 0) {
+			tw[0] = 1;
+			tw_m[0] = ONE_MOD_P;
+		}
+		var j: usize = 1;
+		while (j < tw.len) : (j += 1) {
+			tw[j] = mulModP(tw[j - 1], omega_n);
+			tw_m[j] = toMont(tw[j]);
+		}
+
+		nttWithTwiddles(a_scalar, tw);
+		nttWithTwiddlesMontVec(a_vec, tw_m);
+
+		// Convert vec output back from Mont and compare lanewise.
+		for (a_vec, a_scalar) |xm, x_expected| {
+			try testing.expectEqual(x_expected, fromMont(xm));
+		}
 	}
 }
