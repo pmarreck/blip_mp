@@ -267,10 +267,10 @@ pub fn mulMagnitudes(allocator: std.mem.Allocator, a: []const u8, b: []const u8,
 	for (a, 0..) |byte, i| pa[i] = byte;
 	for (b, 0..) |byte, i| pb[i] = byte;
 
-	nttWithTwiddles(pa, tw_fwd);
-	nttWithTwiddles(pb, tw_fwd);
+	nttWithTwiddlesVec(pa, tw_fwd);
+	nttWithTwiddlesVec(pb, tw_fwd);
 	for (0..N) |i| pa[i] = mulModP(pa[i], pb[i]);
-	nttWithTwiddles(pa, tw_inv);
+	nttWithTwiddlesVec(pa, tw_inv);
 	const n_inv = invModP(@intCast(N));
 	for (pa) |*x| x.* = mulModP(x.*, n_inv);
 
@@ -559,6 +559,64 @@ pub inline fn mulModP_x2(a: @Vector(2, u64), b: @Vector(2, u64)) @Vector(2, u64)
 	const r0 = (a[0] * b[0]) % P;
 	const r1 = (a[1] * b[1]) % P;
 	return .{ r0, r1 };
+}
+
+// ── Vectorized NTT inner loop (M6-4-A.4) ────────────────────────────────────
+//
+// Same algorithm as `nttWithTwiddles`, but for level `len >= 4` (i.e.,
+// `half >= 2`) the inner butterfly loop is unrolled by 2 and run through the
+// `@Vector(2, u64)` modular primitives. At level `len = 2` (`half = 1`) there
+// is no pair to vectorize, so we fall back to scalar for that one level.
+//
+// Memory layout is unchanged: lanes (k, k+1) within one block (i, len) are
+// adjacent in `a[]` for both the lo (`a[i+k]`) and hi (`a[i+k+half]`) halves,
+// so the loads/stores compress to two contiguous u64 pairs per butterfly pair.
+// Twiddle indices `k*stride` and `(k+1)*stride` are NOT adjacent (they're
+// stride apart), so we materialize the twiddle pair via two scalar reads.
+pub fn nttWithTwiddlesVec(a: []u64, twiddles: []const u64) void {
+	const n = a.len;
+	if (n <= 1) return;
+	std.debug.assert(n & (n - 1) == 0);
+	std.debug.assert(twiddles.len >= n / 2);
+
+	bitReversePermute(a);
+
+	var len: usize = 2;
+	while (len <= n) : (len <<= 1) {
+		const stride = n / len;
+		const half = len >> 1;
+		var i: usize = 0;
+		if (half == 1) {
+			// Scalar fallback for the smallest level — no pair to vectorize.
+			while (i < n) : (i += len) {
+				const w = twiddles[0]; // == 1, but we read for symmetry
+				const u = a[i];
+				const t = mulModP(a[i + 1], w);
+				a[i] = addModP(u, t);
+				a[i + 1] = subModP(u, t);
+			}
+		} else {
+			// half >= 2 and is even (always — half = len/2, len pow2 >= 4).
+			while (i < n) : (i += len) {
+				var k: usize = 0;
+				while (k < half) : (k += 2) {
+					const w_pair: @Vector(2, u64) = .{
+						twiddles[k * stride],
+						twiddles[(k + 1) * stride],
+					};
+					const a_lo: @Vector(2, u64) = .{ a[i + k], a[i + k + 1] };
+					const a_hi: @Vector(2, u64) = .{ a[i + k + half], a[i + k + 1 + half] };
+					const t_pair = mulModP_x2(a_hi, w_pair);
+					const new_lo = addModP_x2(a_lo, t_pair);
+					const new_hi = subModP_x2(a_lo, t_pair);
+					a[i + k] = new_lo[0];
+					a[i + k + 1] = new_lo[1];
+					a[i + k + half] = new_hi[0];
+					a[i + k + 1 + half] = new_hi[1];
+				}
+			}
+		}
+	}
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────────
@@ -949,6 +1007,71 @@ test "mulModP_x2: edge cases" {
 		const got = mulModP_x2(av, bv);
 		try testing.expectEqual(mulModP(c.a0, c.b0), got[0]);
 		try testing.expectEqual(mulModP(c.a1, c.b1), got[1]);
+	}
+}
+
+test "nttWithTwiddlesVec: matches nttWithTwiddles on random inputs across sizes" {
+	const sizes = [_]usize{ 2, 4, 8, 16, 64, 256, 1024, 4096, 8192 };
+	for (sizes) |n| {
+		const a_scalar = try testing.allocator.alloc(u64, n);
+		defer testing.allocator.free(a_scalar);
+		const a_vec = try testing.allocator.alloc(u64, n);
+		defer testing.allocator.free(a_vec);
+		const tw = try testing.allocator.alloc(u64, n / 2);
+		defer testing.allocator.free(tw);
+
+		var prng = std.Random.DefaultPrng.init(0xA1B2_C3D4_E5F6 ^ n);
+		const rand = prng.random();
+		for (a_scalar) |*x| x.* = rand.uintLessThan(u64, P);
+		@memcpy(a_vec, a_scalar);
+
+		// Build forward twiddle table.
+		const omega_n = nthRootOfUnity(n);
+		if (tw.len > 0) tw[0] = 1;
+		var j: usize = 1;
+		while (j < tw.len) : (j += 1) tw[j] = mulModP(tw[j - 1], omega_n);
+
+		nttWithTwiddles(a_scalar, tw);
+		nttWithTwiddlesVec(a_vec, tw);
+
+		try testing.expectEqualSlices(u64, a_scalar, a_vec);
+	}
+}
+
+test "nttWithTwiddlesVec: round-trip with inverse equals identity" {
+	// Sanity check — uses both forward + inverse via vectorized path.
+	const sizes = [_]usize{ 4, 16, 256, 1024, 4096 };
+	for (sizes) |n| {
+		const a = try testing.allocator.alloc(u64, n);
+		defer testing.allocator.free(a);
+		const orig = try testing.allocator.alloc(u64, n);
+		defer testing.allocator.free(orig);
+		const tw_fwd = try testing.allocator.alloc(u64, n / 2);
+		defer testing.allocator.free(tw_fwd);
+		const tw_inv = try testing.allocator.alloc(u64, n / 2);
+		defer testing.allocator.free(tw_inv);
+
+		var prng = std.Random.DefaultPrng.init(0xDEAD_BEEF ^ n);
+		const rand = prng.random();
+		for (a) |*x| x.* = rand.uintLessThan(u64, P);
+		@memcpy(orig, a);
+
+		const omega_n = nthRootOfUnity(n);
+		const omega_n_inv = invModP(omega_n);
+		tw_fwd[0] = 1;
+		tw_inv[0] = 1;
+		var j: usize = 1;
+		while (j < n / 2) : (j += 1) {
+			tw_fwd[j] = mulModP(tw_fwd[j - 1], omega_n);
+			tw_inv[j] = mulModP(tw_inv[j - 1], omega_n_inv);
+		}
+
+		nttWithTwiddlesVec(a, tw_fwd);
+		nttWithTwiddlesVec(a, tw_inv);
+		const n_inv = invModP(@intCast(n));
+		for (a) |*x| x.* = mulModP(x.*, n_inv);
+
+		try testing.expectEqualSlices(u64, orig, a);
 	}
 }
 
