@@ -34,6 +34,7 @@ extern "c" fn __gmpz_sub(rop: *mpz_t, op1: *const mpz_t, op2: *const mpz_t) void
 extern "c" fn __gmpz_mul(rop: *mpz_t, op1: *const mpz_t, op2: *const mpz_t) void;
 extern "c" fn __gmpz_tdiv_qr(q: *mpz_t, r: *mpz_t, n: *const mpz_t, d: *const mpz_t) void;
 extern "c" fn __gmpz_powm(rop: *mpz_t, base: *const mpz_t, exp: *const mpz_t, mod: *const mpz_t) void;
+extern "c" fn __gmpz_invert(rop: *mpz_t, op1: *const mpz_t, op2: *const mpz_t) c_int;
 
 // Monotonic timing — std.time.Timer was removed in Zig 0.16; we already link
 // libc for c_allocator and GMP, so call clock_gettime directly.
@@ -575,6 +576,109 @@ pub fn main() !u8 {
 		total_failures += failures;
 		const status: []const u8 = if (failures == 0) "PASS" else "FAIL";
 		std.debug.print("  {s} op={s:<4} bits={d:>5} iters={d:>4} fails={d}\n", .{ status, "powm", bits, iters, failures });
+	}
+
+	// ── invMod cross-check ─────────────────────────────────────────────────
+	// invMod takes (a, m); m must be > 0. We force m odd > 1 to maximise the
+	// chance gcd(a, m) == 1 (so the inverse exists and the result can be
+	// compared bit-for-bit). When GMP returns 0 (no inverse), we just check
+	// that blip_mp also returns false — only one bit of comparison.
+	const INVMOD_SIZES = [_]usize{ 8, 32, 64, 128, 256, 512, 1024, 2048 };
+	for (INVMOD_SIZES) |bits| {
+		const iters: usize = if (bits <= 64) 200 else if (bits <= 256) 100 else if (bits <= 1024) 50 else 25;
+		var failures: usize = 0;
+		var skipped_no_inverse: usize = 0;
+		for (0..iters) |i| {
+			// a in [1, m). m odd > 1.
+			try setBothPositive(&blip_a, &gmp_a, allocator, rng, bits);
+			try setBothPositiveOdd(&blip_m, &gmp_m, allocator, rng, bits);
+			// Force m >= 3 (odd > 1).
+			if (blip_m.cached_sign == 0 or
+				(blip_m.cached_pay_len == 1 and blip_m.bytes()[0] == 1))
+			{
+				try blip_m.setI64(3);
+				__gmpz_set_si(&gmp_m, 3);
+			}
+
+			const blip_ok = try Mp.invMod(&blip_r, &blip_a, &blip_m);
+			const gmp_ok = __gmpz_invert(&gmp_r, &gmp_a, &gmp_m) != 0;
+
+			if (blip_ok != gmp_ok) {
+				failures += 1;
+				if (failures <= 3) {
+					var nf_a = try normalizeBlip(blip_a.bytes(), allocator);
+					defer nf_a.deinit();
+					var nf_m = try normalizeBlip(blip_m.bytes(), allocator);
+					defer nf_m.deinit();
+					std.debug.print("\nMISMATCH (existence): op=invMod bits={d} iter={d}\n", .{ bits, i });
+					std.debug.print("  a    = ", .{});
+					nfPrint(nf_a);
+					std.debug.print("\n  m    = ", .{});
+					nfPrint(nf_m);
+					std.debug.print("\n  blip_ok={any} gmp_ok={any}\n", .{ blip_ok, gmp_ok });
+				}
+				continue;
+			}
+			if (!blip_ok) {
+				skipped_no_inverse += 1;
+				continue;
+			}
+			// Both report success — compare result values.
+			var nf_blip = try normalizeBlip(blip_r.bytes(), allocator);
+			defer nf_blip.deinit();
+			var nf_gmp = try normalizeGmp(&gmp_r, allocator);
+			defer nf_gmp.deinit();
+			if (!nfEqual(nf_blip, nf_gmp)) {
+				failures += 1;
+				if (failures <= 3) {
+					var nf_a = try normalizeBlip(blip_a.bytes(), allocator);
+					defer nf_a.deinit();
+					var nf_m = try normalizeBlip(blip_m.bytes(), allocator);
+					defer nf_m.deinit();
+					std.debug.print("\nMISMATCH: op=invMod bits={d} iter={d}\n", .{ bits, i });
+					std.debug.print("  a    = ", .{});
+					nfPrint(nf_a);
+					std.debug.print("\n  m    = ", .{});
+					nfPrint(nf_m);
+					std.debug.print("\n  blip = ", .{});
+					nfPrint(nf_blip);
+					std.debug.print("\n  gmp  = ", .{});
+					nfPrint(nf_gmp);
+					std.debug.print("\n", .{});
+				}
+			}
+			total_checks += 1;
+		}
+		total_failures += failures;
+		const status: []const u8 = if (failures == 0) "PASS" else "FAIL";
+		std.debug.print("  {s} op={s:<6} bits={d:>5} iters={d:>4} fails={d} no-inverse={d}\n", .{ status, "invMod", bits, iters, failures, skipped_no_inverse });
+	}
+
+	// ── invMod wall-clock comparison vs GMP ────────────────────────────────
+	std.debug.print("\n=== invMod wall-clock vs GMP ===\n", .{});
+	const INV_PERF_SIZES = [_]usize{ 256, 512, 1024, 2048 };
+	const INV_PERF_ITERS = [_]usize{ 200, 100, 50, 20 };
+	for (INV_PERF_SIZES, INV_PERF_ITERS) |bits, iters| {
+		try setBothPositive(&blip_a, &gmp_a, allocator, rng, bits);
+		try setBothPositiveOdd(&blip_m, &gmp_m, allocator, rng, bits);
+		const t0_start = nowNs();
+		var blip_count: usize = 0;
+		for (0..iters) |_| {
+			const ok = try Mp.invMod(&blip_r, &blip_a, &blip_m);
+			if (ok) blip_count += 1;
+		}
+		const blip_ns: f64 = @floatFromInt(nowNs() - t0_start);
+		const t1_start = nowNs();
+		var gmp_count: usize = 0;
+		for (0..iters) |_| {
+			const ok = __gmpz_invert(&gmp_r, &gmp_a, &gmp_m) != 0;
+			if (ok) gmp_count += 1;
+		}
+		const gmp_ns: f64 = @floatFromInt(nowNs() - t1_start);
+		const blip_per: f64 = blip_ns / @as(f64, @floatFromInt(iters)) / 1_000.0;
+		const gmp_per: f64 = gmp_ns / @as(f64, @floatFromInt(iters)) / 1_000.0;
+		const ratio: f64 = blip_per / gmp_per;
+		std.debug.print("  bits={d:>5}: blip={d:>10.2} us/op   gmp={d:>10.2} us/op   ratio={d:.2}x\n", .{ bits, blip_per, gmp_per, ratio });
 	}
 
 	// ── powm wall-clock comparison vs GMP ──────────────────────────────────
