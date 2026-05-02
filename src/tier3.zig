@@ -17,11 +17,29 @@ const std = @import("std");
 const encoding = @import("encoding.zig");
 const fft = @import("fft.zig");
 
-// FFT dispatch threshold (bytes per operand). Below this, Toom-3 / Karatsuba
-// are faster due to FFT's per-call setup cost (allocating two u64[N] arrays,
-// forward+inverse NTTs over [0..N), pointwise modular multiplies). Initial
-// guess; calibrate with bench in M6-3.13.
-pub const FFT_THRESHOLD: usize = 3072;
+// FFT dispatch threshold (bytes per operand). Currently set above
+// MAX_FFT_COMBINED_LEN/2, effectively DISABLING FFT in production.
+//
+// Why disabled: bench at 32K-bit shows pure-Zig NTT FFT runs at 191K ns/op
+// vs Toom-3 at 108K ns (1.77x SLOWER), even after precomputed twiddles cut
+// 410K → 191K. Constant factors dominated by `% P` modular reduction. The
+// single-prime variant caps operand size at ~56K-bit (min(a,b) * 65025 < P
+// ≈ 9.98e8 → max ~15350 bytes per operand), and the Toom-3-vs-FFT crossover
+// in our supported range is unfavorable: Toom-3 stays ahead everywhere.
+//
+// Future work to make FFT production-viable:
+//   (1) Two-prime CRT to extend size range past 56K-bit (asymptotic FFT win
+//       lands well beyond our current cap).
+//   (2) Properly-debugged Barrett or Montgomery reduction for ~2x mulModP
+//       speedup. Hand-rolled Barrett attempt produced wrong results — needs
+//       a unit-test scaffold to debug step-by-step.
+//   (3) SIMD butterflies (NEON on aarch64) for ~2-4x.
+//   (4) Stockham auto-sort to skip the bit-reversal pass entirely.
+//
+// The FFT primitives (modular arith, NTT, mulMagnitudes) are kept and
+// correctness-validated (8240/8240 GMP cross-checks at 24K and 32K bit
+// when temporarily enabled — bit-identical to GMP).
+pub const FFT_THRESHOLD: usize = 99999;
 
 // ── Header read/write supporting L >= 32 (continuation) ──────────────────────
 

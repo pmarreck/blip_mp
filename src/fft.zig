@@ -62,8 +62,11 @@ pub inline fn subModP(a: u64, b: u64) u64 {
 
 /// (a * b) mod P. Inputs in [0, P). Result in [0, P).
 /// P fits in 30 bits, so a*b fits in 60 bits — well within u64 — then we
-/// reduce by `% P`. The compiler turns this into a UMULH+UMSUB or similar
-/// on aarch64 (no asm needed).
+/// reduce by `% P`. Since P is comptime, the compiler lowers `% P` to a
+/// magic-number multiply (Granlund-Möller) on aarch64 — ~5 cycles vs ~10
+/// for hardware udiv. (Hand-rolled Barrett experiment showed correctness
+/// bugs and no measured speedup over the compiler's lowering — left as
+/// future optimization with proper test scaffolding.)
 pub inline fn mulModP(a: u64, b: u64) u64 {
 	return (a * b) % P;
 }
@@ -123,39 +126,64 @@ pub fn bitReversePermute(a: []u64) void {
 
 // ── Forward / inverse NTT ───────────────────────────────────────────────────
 
-/// In-place radix-2 Cooley-Tukey Number-Theoretic Transform.
-/// `a.len` must be a power of 2 ≤ MAX_NTT_LEN. All elements must be in [0, P).
-/// `invert = false` → forward transform with primitive Nth root of unity ω.
-/// `invert = true`  → inverse transform with ω⁻¹, then scale by N⁻¹ at end.
-pub fn ntt(a: []u64, invert: bool) void {
+/// Iterative radix-2 Cooley-Tukey NTT using precomputed twiddles.
+/// `twiddles[j] = omega_n^j` for j in 0..n/2, where omega_n is the chosen
+/// (forward = ω; inverse = ω⁻¹) primitive nth root of unity. Caller is
+/// responsible for the inverse-transform 1/N scaling pass; this routine
+/// performs only the butterflies.
+///
+/// At level `len`, butterfly k uses twiddle omega_n^(k * (n/len)) — i.e., we
+/// stride into the same precomputed table rather than recomputing per-level.
+/// This collapses 1 mulModP per butterfly vs. the naive
+/// "running w = w * w_len" form.
+pub fn nttWithTwiddles(a: []u64, twiddles: []const u64) void {
 	const n = a.len;
 	if (n <= 1) return;
 	std.debug.assert(n & (n - 1) == 0);
-	std.debug.assert(n <= MAX_NTT_LEN);
+	std.debug.assert(twiddles.len >= n / 2);
 
 	bitReversePermute(a);
 
-	// Iterative butterflies, doubling block size each round.
 	var len: usize = 2;
 	while (len <= n) : (len <<= 1) {
-		const w_len = blk: {
-			const root = nthRootOfUnity(len);
-			break :blk if (invert) invModP(root) else root;
-		};
+		const stride = n / len;
+		const half = len >> 1;
 		var i: usize = 0;
 		while (i < n) : (i += len) {
-			var w: u64 = 1;
 			var k: usize = 0;
-			const half = len >> 1;
 			while (k < half) : (k += 1) {
+				const w = twiddles[k * stride];
 				const u = a[i + k];
 				const t = mulModP(a[i + k + half], w);
 				a[i + k] = addModP(u, t);
 				a[i + k + half] = subModP(u, t);
-				w = mulModP(w, w_len);
 			}
 		}
 	}
+}
+
+/// Convenience wrapper that builds the twiddle table on the stack and runs
+/// `nttWithTwiddles`, then scales by N⁻¹ on inverse. For test/use up to
+/// n = 8192 (twiddle table = 32 KB on the stack). Production path
+/// (`mulMagnitudes`) computes twiddles once on the heap and shares them
+/// across the three NTT calls (forward A, forward B, inverse).
+pub fn ntt(a: []u64, invert: bool) void {
+	const n = a.len;
+	if (n <= 1) return;
+	std.debug.assert(n & (n - 1) == 0);
+	std.debug.assert(n <= 8192); // stack twiddles cap
+
+	var tw_buf: [4096]u64 = undefined;
+	const tw = tw_buf[0 .. n / 2];
+	const omega_n = blk: {
+		const root = nthRootOfUnity(n);
+		break :blk if (invert) invModP(root) else root;
+	};
+	tw[0] = 1;
+	var j: usize = 1;
+	while (j < n / 2) : (j += 1) tw[j] = mulModP(tw[j - 1], omega_n);
+
+	nttWithTwiddles(a, tw);
 
 	if (invert) {
 		const n_inv = invModP(@intCast(n));
@@ -196,16 +224,36 @@ pub fn mulMagnitudes(allocator: std.mem.Allocator, a: []const u8, b: []const u8,
 	defer allocator.free(pa);
 	const pb = try allocator.alloc(u64, N);
 	defer allocator.free(pb);
+	const tw_fwd = try allocator.alloc(u64, N / 2);
+	defer allocator.free(tw_fwd);
+	const tw_inv = try allocator.alloc(u64, N / 2);
+	defer allocator.free(tw_inv);
+
+	// Precompute twiddles once, reuse across 3 NTT calls (forward A,
+	// forward B, inverse). Cuts per-call mulModP count nearly in half.
+	const omega_n = nthRootOfUnity(N);
+	const omega_n_inv = invModP(omega_n);
+	tw_fwd[0] = 1;
+	tw_inv[0] = 1;
+	{
+		var j: usize = 1;
+		while (j < N / 2) : (j += 1) {
+			tw_fwd[j] = mulModP(tw_fwd[j - 1], omega_n);
+			tw_inv[j] = mulModP(tw_inv[j - 1], omega_n_inv);
+		}
+	}
 
 	@memset(pa, 0);
 	@memset(pb, 0);
 	for (a, 0..) |byte, i| pa[i] = byte;
 	for (b, 0..) |byte, i| pb[i] = byte;
 
-	ntt(pa, false);
-	ntt(pb, false);
+	nttWithTwiddles(pa, tw_fwd);
+	nttWithTwiddles(pb, tw_fwd);
 	for (0..N) |i| pa[i] = mulModP(pa[i], pb[i]);
-	ntt(pa, true);
+	nttWithTwiddles(pa, tw_inv);
+	const n_inv = invModP(@intCast(N));
+	for (pa) |*x| x.* = mulModP(x.*, n_inv);
 
 	// Carry propagation through the byte-output buffer.
 	var carry: u64 = 0;
