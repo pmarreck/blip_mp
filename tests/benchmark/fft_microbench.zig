@@ -150,6 +150,44 @@ fn benchMulModP_x2(pool_a: *const [POOL_SIZE]@Vector(2, u64), pool_b: *const [PO
 	return @as(f64, @floatFromInt(elapsed)) / @as(f64, @floatFromInt(ITERS));
 }
 
+// ── Full-NTT microbench (M6-4-A.4) ──────────────────────────────────────────
+//
+// Times one in-place NTT pass at N=8192 for both the scalar and vectorized
+// implementations. We do NOT include twiddle-table setup or input refresh in
+// the timed window — but we DO restore the input buffer between iterations
+// (the NTT is destructive). Every iteration runs on the same data so caches
+// stay hot; the goal is to compare the two inner-loop implementations under
+// identical conditions, not to model end-to-end multiply cost.
+
+const NTT_N: usize = 8192;
+const NTT_ITERS: usize = 200;
+
+fn benchNttScalar(orig: *const [NTT_N]u64, work: *[NTT_N]u64, tw: *const [NTT_N / 2]u64) f64 {
+	var elapsed: u64 = 0;
+	var i: usize = 0;
+	while (i < NTT_ITERS) : (i += 1) {
+		@memcpy(work, orig);
+		const t0 = nowNs();
+		fft.nttWithTwiddles(work, tw);
+		elapsed += nowNs() - t0;
+	}
+	std.mem.doNotOptimizeAway(work);
+	return @as(f64, @floatFromInt(elapsed)) / @as(f64, @floatFromInt(NTT_ITERS));
+}
+
+fn benchNttVec(orig: *const [NTT_N]u64, work: *[NTT_N]u64, tw: *const [NTT_N / 2]u64) f64 {
+	var elapsed: u64 = 0;
+	var i: usize = 0;
+	while (i < NTT_ITERS) : (i += 1) {
+		@memcpy(work, orig);
+		const t0 = nowNs();
+		fft.nttWithTwiddlesVec(work, tw);
+		elapsed += nowNs() - t0;
+	}
+	std.mem.doNotOptimizeAway(work);
+	return @as(f64, @floatFromInt(elapsed)) / @as(f64, @floatFromInt(NTT_ITERS));
+}
+
 pub fn main() !void {
 	if (comptime @import("builtin").mode == .Debug) {
 		std.debug.print("\x1b[33mDEBUG BUILD — bench numbers will be meaningless!\x1b[0m\n", .{});
@@ -192,4 +230,33 @@ pub fn main() !void {
 	std.debug.print("addModP: {d:.2}x\n", .{ns_add / (ns_add_x2 / 2.0)});
 	std.debug.print("subModP: {d:.2}x\n", .{ns_sub / (ns_sub_x2 / 2.0)});
 	std.debug.print("mulModP: {d:.2}x\n", .{ns_mul / (ns_mul_x2 / 2.0)});
+
+	// ── Full NTT bench at N=8192 ─────────────────────────────────────────
+	std.debug.print("\n--- full NTT pass at N={d} (iters={d}) ---\n", .{ NTT_N, NTT_ITERS });
+
+	var orig: [NTT_N]u64 = undefined;
+	var prng = std.Random.DefaultPrng.init(0xCAFE_F00D_BEEF_BABE);
+	const r = prng.random();
+	for (&orig) |*x| x.* = r.uintLessThan(u64, fft.P);
+
+	var tw: [NTT_N / 2]u64 = undefined;
+	const omega_n = fft.nthRootOfUnity(NTT_N);
+	tw[0] = 1;
+	{
+		var j: usize = 1;
+		while (j < NTT_N / 2) : (j += 1) tw[j] = fft.mulModP(tw[j - 1], omega_n);
+	}
+
+	var work: [NTT_N]u64 = undefined;
+
+	// Warm-up pass (cache prime, branch predictor warm).
+	_ = benchNttScalar(&orig, &work, &tw);
+
+	const ns_ntt_scalar = benchNttScalar(&orig, &work, &tw);
+	std.debug.print("RESULT impl=nttWithTwiddles_scalar n={d} ns_per_pass={d:.0}\n", .{ NTT_N, ns_ntt_scalar });
+
+	const ns_ntt_vec = benchNttVec(&orig, &work, &tw);
+	std.debug.print("RESULT impl=nttWithTwiddlesVec n={d} ns_per_pass={d:.0}\n", .{ NTT_N, ns_ntt_vec });
+
+	std.debug.print("NTT speedup (vec vs scalar): {d:.2}x\n", .{ns_ntt_scalar / ns_ntt_vec});
 }
