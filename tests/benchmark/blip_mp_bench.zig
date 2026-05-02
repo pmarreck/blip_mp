@@ -71,6 +71,8 @@ const LARGE_BUCKETS = [_]LargeBucket{
 	.{ .name = "16384-bit", .bits = 16384 },
 	.{ .name = "32768-bit", .bits = 32768 },
 	.{ .name = "49152-bit", .bits = 49152 },
+	.{ .name = "65536-bit", .bits = 65536 },
+	.{ .name = "98304-bit", .bits = 98304 },
 };
 
 const LARGEST_BYTES: usize = 32768 / 8; // 4096 bytes
@@ -222,7 +224,9 @@ fn mulIters(bits: usize) usize {
 	if (bits <= 256) return 500_000;
 	if (bits <= 1024) return 100_000;
 	if (bits <= 4096) return 20_000;
-	return 5_000; // 8K-bit and up
+	if (bits <= 32768) return 5_000;
+	if (bits <= 65536) return 1_000;
+	return 500; // 96K-bit and up
 }
 
 fn benchmarkMpMulLarge(allocator: std.mem.Allocator, lb: LargeBucket) !f64 {
