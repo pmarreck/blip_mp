@@ -150,6 +150,37 @@ fn benchMulModP_x2(pool_a: *const [POOL_SIZE]@Vector(2, u64), pool_b: *const [PO
 	return @as(f64, @floatFromInt(elapsed)) / @as(f64, @floatFromInt(ITERS));
 }
 
+// Scalar Montgomery (mont form inputs/outputs).
+fn benchMontMul(pool_a: *const [POOL_SIZE]u64, pool_b: *const [POOL_SIZE]u64) f64 {
+	var acc: u64 = 0;
+	const start = nowNs();
+	var i: usize = 0;
+	while (i < ITERS) : (i += 1) {
+		const a = pool_a[i & (POOL_SIZE - 1)];
+		const b = pool_b[(i *% 2654435761) & (POOL_SIZE - 1)];
+		acc ^= fft.montMul(a, b);
+	}
+	const elapsed = nowNs() - start;
+	std.mem.doNotOptimizeAway(&acc);
+	return @as(f64, @floatFromInt(elapsed)) / @as(f64, @floatFromInt(ITERS));
+}
+
+// Vector Montgomery — the M6-4-A.6 / M6-4-B replacement for mulModP_x2 in
+// the FFT inner loop. Inputs/outputs are Mont-form residues in [0, P).
+fn benchMontMul_x2(pool_a: *const [POOL_SIZE]@Vector(2, u64), pool_b: *const [POOL_SIZE]@Vector(2, u64)) f64 {
+	var acc: @Vector(2, u64) = .{ 0, 0 };
+	const start = nowNs();
+	var i: usize = 0;
+	while (i < ITERS) : (i += 1) {
+		const a = pool_a[i & (POOL_SIZE - 1)];
+		const b = pool_b[(i *% 2654435761) & (POOL_SIZE - 1)];
+		acc ^= fft.montMul_x2(a, b);
+	}
+	const elapsed = nowNs() - start;
+	std.mem.doNotOptimizeAway(&acc);
+	return @as(f64, @floatFromInt(elapsed)) / @as(f64, @floatFromInt(ITERS));
+}
+
 // ── Full-NTT microbench (M6-4-A.4) ──────────────────────────────────────────
 //
 // Times one in-place NTT pass at N=8192 for both the scalar and vectorized
@@ -182,6 +213,20 @@ fn benchNttVec(orig: *const [NTT_N]u64, work: *[NTT_N]u64, tw: *const [NTT_N / 2
 		@memcpy(work, orig);
 		const t0 = nowNs();
 		fft.nttWithTwiddlesVec(work, tw);
+		elapsed += nowNs() - t0;
+	}
+	std.mem.doNotOptimizeAway(work);
+	return @as(f64, @floatFromInt(elapsed)) / @as(f64, @floatFromInt(NTT_ITERS));
+}
+
+// Mont-form NTT: orig and tw_m must be in Mont form before the call.
+fn benchNttMontVec(orig_m: *const [NTT_N]u64, work: *[NTT_N]u64, tw_m: *const [NTT_N / 2]u64) f64 {
+	var elapsed: u64 = 0;
+	var i: usize = 0;
+	while (i < NTT_ITERS) : (i += 1) {
+		@memcpy(work, orig_m);
+		const t0 = nowNs();
+		fft.nttWithTwiddlesMontVec(work, tw_m);
 		elapsed += nowNs() - t0;
 	}
 	std.mem.doNotOptimizeAway(work);
@@ -226,10 +271,18 @@ pub fn main() !void {
 	const ns_mul_x2 = benchMulModP_x2(&vpool_a, &vpool_b);
 	std.debug.print("RESULT impl=mulModP_x2 ns_per_op={d:.3} ns_per_scalar_equiv={d:.3}\n", .{ ns_mul_x2, ns_mul_x2 / 2.0 });
 
+	const ns_mont_scalar = benchMontMul(&pool_a, &pool_b);
+	std.debug.print("RESULT impl=montMul_scalar ns_per_op={d:.3}\n", .{ns_mont_scalar});
+
+	const ns_mont_x2 = benchMontMul_x2(&vpool_a, &vpool_b);
+	std.debug.print("RESULT impl=montMul_x2 ns_per_op={d:.3} ns_per_scalar_equiv={d:.3}\n", .{ ns_mont_x2, ns_mont_x2 / 2.0 });
+
 	std.debug.print("\n--- speedup vs scalar (>1.0 = SIMD wins) ---\n", .{});
 	std.debug.print("addModP: {d:.2}x\n", .{ns_add / (ns_add_x2 / 2.0)});
 	std.debug.print("subModP: {d:.2}x\n", .{ns_sub / (ns_sub_x2 / 2.0)});
 	std.debug.print("mulModP: {d:.2}x\n", .{ns_mul / (ns_mul_x2 / 2.0)});
+	std.debug.print("montMul: {d:.2}x (vec vs scalar Mont)\n", .{ns_mont_scalar / (ns_mont_x2 / 2.0)});
+	std.debug.print("mulModP_x2 vs montMul_x2 (lower is better): scalar%P_vec={d:.3} mont_vec={d:.3}\n", .{ ns_mul_x2, ns_mont_x2 });
 
 	// ── Full NTT bench at N=8192 ─────────────────────────────────────────
 	std.debug.print("\n--- full NTT pass at N={d} (iters={d}) ---\n", .{ NTT_N, NTT_ITERS });
@@ -259,4 +312,16 @@ pub fn main() !void {
 	std.debug.print("RESULT impl=nttWithTwiddlesVec n={d} ns_per_pass={d:.0}\n", .{ NTT_N, ns_ntt_vec });
 
 	std.debug.print("NTT speedup (vec vs scalar): {d:.2}x\n", .{ns_ntt_scalar / ns_ntt_vec});
+
+	// Mont-form NTT: orig_m + tw_m built from `orig` and `tw` via toMont.
+	var orig_m: [NTT_N]u64 = undefined;
+	var tw_m: [NTT_N / 2]u64 = undefined;
+	for (orig_m[0..], orig[0..]) |*xm, x| xm.* = fft.toMont(x);
+	for (tw_m[0..], tw[0..]) |*xm, x| xm.* = fft.toMont(x);
+
+	_ = benchNttMontVec(&orig_m, &work, &tw_m); // warm-up
+	const ns_ntt_mont_vec = benchNttMontVec(&orig_m, &work, &tw_m);
+	std.debug.print("RESULT impl=nttWithTwiddlesMontVec n={d} ns_per_pass={d:.0}\n", .{ NTT_N, ns_ntt_mont_vec });
+	std.debug.print("Mont NTT speedup (mont_vec vs scalar): {d:.2}x\n", .{ns_ntt_scalar / ns_ntt_mont_vec});
+	std.debug.print("Mont NTT speedup (mont_vec vs %P_vec): {d:.2}x\n", .{ns_ntt_vec / ns_ntt_mont_vec});
 }
