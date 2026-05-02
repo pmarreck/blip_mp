@@ -60,6 +60,7 @@ pub const ArithError = SetError || GetError || error{
 	OutputBufferTooSmall, // tier-3 result wouldn't fit in target Mp's heap or inline buffer
 	DivisionByZero, // div / mod / divMod / powm with zero divisor or modulus
 	NotImplementedTier3, // div / mod / powm tier-3 path not yet shipped (M7-2 / M7-3 / M7-4)
+	NegativeExponentNotSupported, // powm with exp < 0 (would require modular inverse — M7-5)
 };
 
 pub const Mp = struct {
@@ -284,6 +285,173 @@ pub const Mp = struct {
 		try divMod(&q_tmp, rem, a, b);
 	}
 
+	/// Returns bit `i` of the absolute value (magnitude) of this Mp.
+	/// Bits beyond the magnitude's high bit return 0. Used by `powm` to walk
+	/// the exponent low-to-high. For positive payloads, magnitude byte = payload
+	/// byte; for negative, magnitude = ~payload + 1 (computed lazily per byte
+	/// with carry tracking — no allocation).
+	pub fn bitAt(self: *const Mp, i: usize) u1 {
+		const byte_idx = i / 8;
+		const bit_idx: u3 = @intCast(i & 7);
+		const mb = self.magByteAt(byte_idx);
+		return @intCast((mb >> bit_idx) & 1);
+	}
+
+	/// Returns the bit length of the magnitude (1 + position of the highest
+	/// set bit). Returns 0 for value 0.
+	pub fn bitLen(self: *const Mp) usize {
+		if (self.cached_sign == 0) return 0;
+		// Compute the byte length of the magnitude. For negative values the
+		// effective magnitude length may equal payload.len OR payload.len + 1
+		// when negation carries out (i.e. payload == 0x...0x80 — minInt case).
+		// For positive values it's the index of the highest non-zero byte + 1.
+		const pay = self.payload();
+		if (self.cached_sign > 0) {
+			var hi = pay.len;
+			while (hi > 0 and pay[hi - 1] == 0) hi -= 1;
+			if (hi == 0) return 0;
+			const high = pay[hi - 1];
+			// Highest bit position in `high` is 7 - clz8(high).
+			const lz: usize = @clz(high);
+			return 8 * (hi - 1) + (8 - lz);
+		}
+		// Negative: walk down from byte payload.len to find the first
+		// nonzero magnitude byte. Compute magnitude byte at index k = payload.len-1
+		// down to 0, but be careful: for the "carry-out-of-top" case (payload
+		// like 0x00*L 0x80 being canonical-extended), magnitude needs an extra
+		// high byte. Detect that: it happens iff the canonical payload high
+		// byte is 0x80 AND all lower bytes are 0 — i.e. value = -(2^(8L-1)).
+		// In that case magnitude = 2^(8L-1), a (8L)-bit number, bitLen = 8L.
+		const L = pay.len;
+		var minPow = true;
+		if ((pay[L - 1] & 0x7F) != 0) minPow = false; // high byte not exactly 0x80
+		if ((pay[L - 1] & 0x80) == 0) minPow = false; // high bit not set
+		if (minPow) {
+			for (pay[0 .. L - 1]) |b| if (b != 0) {
+				minPow = false;
+				break;
+			};
+		}
+		if (minPow) return 8 * L;
+
+		// Otherwise compute the highest non-zero magnitude byte by scanning down.
+		var hi: usize = L;
+		while (hi > 0) : (hi -= 1) {
+			const mb = self.magByteAt(hi - 1);
+			if (mb != 0) break;
+		}
+		if (hi == 0) return 0;
+		const high = self.magByteAt(hi - 1);
+		const lz: usize = @clz(high);
+		return 8 * (hi - 1) + (8 - lz);
+	}
+
+	/// Returns magnitude byte at index `i` (LE). Past the high byte returns 0.
+	/// For positive values, just reads payload[i]. For negative, walks payload
+	/// from byte 0 to compute (~payload + 1)[i] with carry. Linear in `i` for
+	/// negative values; called by bitAt at most O(bitLen) times in powm — fine.
+	fn magByteAt(self: *const Mp, i: usize) u8 {
+		if (self.cached_sign == 0) return 0;
+		const pay = self.payload();
+		if (self.cached_sign > 0) {
+			return if (i < pay.len) pay[i] else 0;
+		}
+		// Negative: magnitude byte i = (~payload + 1)[i]. We need to know
+		// the carry into byte i — which is 1 if all of payload[0..i] are 0.
+		const L = pay.len;
+		// Past the payload bytes: the "carry out of top" can produce a 1
+		// magnitude byte iff value == minInt for that L (i.e. 0x00..0x80).
+		if (i >= L) {
+			// Check: did the negation carry out of the top byte?
+			// Carry into byte L = 1 iff all payload bytes <= 0 case... actually
+			// only if payload[L-1] == 0 AND every lower byte == 0 produced carry.
+			// Special case: payload == 0x00..0x80 → ~ = 0xFF..0x7F, +1 propagates
+			// from byte 0: each 0xFF + 1 = 0x100 (carry). Byte L-1 = 0x7F + 1 = 0x80
+			// (no carry). So carry_out_of_top = 0. Magnitude bytes [L] = 0.
+			// I think for any canonical negative there's no carry past byte L-1
+			// because the high byte of the negation is always >= 1 (since the
+			// high bit of payload was set, meaning payload[L-1] >= 0x80, so
+			// ~payload[L-1] <= 0x7F, plus carry ≤ 1 → ≤ 0x80, no overflow).
+			return 0;
+		}
+		// Compute carry into byte i by scanning bytes 0..i.
+		var carry: u16 = 1;
+		var k: usize = 0;
+		while (k < i) : (k += 1) {
+			const inv: u16 = ~pay[k];
+			const sum = inv + carry;
+			carry = sum >> 8;
+		}
+		const inv_i: u16 = ~pay[i];
+		return @truncate(inv_i + carry);
+	}
+
+	/// Modular exponentiation: writes (base ^ exp) mod mod into `r`.
+	///
+	/// Algorithm: dispatches on exponent bit-length:
+	///   - For tiny exponents (bitLen ≤ 8) uses right-to-left square-and-multiply
+	///     (M7-4.1) — precompute amortisation isn't worth it.
+	///   - For larger exponents uses left-to-right sliding-window (M7-4.2)
+	///     with adaptive window size (w=4 for ≤256-bit exp, w=5 for ≤2048-bit,
+	///     w=6 above) — saves ~25-35% of multiplications vs square-and-multiply.
+	///
+	/// Sign convention matches GMP `mpz_powm`:
+	///   - mod must be non-zero; mod < 0 is reduced via |mod|.
+	///   - exp must be non-negative for now (negative needs modular inverse — M7-5).
+	///   - Result is reduced into [0, |mod|-1] (Euclidean), even if base is negative.
+	pub fn powm(r: *Mp, base: *const Mp, exp: *const Mp, m: *const Mp) ArithError!void {
+		if (m.cached_sign == 0) return error.DivisionByZero;
+		if (exp.cached_sign < 0) return error.NegativeExponentNotSupported;
+		const allocator = r.allocator;
+
+		// Normalise the modulus to its absolute value (GMP behavior).
+		var m_abs = Mp.init(allocator);
+		defer m_abs.deinit();
+		if (m.cached_sign < 0) {
+			// Compute |m| = 0 - m via Mp.sub.
+			var zero = Mp.init(allocator);
+			defer zero.deinit();
+			try zero.setI64(0);
+			try m_abs.sub(&zero, m);
+		} else {
+			try m_abs.setBytes(m.bytes());
+		}
+
+		// mod == 1 → result is 0 (anything mod 1 = 0). Cheap check via getI64.
+		if (m_abs.cached_pay_len == 1 and m_abs.bytes()[0] == 1) {
+			try r.setI64(0);
+			return;
+		}
+
+		// exp == 0 → result = 1 mod |mod|. For |mod| > 1 (already handled the
+		// |mod|==1 case above), this is just 1.
+		if (exp.cached_sign == 0) {
+			try r.setI64(1);
+			return;
+		}
+
+		// Reduce base into [0, |mod|-1] (Euclidean) → acc / base_red.
+		var base_red = Mp.init(allocator);
+		defer base_red.deinit();
+		try base_red.mod(base, &m_abs); // truncated: result in (-|mod|, |mod|)
+		if (base_red.cached_sign < 0) {
+			try base_red.add(&base_red, &m_abs);
+		}
+
+		const e_bits = exp.bitLen();
+		// Tiny exponent or zero base: fall back to square-and-multiply (no
+		// precompute amortisation). Also handles base == 0 cleanly.
+		if (e_bits <= 8 or base_red.cached_sign == 0) {
+			try powmSquareAndMultiply(r, &base_red, exp, &m_abs);
+			return;
+		}
+
+		// Larger exponent: left-to-right sliding window. Adaptive window:
+		// w=4 for ≤256-bit, w=5 for ≤2048-bit, w=6 above.
+		const w: u8 = if (e_bits <= 256) 4 else if (e_bits <= 2048) 5 else 6;
+		try powmSlidingWindow(r, &base_red, exp, &m_abs, w);
+	}
+
 	/// Returns true iff this Mp's encoded form fits in the i64 universe
 	/// (signed canonical L ≤ 8 → at most 9 bytes total).
 	fn fitsTier01(self: *const Mp) bool {
@@ -386,6 +554,126 @@ inline fn decodeInlineSmall(self: *const Mp) i64 {
 	}
 	// Length-prefixed: tail invariant gives us the i64 directly.
 	return @bitCast(std.mem.readInt(u64, self.inline_buf[1..9], .little));
+}
+
+/// powm helper: square-and-multiply (right-to-left scan of exponent bits).
+/// Inputs: base_red is already reduced into [0, |m|-1]; m is positive.
+/// `exp` is non-negative. Used for tiny exponents and as the correctness
+/// baseline (M7-4.1).
+fn powmSquareAndMultiply(r: *Mp, base_red: *const Mp, exp: *const Mp, m: *const Mp) ArithError!void {
+	const allocator = r.allocator;
+
+	var result = Mp.init(allocator);
+	defer result.deinit();
+	try result.setI64(1);
+
+	var acc = Mp.init(allocator);
+	defer acc.deinit();
+	try acc.setBytes(base_red.bytes());
+
+	var tmp = Mp.init(allocator);
+	defer tmp.deinit();
+
+	const e_bits = exp.bitLen();
+	var i: usize = 0;
+	while (i < e_bits) : (i += 1) {
+		if (exp.bitAt(i) == 1) {
+			try tmp.mul(&result, &acc);
+			try result.mod(&tmp, m);
+			if (result.cached_sign < 0) try result.add(&result, m);
+		}
+		if (i + 1 < e_bits) {
+			try tmp.mul(&acc, &acc);
+			try acc.mod(&tmp, m);
+			if (acc.cached_sign < 0) try acc.add(&acc, m);
+		}
+	}
+
+	try r.setBytes(result.bytes());
+}
+
+/// powm helper: left-to-right sliding-window exponentiation (M7-4.2).
+/// Precomputes odd powers `g[1], g[3], g[5], ..., g[2^w - 1]` of base_red
+/// (modulo m), then walks the exponent's bits high-to-low, accumulating
+/// squarings and folding in window multiplies. Saves ~25-35% of mults vs
+/// square-and-multiply for typical 1024-2048-bit exponents.
+///
+/// Inputs: base_red already reduced into [0, |m|-1]; m positive; exp positive
+/// with bitLen > w (caller decides). w should be in [2, 8].
+fn powmSlidingWindow(r: *Mp, base_red: *const Mp, exp: *const Mp, m: *const Mp, w: u8) ArithError!void {
+	const allocator = r.allocator;
+	std.debug.assert(w >= 2 and w <= 8);
+
+	const tbl_count: usize = @as(usize, 1) << @intCast(w - 1); // 2^(w-1) odd entries
+
+	// Precompute table[k] = base_red ^ (2k+1) mod m, for k in 0..tbl_count.
+	// table[0] = base_red. table[k] = table[k-1] * base_red^2 mod m.
+	var table: [128]Mp = undefined; // up to w=8 → 128 entries
+	for (0..tbl_count) |k| table[k] = Mp.init(allocator);
+	defer for (0..tbl_count) |k| table[k].deinit();
+
+	try table[0].setBytes(base_red.bytes());
+
+	var tmp = Mp.init(allocator);
+	defer tmp.deinit();
+	var sq = Mp.init(allocator); // base_red^2 mod m
+	defer sq.deinit();
+	try tmp.mul(base_red, base_red);
+	try sq.mod(&tmp, m);
+	if (sq.cached_sign < 0) try sq.add(&sq, m);
+
+	for (1..tbl_count) |k| {
+		try tmp.mul(&table[k - 1], &sq);
+		try table[k].mod(&tmp, m);
+		if (table[k].cached_sign < 0) try table[k].add(&table[k], m);
+	}
+
+	// Walk exponent bits high-to-low using sliding window.
+	var result = Mp.init(allocator);
+	defer result.deinit();
+	try result.setI64(1);
+
+	const e_bits: isize = @intCast(exp.bitLen());
+	var i: isize = e_bits - 1;
+	while (i >= 0) {
+		if (exp.bitAt(@intCast(i)) == 0) {
+			// Single squaring; advance by 1 bit.
+			try tmp.mul(&result, &result);
+			try result.mod(&tmp, m);
+			if (result.cached_sign < 0) try result.add(&result, m);
+			i -= 1;
+		} else {
+			// Find longest odd window of width ≤ w ending at a 1-bit.
+			// Scan from i down to max(i - w + 1, 0); find lowest j with
+			// exp.bitAt(j) == 1; window covers bits [j..i] (inclusive).
+			const w_isz: isize = @intCast(w);
+			const lo_limit: isize = if (i - w_isz + 1 >= 0) i - w_isz + 1 else 0;
+			var j: isize = lo_limit;
+			while (j <= i and exp.bitAt(@intCast(j)) == 0) : (j += 1) {}
+			// Window covers bits [j..i], width = i - j + 1, value = bits
+			// j..i interpreted as little-endian within those positions.
+			const win_width: usize = @intCast(i - j + 1);
+			var win_val: u32 = 0;
+			var bk: isize = i;
+			while (bk >= j) : (bk -= 1) {
+				win_val = (win_val << 1) | @as(u32, exp.bitAt(@intCast(bk)));
+			}
+			// Square `win_width` times.
+			for (0..win_width) |_| {
+				try tmp.mul(&result, &result);
+				try result.mod(&tmp, m);
+				if (result.cached_sign < 0) try result.add(&result, m);
+			}
+			// Multiply by table[(win_val - 1) / 2].
+			const tbl_idx: usize = (@as(usize, @intCast(win_val)) - 1) / 2;
+			try tmp.mul(&result, &table[tbl_idx]);
+			try result.mod(&tmp, m);
+			if (result.cached_sign < 0) try result.add(&result, m);
+			i = j - 1;
+		}
+	}
+
+	try r.setBytes(result.bytes());
 }
 
 /// Tier-3 truncated division: writes a/b into q.heap_buf and a%b into rem.heap_buf.
@@ -1276,6 +1564,186 @@ test "divMod: tier-3 dividend, small divisor (i64.max + 5) / 7" {
 	// Wait: 5 + 9223372036854775807 = 9223372036854775812. So /7 quotient = 1317624576693539401 r 5.
 	try testing.expectEqual(@as(i64, 1_317_624_576_693_539_401), try q.getI64());
 	try testing.expectEqual(@as(i64, 5), try r.getI64());
+}
+
+// ── M7-4: powm helpers — bitAt / bitLen on the magnitude ────────────────────
+
+test "bitAt: returns bit i of absolute value (positive small)" {
+	var x = Mp.init(testing.allocator);
+	defer x.deinit();
+	try x.setI64(0b10110); // 22
+	try testing.expectEqual(@as(u1, 0), x.bitAt(0));
+	try testing.expectEqual(@as(u1, 1), x.bitAt(1));
+	try testing.expectEqual(@as(u1, 1), x.bitAt(2));
+	try testing.expectEqual(@as(u1, 0), x.bitAt(3));
+	try testing.expectEqual(@as(u1, 1), x.bitAt(4));
+	try testing.expectEqual(@as(u1, 0), x.bitAt(5));
+	try testing.expectEqual(@as(u1, 0), x.bitAt(99)); // beyond high bit → 0
+}
+
+test "bitAt: returns bit i of magnitude for negative values" {
+	// |-22| = 22 = 0b10110. The bits we read should be the MAGNITUDE's bits.
+	var x = Mp.init(testing.allocator);
+	defer x.deinit();
+	try x.setI64(-22);
+	try testing.expectEqual(@as(u1, 0), x.bitAt(0));
+	try testing.expectEqual(@as(u1, 1), x.bitAt(1));
+	try testing.expectEqual(@as(u1, 1), x.bitAt(2));
+	try testing.expectEqual(@as(u1, 0), x.bitAt(3));
+	try testing.expectEqual(@as(u1, 1), x.bitAt(4));
+}
+
+test "bitAt: zero value returns 0 for any bit" {
+	var x = Mp.init(testing.allocator);
+	defer x.deinit();
+	try x.setI64(0);
+	try testing.expectEqual(@as(u1, 0), x.bitAt(0));
+	try testing.expectEqual(@as(u1, 0), x.bitAt(7));
+	try testing.expectEqual(@as(u1, 0), x.bitAt(1000));
+}
+
+test "bitLen: matches highest-bit + 1 for various i64 values" {
+	const cases = [_]struct { v: i64, expected: usize }{
+		.{ .v = 0, .expected = 0 },
+		.{ .v = 1, .expected = 1 },
+		.{ .v = 2, .expected = 2 },
+		.{ .v = 3, .expected = 2 },
+		.{ .v = 7, .expected = 3 },
+		.{ .v = 8, .expected = 4 },
+		.{ .v = 127, .expected = 7 },
+		.{ .v = 128, .expected = 8 },
+		.{ .v = 255, .expected = 8 },
+		.{ .v = 256, .expected = 9 },
+		.{ .v = -1, .expected = 1 },
+		.{ .v = -128, .expected = 8 },
+		.{ .v = -129, .expected = 8 },
+		.{ .v = std.math.maxInt(i64), .expected = 63 },
+		.{ .v = std.math.minInt(i64), .expected = 64 }, // |minInt| = 2^63
+	};
+	var x = Mp.init(testing.allocator);
+	defer x.deinit();
+	for (cases) |c| {
+		try x.setI64(c.v);
+		try testing.expectEqual(c.expected, x.bitLen());
+	}
+}
+
+test "bitAt / bitLen: large tier-3 value (256-bit set bit pattern)" {
+	// Magnitude = 1 << 200. setBytes encodes a positive signed payload of 26
+	// bytes: 25 zero bytes + 0x01 in byte 25 (bit 200 of mag).
+	var pay: [26]u8 = .{0} ** 26;
+	pay[25] = 0x01;
+	var blip: [28]u8 = undefined;
+	blip[0] = 0x9A; // L = 26 = 0b11010 (continuation off, low5=0x1A)
+	@memcpy(blip[1..27], &pay);
+	// Note: 26 < 32 so single-byte header.
+	var x = Mp.init(testing.allocator);
+	defer x.deinit();
+	try x.setBytes(blip[0..27]);
+	try testing.expectEqual(@as(u1, 1), x.bitAt(200));
+	try testing.expectEqual(@as(u1, 0), x.bitAt(199));
+	try testing.expectEqual(@as(u1, 0), x.bitAt(201));
+	try testing.expectEqual(@as(usize, 201), x.bitLen());
+}
+
+// ── M7-4-1: powm — square-and-multiply baseline ─────────────────────────────
+
+test "powm: small known cases" {
+	const Case = struct { b: i64, e: i64, m: i64, expected: i64 };
+	const cases = [_]Case{
+		.{ .b = 3, .e = 4, .m = 5, .expected = 1 }, // 81 mod 5 = 1
+		.{ .b = 2, .e = 10, .m = 1000, .expected = 24 }, // 1024 mod 1000
+		.{ .b = 3, .e = 17, .m = 100, .expected = 63 }, // 129140163 mod 100
+		.{ .b = 7, .e = 0, .m = 13, .expected = 1 }, // x^0 = 1
+		.{ .b = 0, .e = 5, .m = 13, .expected = 0 }, // 0^n (n>0) = 0
+		.{ .b = 0, .e = 0, .m = 13, .expected = 1 }, // 0^0 = 1 (GMP convention)
+		.{ .b = 5, .e = 1, .m = 7, .expected = 5 }, // x^1 = x mod m
+		.{ .b = 100, .e = 2, .m = 1, .expected = 0 }, // anything mod 1 = 0
+		.{ .b = -3, .e = 4, .m = 5, .expected = 1 }, // (-3)^4 = 81; 81 mod 5 = 1
+		// (-3)^3 = -27 — GMP `mpz_powm` returns r in [0, m-1] for m > 0,
+		// i.e. Euclidean reduction. See dedicated test below.
+	};
+	var b_mp = Mp.init(testing.allocator);
+	defer b_mp.deinit();
+	var e_mp = Mp.init(testing.allocator);
+	defer e_mp.deinit();
+	var m_mp = Mp.init(testing.allocator);
+	defer m_mp.deinit();
+	var r_mp = Mp.init(testing.allocator);
+	defer r_mp.deinit();
+	for (cases) |c| {
+		try b_mp.setI64(c.b);
+		try e_mp.setI64(c.e);
+		try m_mp.setI64(c.m);
+		try Mp.powm(&r_mp, &b_mp, &e_mp, &m_mp);
+		try testing.expectEqual(c.expected, try r_mp.getI64());
+	}
+}
+
+test "powm: -3^3 mod 5 returns Euclidean remainder (matches GMP convention)" {
+	// (-3)^3 = -27. GMP mpz_powm yields r in [0, m-1] for m>0, so r=3.
+	var b = Mp.init(testing.allocator);
+	defer b.deinit();
+	var e = Mp.init(testing.allocator);
+	defer e.deinit();
+	var m = Mp.init(testing.allocator);
+	defer m.deinit();
+	var r = Mp.init(testing.allocator);
+	defer r.deinit();
+	try b.setI64(-3);
+	try e.setI64(3);
+	try m.setI64(5);
+	try Mp.powm(&r, &b, &e, &m);
+	try testing.expectEqual(@as(i64, 3), try r.getI64());
+}
+
+test "powm: division by zero modulus" {
+	var b = Mp.init(testing.allocator);
+	defer b.deinit();
+	var e = Mp.init(testing.allocator);
+	defer e.deinit();
+	var m = Mp.init(testing.allocator);
+	defer m.deinit();
+	var r = Mp.init(testing.allocator);
+	defer r.deinit();
+	try b.setI64(2);
+	try e.setI64(10);
+	try m.setI64(0);
+	try testing.expectError(error.DivisionByZero, Mp.powm(&r, &b, &e, &m));
+}
+
+test "powm: negative exponent returns NegativeExponentNotSupported" {
+	var b = Mp.init(testing.allocator);
+	defer b.deinit();
+	var e = Mp.init(testing.allocator);
+	defer e.deinit();
+	var m = Mp.init(testing.allocator);
+	defer m.deinit();
+	var r = Mp.init(testing.allocator);
+	defer r.deinit();
+	try b.setI64(2);
+	try e.setI64(-1);
+	try m.setI64(7);
+	try testing.expectError(error.NegativeExponentNotSupported, Mp.powm(&r, &b, &e, &m));
+}
+
+test "powm: medium magnitude — 7^100 mod 13 = 9 (verified manually)" {
+	// 7^100 mod 13. By Fermat's little theorem, 7^12 ≡ 1 mod 13, so
+	// 7^100 = 7^(12*8 + 4) = (7^12)^8 * 7^4 ≡ 7^4 mod 13.
+	// 7^2 = 49 ≡ 10 mod 13. 7^4 = 10^2 = 100 ≡ 9 mod 13.
+	var b = Mp.init(testing.allocator);
+	defer b.deinit();
+	var e = Mp.init(testing.allocator);
+	defer e.deinit();
+	var m = Mp.init(testing.allocator);
+	defer m.deinit();
+	var r = Mp.init(testing.allocator);
+	defer r.deinit();
+	try b.setI64(7);
+	try e.setI64(100);
+	try m.setI64(13);
+	try Mp.powm(&r, &b, &e, &m);
+	try testing.expectEqual(@as(i64, 9), try r.getI64());
 }
 
 test "divMod: identity a == q*b + rem on 1000 random i64 pairs" {
