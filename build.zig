@@ -63,6 +63,25 @@ pub fn build(b: *std.Build) void {
 	const bench_step = b.step("bench", "Build benchmark binaries");
 	bench_step.dependOn(&install_blip_mp_bench.step);
 
+	// fft_microbench — isolates per-call cost of mulModP/addModP/subModP and
+	// their @Vector(2, u64) SIMD counterparts. No FFT setup, no allocation.
+	// Used to measure M6-4-A SIMD speedups against the scalar baseline.
+	const fft_microbench_module = b.createModule(.{
+		.root_source_file = b.path("tests/benchmark/fft_microbench.zig"),
+		.target = target,
+		.optimize = optimize,
+		.link_libc = true,
+		.imports = &.{
+			.{ .name = "blip_mp", .module = core_module },
+		},
+	});
+	const fft_microbench = b.addExecutable(.{
+		.name = "fft_microbench",
+		.root_module = fft_microbench_module,
+	});
+	const install_fft_microbench = b.addInstallArtifact(fft_microbench, .{});
+	bench_step.dependOn(&install_fft_microbench.step);
+
 	// cross_check — Zig exe that links both blip_mp (Zig core) and GMP,
 	// runs randomized add/sub/mul comparisons, asserts results match.
 	// Run via `./test` (or `nix build .#packages.<sys>.cross_check`).

@@ -510,6 +510,57 @@ pub fn mulMagnitudesCRT(
 	return len;
 }
 
+// ── NEON SIMD vectorized modular arithmetic (M6-4-A) ────────────────────────
+//
+// On aarch64, @Vector(2, u64) lowers to a 128-bit NEON register. Lane-wise
+// arithmetic ops compile to NEON `add.2d`, `sub.2d`, etc. The conditional
+// "subtract P if sum >= P" pattern lowers via @select to `cmhs.2d` + `bsl`.
+//
+// The 30-bit prime P = 998244353 means inputs fit in 32 bits, but we keep
+// the lane width at u64 because (a) NEON has no 64x64 high-half multiply for
+// the scalar Granlund-Möller magic-number reduction we want to vectorize in
+// A.3, and (b) staying in u64 avoids any narrow/widen ceremony at boundaries.
+
+/// Lane-wise (a + b) mod P. Each lane independent. Inputs assumed in [0, P).
+/// Lowers to NEON add.2d + cmhs.2d + bsl on aarch64. ~1.5–2× scalar throughput
+/// expected once both lanes are useful work.
+pub inline fn addModP_x2(a: @Vector(2, u64), b: @Vector(2, u64)) @Vector(2, u64) {
+	const sum = a + b;
+	const p_vec: @Vector(2, u64) = @splat(P);
+	const ge_mask = sum >= p_vec; // @Vector(2, bool)
+	const corrected = sum - p_vec;
+	return @select(u64, ge_mask, corrected, sum);
+}
+
+/// Lane-wise (a - b) mod P. Each lane independent. Inputs in [0, P).
+pub inline fn subModP_x2(a: @Vector(2, u64), b: @Vector(2, u64)) @Vector(2, u64) {
+	const p_vec: @Vector(2, u64) = @splat(P);
+	const lt_mask = a < b; // @Vector(2, bool)
+	const wrapped = a + p_vec - b;
+	const direct = a - b;
+	return @select(u64, lt_mask, wrapped, direct);
+}
+
+/// Lane-wise (a * b) mod P. Each lane independent. Inputs in [0, P), result in [0, P).
+/// Approach: extract scalar, run scalar mulModP, recombine. The compiler MAY
+/// auto-vectorize the magic-number `% P` lowering across the two lanes; if so
+/// we get the win for free. Empirically (see microbench output) we measure
+/// whether this beats two scalar calls or whether a more elaborate hand
+/// vectorization is needed.
+///
+/// Why not a hand-rolled NEON umulh? aarch64 NEON has no `umulh.2d`; you'd
+/// compose it from four umull2 (u32×u32→u64) and adds, which is more work
+/// than the scalar pipeline already does. This implementation deliberately
+/// goes through scalar so we can compare against that lower bound.
+pub inline fn mulModP_x2(a: @Vector(2, u64), b: @Vector(2, u64)) @Vector(2, u64) {
+	// Pull lanes into scalars, reduce, repack. The scalar `% P` lowering is
+	// essentially optimal (mul + umulh + msub) and the compiler may even
+	// schedule both lanes' reductions in parallel — measure to find out.
+	const r0 = (a[0] * b[0]) % P;
+	const r1 = (a[1] * b[1]) % P;
+	return .{ r0, r1 };
+}
+
 // ── Tests ───────────────────────────────────────────────────────────────────
 
 const testing = std.testing;
@@ -840,5 +891,80 @@ test "mulMagnitudesCRT: 100-iter random fuzz at sizes 4096..16384 bytes" {
 		const got_len = try mulMagnitudesCRT(testing.allocator, a, b, got);
 		try testing.expectEqual(ref_len, got_len);
 		try testing.expectEqualSlices(u8, ref[0..ref_len], got[0..got_len]);
+	}
+}
+
+// ── M6-4-A SIMD lane-equivalence tests ──────────────────────────────────────
+
+test "addModP_x2 / subModP_x2: edge cases (0, P-1, mid)" {
+	// Hand-picked corners that exercise wrap (sum>=P, a<b) on both lanes.
+	const corners = [_]struct { a0: u64, a1: u64, b0: u64, b1: u64 }{
+		.{ .a0 = 0, .a1 = P - 1, .b0 = 0, .b1 = 1 },     // lane1 wraps add
+		.{ .a0 = P - 1, .a1 = 5, .b0 = P - 1, .b1 = 7 }, // lane0 wraps add
+		.{ .a0 = 0, .a1 = 0, .b0 = 1, .b1 = P - 1 },     // both wrap sub
+		.{ .a0 = 5, .a1 = P / 2, .b0 = 7, .b1 = P / 2 }, // mixed
+	};
+	for (corners) |c| {
+		const av: @Vector(2, u64) = .{ c.a0, c.a1 };
+		const bv: @Vector(2, u64) = .{ c.b0, c.b1 };
+		const got_add = addModP_x2(av, bv);
+		const got_sub = subModP_x2(av, bv);
+		try testing.expectEqual(addModP(c.a0, c.b0), got_add[0]);
+		try testing.expectEqual(addModP(c.a1, c.b1), got_add[1]);
+		try testing.expectEqual(subModP(c.a0, c.b0), got_sub[0]);
+		try testing.expectEqual(subModP(c.a1, c.b1), got_sub[1]);
+	}
+}
+
+test "addModP_x2 / subModP_x2: lane-equivalent to scalar on 100K random pairs" {
+	var prng = std.Random.DefaultPrng.init(0x5EED1);
+	const rand = prng.random();
+	var i: usize = 0;
+	while (i < 100_000) : (i += 1) {
+		const a0 = rand.uintLessThan(u64, P);
+		const a1 = rand.uintLessThan(u64, P);
+		const b0 = rand.uintLessThan(u64, P);
+		const b1 = rand.uintLessThan(u64, P);
+		const av: @Vector(2, u64) = .{ a0, a1 };
+		const bv: @Vector(2, u64) = .{ b0, b1 };
+		const got_add = addModP_x2(av, bv);
+		const got_sub = subModP_x2(av, bv);
+		try testing.expectEqual(addModP(a0, b0), got_add[0]);
+		try testing.expectEqual(addModP(a1, b1), got_add[1]);
+		try testing.expectEqual(subModP(a0, b0), got_sub[0]);
+		try testing.expectEqual(subModP(a1, b1), got_sub[1]);
+	}
+}
+
+test "mulModP_x2: edge cases" {
+	const corners = [_]struct { a0: u64, a1: u64, b0: u64, b1: u64 }{
+		.{ .a0 = 0, .a1 = 0, .b0 = 0, .b1 = 0 },
+		.{ .a0 = 1, .a1 = 1, .b0 = P - 1, .b1 = P - 1 },
+		.{ .a0 = P - 1, .a1 = P / 2, .b0 = P - 1, .b1 = P / 2 },
+		.{ .a0 = 12345, .a1 = 67890, .b0 = 11111, .b1 = 22222 },
+	};
+	for (corners) |c| {
+		const av: @Vector(2, u64) = .{ c.a0, c.a1 };
+		const bv: @Vector(2, u64) = .{ c.b0, c.b1 };
+		const got = mulModP_x2(av, bv);
+		try testing.expectEqual(mulModP(c.a0, c.b0), got[0]);
+		try testing.expectEqual(mulModP(c.a1, c.b1), got[1]);
+	}
+}
+
+test "mulModP_x2: lane-equivalent to scalar on 100K random pairs" {
+	var prng = std.Random.DefaultPrng.init(0x5EED2);
+	const rand = prng.random();
+	var i: usize = 0;
+	while (i < 100_000) : (i += 1) {
+		const a0 = rand.uintLessThan(u64, P);
+		const a1 = rand.uintLessThan(u64, P);
+		const b0 = rand.uintLessThan(u64, P);
+		const b1 = rand.uintLessThan(u64, P);
+		const av: @Vector(2, u64) = .{ a0, a1 };
+		const bv: @Vector(2, u64) = .{ b0, b1 };
+		const got = mulModP_x2(av, bv);
+		try testing.expectEqual(mulModP(a0, b0), got[0]);
+		try testing.expectEqual(mulModP(a1, b1), got[1]);
 	}
 }
