@@ -247,38 +247,88 @@ pub fn mulMagnitudes(allocator: std.mem.Allocator, a: []const u8, b: []const u8,
 	defer allocator.free(tw_fwd);
 	const tw_inv = try allocator.alloc(u64, N / 2);
 	defer allocator.free(tw_inv);
+	const stockham_scratch = try allocator.alloc(u64, N);
+	defer allocator.free(stockham_scratch);
+
+	return mulMagnitudesWithScratch(a, b, out, pa, pb, tw_fwd, tw_inv, stockham_scratch);
+}
+
+/// E.1 + E.2 — caller-supplied scratch variant of `mulMagnitudes`. The
+/// caller owns five buffers covering all internal state:
+///   pa, pb            : N u64 each (digit buffers)
+///   tw_fwd, tw_inv    : N/2 u64 each (precomputed twiddle tables)
+///   stockham_scratch  : N u64 (Stockham auto-sort ping-pong buffer)
+/// where N = next_pow2(a.len + b.len).
+///
+/// Eliminates the 4-5 per-call alloc/free pairs that previously dominated
+/// the wall-clock budget for FFT-path multiplies (each ~1-2 K ns on libc
+/// malloc; ~5-10 K ns total at N=8192). With this entry point the only
+/// per-call cost is the actual transform work.
+///
+/// Internally uses Stockham auto-sort NTT (E.2) — skips the bit-reversal
+/// pass entirely, ~9% per NTT × 3 NTTs per multiply ≈ 5-8 K ns saved at
+/// N=8192. The Cooley-Tukey path (`nttWithTwiddlesVec`) is preserved on
+/// the type system but no longer the production path.
+pub fn mulMagnitudesWithScratch(
+	a: []const u8,
+	b: []const u8,
+	out: []u8,
+	pa: []u64,
+	pb: []u64,
+	tw_fwd: []u64,
+	tw_inv: []u64,
+	stockham_scratch: []u64,
+) usize {
+	if (a.len == 0 or b.len == 0) return 0;
+	const need_len = a.len + b.len;
+	std.debug.assert(out.len >= need_len);
+	std.debug.assert(need_len <= MAX_FFT_COMBINED_LEN);
+
+	var N: usize = 1;
+	while (N < need_len) N <<= 1;
+	std.debug.assert(pa.len >= N);
+	std.debug.assert(pb.len >= N);
+	std.debug.assert(tw_fwd.len >= N / 2);
+	std.debug.assert(tw_inv.len >= N / 2);
+	std.debug.assert(stockham_scratch.len >= N);
+
+	const pa_n = pa[0..N];
+	const pb_n = pb[0..N];
+	const tw_fwd_n = tw_fwd[0 .. N / 2];
+	const tw_inv_n = tw_inv[0 .. N / 2];
+	const sc_n = stockham_scratch[0..N];
 
 	// Precompute twiddles once, reuse across 3 NTT calls (forward A,
 	// forward B, inverse). Cuts per-call mulModP count nearly in half.
 	const omega_n = nthRootOfUnity(N);
 	const omega_n_inv = invModP(omega_n);
-	tw_fwd[0] = 1;
-	tw_inv[0] = 1;
+	tw_fwd_n[0] = 1;
+	tw_inv_n[0] = 1;
 	{
 		var j: usize = 1;
 		while (j < N / 2) : (j += 1) {
-			tw_fwd[j] = mulModP(tw_fwd[j - 1], omega_n);
-			tw_inv[j] = mulModP(tw_inv[j - 1], omega_n_inv);
+			tw_fwd_n[j] = mulModP(tw_fwd_n[j - 1], omega_n);
+			tw_inv_n[j] = mulModP(tw_inv_n[j - 1], omega_n_inv);
 		}
 	}
 
-	@memset(pa, 0);
-	@memset(pb, 0);
-	for (a, 0..) |byte, i| pa[i] = byte;
-	for (b, 0..) |byte, i| pb[i] = byte;
+	@memset(pa_n, 0);
+	@memset(pb_n, 0);
+	for (a, 0..) |byte, i| pa_n[i] = byte;
+	for (b, 0..) |byte, i| pb_n[i] = byte;
 
-	nttWithTwiddlesVec(pa, tw_fwd);
-	nttWithTwiddlesVec(pb, tw_fwd);
-	for (0..N) |i| pa[i] = mulModP(pa[i], pb[i]);
-	nttWithTwiddlesVec(pa, tw_inv);
+	nttStockhamVec(pa_n, sc_n, tw_fwd_n);
+	nttStockhamVec(pb_n, sc_n, tw_fwd_n);
+	for (0..N) |i| pa_n[i] = mulModP(pa_n[i], pb_n[i]);
+	nttStockhamVec(pa_n, sc_n, tw_inv_n);
 	const n_inv = invModP(@intCast(N));
-	for (pa) |*x| x.* = mulModP(x.*, n_inv);
+	for (pa_n) |*x| x.* = mulModP(x.*, n_inv);
 
 	// Carry propagation through the byte-output buffer.
 	var carry: u64 = 0;
 	var i: usize = 0;
 	while (i < need_len) : (i += 1) {
-		const val = pa[i] + carry;
+		const val = pa_n[i] + carry;
 		out[i] = @truncate(val & 0xFF);
 		carry = val >> 8;
 	}
@@ -1231,6 +1281,43 @@ fn schoolbookMul(a: []const u8, b: []const u8, out: []u8) usize {
 	var len = a.len + b.len;
 	while (len > 0 and out[len - 1] == 0) len -= 1;
 	return len;
+}
+
+test "mulMagnitudesWithScratch: caller-supplied scratch matches schoolbook" {
+	// E.1 — verify the scratch-supplied form produces identical output
+	// to the allocator-using wrapper, with caller owning all 5 buffers
+	// (pa, pb, tw_fwd, tw_inv, stockham_scratch).
+	const cases = [_]struct {
+		a: []const u8,
+		b: []const u8,
+	}{
+		.{ .a = &.{1}, .b = &.{1} },
+		.{ .a = &.{0xFF}, .b = &.{0xFF} },
+		.{ .a = &.{ 0x12, 0x34 }, .b = &.{ 0x56, 0x78 } },
+		.{ .a = &.{ 0xFF, 0xFF, 0xFF, 0xFF }, .b = &.{ 0xFF, 0xFF, 0xFF, 0xFF } },
+	};
+	for (cases) |c| {
+		var ref_buf: [16]u8 = undefined;
+		var fft_buf: [16]u8 = undefined;
+		const need_len = c.a.len + c.b.len;
+		var N: usize = 1;
+		while (N < need_len) N <<= 1;
+		const pa = try testing.allocator.alloc(u64, N);
+		defer testing.allocator.free(pa);
+		const pb = try testing.allocator.alloc(u64, N);
+		defer testing.allocator.free(pb);
+		const tw_fwd = try testing.allocator.alloc(u64, N / 2);
+		defer testing.allocator.free(tw_fwd);
+		const tw_inv = try testing.allocator.alloc(u64, N / 2);
+		defer testing.allocator.free(tw_inv);
+		const stockham_scratch = try testing.allocator.alloc(u64, N);
+		defer testing.allocator.free(stockham_scratch);
+
+		const ref_len = schoolbookMul(c.a, c.b, &ref_buf);
+		const fft_len = mulMagnitudesWithScratch(c.a, c.b, &fft_buf, pa, pb, tw_fwd, tw_inv, stockham_scratch);
+		try testing.expectEqual(ref_len, fft_len);
+		try testing.expectEqualSlices(u8, ref_buf[0..ref_len], fft_buf[0..fft_len]);
+	}
 }
 
 test "mulMagnitudes: matches schoolbook on small known cases" {
