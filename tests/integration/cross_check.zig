@@ -32,6 +32,8 @@ extern "c" fn __gmpz_neg(rop: *mpz_t, op: *const mpz_t) void;
 extern "c" fn __gmpz_add(rop: *mpz_t, op1: *const mpz_t, op2: *const mpz_t) void;
 extern "c" fn __gmpz_sub(rop: *mpz_t, op1: *const mpz_t, op2: *const mpz_t) void;
 extern "c" fn __gmpz_mul(rop: *mpz_t, op1: *const mpz_t, op2: *const mpz_t) void;
+extern "c" fn __gmpz_tdiv_qr(q: *mpz_t, r: *mpz_t, n: *const mpz_t, d: *const mpz_t) void;
+extern "c" fn __gmpz_cmp_ui(op: *const mpz_t, op2: c_ulong) c_int;
 extern "c" fn __gmpz_import(
 	rop: *mpz_t,
 	count: usize,
@@ -161,29 +163,41 @@ fn nfPrint(nf: NormalForm) void {
 
 // ── Test runners ─────────────────────────────────────────────────────────────
 
-const Op = enum { add, sub, mul };
+const Op = enum { add, sub, mul, divq, divr };
 
 fn opName(op: Op) []const u8 {
 	return switch (op) {
 		.add => "add",
 		.sub => "sub",
 		.mul => "mul",
+		.divq => "divq",
+		.divr => "divr",
 	};
 }
 
-fn runOp(blip_r: *Mp, blip_a: *const Mp, blip_b: *const Mp, op: Op) !void {
+fn runOp(
+	blip_r: *Mp, blip_a: *const Mp, blip_b: *const Mp, op: Op,
+	scratch_q: *Mp, scratch_r: *Mp,
+) !void {
 	switch (op) {
 		.add => try blip_r.add(blip_a, blip_b),
 		.sub => try blip_r.sub(blip_a, blip_b),
 		.mul => try blip_r.mul(blip_a, blip_b),
+		.divq => try Mp.divMod(blip_r, scratch_r, blip_a, blip_b),
+		.divr => try Mp.divMod(scratch_q, blip_r, blip_a, blip_b),
 	}
 }
 
-fn gmpOp(gmp_r: *mpz_t, gmp_a: *const mpz_t, gmp_b: *const mpz_t, op: Op) void {
+fn gmpOp(
+	gmp_r: *mpz_t, gmp_a: *const mpz_t, gmp_b: *const mpz_t, op: Op,
+	scratch_q: *mpz_t, scratch_r: *mpz_t,
+) void {
 	switch (op) {
 		.add => __gmpz_add(gmp_r, gmp_a, gmp_b),
 		.sub => __gmpz_sub(gmp_r, gmp_a, gmp_b),
 		.mul => __gmpz_mul(gmp_r, gmp_a, gmp_b),
+		.divq => __gmpz_tdiv_qr(gmp_r, scratch_r, gmp_a, gmp_b),
+		.divr => __gmpz_tdiv_qr(scratch_q, gmp_r, gmp_a, gmp_b),
 	}
 }
 
@@ -261,6 +275,13 @@ fn iterCount(op: Op, bits: usize) usize {
 		if (bits <= 4096) return 50;
 		return 20;
 	}
+	// Div: Knuth Algorithm D is O(n*m) so similar to mul scaling.
+	if (op == .divq or op == .divr) {
+		if (bits <= 256) return 100;
+		if (bits <= 1024) return 50;
+		if (bits <= 4096) return 30;
+		return 15;
+	}
 	// add/sub are cheap.
 	if (bits <= 1024) return 200;
 	if (bits <= 8192) return 100;
@@ -268,7 +289,7 @@ fn iterCount(op: Op, bits: usize) usize {
 }
 
 const SIZES = [_]usize{ 8, 16, 32, 60, 64, 128, 192, 256, 384, 512, 768, 1024, 1536, 2048, 3072, 4096, 6144, 8192 };
-const OPS = [_]Op{ .add, .sub, .mul };
+const OPS = [_]Op{ .add, .sub, .mul, .divq, .divr };
 
 pub fn main() !u8 {
 	const allocator = std.heap.c_allocator;
@@ -277,7 +298,7 @@ pub fn main() !u8 {
 
 	std.debug.print("=== blip_mp vs GMP cross-validation ===\n", .{});
 	std.debug.print("Sizes: {any}\n", .{SIZES});
-	std.debug.print("Ops: add, sub, mul\n\n", .{});
+	std.debug.print("Ops: add, sub, mul, divq, divr\n\n", .{});
 
 	var total_checks: usize = 0;
 	var total_failures: usize = 0;
@@ -288,17 +309,27 @@ pub fn main() !u8 {
 	defer blip_b.deinit();
 	var blip_r = Mp.init(allocator);
 	defer blip_r.deinit();
+	var blip_scratch_q = Mp.init(allocator);
+	defer blip_scratch_q.deinit();
+	var blip_scratch_r = Mp.init(allocator);
+	defer blip_scratch_r.deinit();
 
 	var gmp_a: mpz_t = undefined;
 	var gmp_b: mpz_t = undefined;
 	var gmp_r: mpz_t = undefined;
+	var gmp_scratch_q: mpz_t = undefined;
+	var gmp_scratch_r: mpz_t = undefined;
 	__gmpz_init(&gmp_a);
 	__gmpz_init(&gmp_b);
 	__gmpz_init(&gmp_r);
+	__gmpz_init(&gmp_scratch_q);
+	__gmpz_init(&gmp_scratch_r);
 	defer {
 		__gmpz_clear(&gmp_a);
 		__gmpz_clear(&gmp_b);
 		__gmpz_clear(&gmp_r);
+		__gmpz_clear(&gmp_scratch_q);
+		__gmpz_clear(&gmp_scratch_r);
 	}
 
 	for (OPS) |op| {
@@ -341,8 +372,13 @@ pub fn main() !u8 {
 					continue;
 				}
 
-				try runOp(&blip_r, &blip_a, &blip_b, op);
-				gmpOp(&gmp_r, &gmp_a, &gmp_b, op);
+				// Skip div ops if divisor is zero (would error in both impls).
+				if ((op == .divq or op == .divr) and blip_b.cached_sign == 0) {
+					total_checks += 1;
+					continue;
+				}
+				try runOp(&blip_r, &blip_a, &blip_b, op, &blip_scratch_q, &blip_scratch_r);
+				gmpOp(&gmp_r, &gmp_a, &gmp_b, op, &gmp_scratch_q, &gmp_scratch_r);
 
 				var nf_blip = try normalizeBlip(blip_r.bytes(), allocator);
 				defer nf_blip.deinit();
