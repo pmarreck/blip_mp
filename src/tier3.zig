@@ -996,6 +996,339 @@ pub fn divModSingleU64(a: []u8, a_len: usize, b: u64) struct { q_len: usize, rem
 	return .{ .q_len = n, .rem = r };
 }
 
+/// Knuth Algorithm D long division (TAOCP vol 2 §4.3.1) on byte-base (b=256).
+///
+/// Computes q = u / v and r = u %% v for unsigned LE magnitudes u and v.
+/// Caller guarantees:
+///   - v_len >= 2 (single-byte/u64 divisors must use divModSingleByte/U64)
+///   - v[v_len-1] != 0 (v is canonical — no trailing zero byte)
+///   - u[u_len-1] != 0 OR u_len == 0 (u is canonical)
+///   - q_out has capacity ≥ max(u_len - v_len + 1, 1)
+///   - r_out has capacity ≥ v_len
+///   - work has capacity ≥ u_len + 1 + v_len  (normalized dividend + divisor)
+///
+/// Returns canonical lengths (trimmed of trailing zeros). q_len may be 0
+/// (when u < v); r_len may be 0 (when u is exactly divisible).
+///
+/// Algorithm phases:
+///   D1 (normalize): shift u and v left by `s` bits where s = clz(v[v_len-1])
+///     in the byte sense — i.e., s is the number of leading zero BITS in the
+///     top byte. After normalization v[v_len-1] >= 128, which bounds q_hat
+///     overestimation to at most 2 (and after refinement, at most 1).
+///   D2..D7 (main loop): for j from m down to 0, estimate q_hat from the
+///     top 2 bytes of u at position j+n, refine with v[n-2], multiply-and-
+///     subtract un[j..j+n+1] -= q_hat*v, correct if subtract went negative.
+///   Denormalize: shift remainder right by s.
+pub fn divModKnuth(
+	u: []const u8, u_len_in: usize,
+	v: []const u8, v_len: usize,
+	q_out: []u8, r_out: []u8,
+	work: []u8,
+) struct { q_len: usize, r_len: usize } {
+	std.debug.assert(v_len >= 2);
+	std.debug.assert(v[v_len - 1] != 0);
+
+	// Trim u of trailing zeros to canonical length.
+	var u_len: usize = u_len_in;
+	while (u_len > 0 and u[u_len - 1] == 0) u_len -= 1;
+
+	// Special case: u < v (in length, OR same length but u < v) → q=0, r=u.
+	if (u_len < v_len) {
+		@memcpy(r_out[0..u_len], u[0..u_len]);
+		return .{ .q_len = 0, .r_len = u_len };
+	}
+	if (u_len == v_len) {
+		const cmp = cmpUnsignedLE(u, u_len, v, v_len);
+		if (cmp < 0) {
+			@memcpy(r_out[0..u_len], u[0..u_len]);
+			return .{ .q_len = 0, .r_len = u_len };
+		}
+		if (cmp == 0) {
+			q_out[0] = 1;
+			return .{ .q_len = 1, .r_len = 0 };
+		}
+		// u > v at same length → q is single byte (1..255), r = u - v.
+		// Fall through to the main algorithm; it handles this correctly.
+	}
+
+	std.debug.assert(work.len >= u_len + 1 + v_len);
+
+	// D1: Normalize. Shift count s = number of leading zero bits in v[v_len-1].
+	const top = v[v_len - 1];
+	const s: u3 = @intCast(@clz(top));
+
+	// Normalized buffers in `work`:
+	//   un = work[0 .. u_len + 1]
+	//   vn = work[u_len + 1 .. u_len + 1 + v_len]
+	const un_buf = work[0 .. u_len + 1];
+	const vn = work[u_len + 1 .. u_len + 1 + v_len];
+
+	if (s == 0) {
+		@memcpy(un_buf[0..u_len], u[0..u_len]);
+		un_buf[u_len] = 0;
+		@memcpy(vn, v[0..v_len]);
+	} else {
+		// Left-shift u by s bits into un_buf (high byte may receive carry).
+		var carry: u16 = 0;
+		var i: usize = 0;
+		while (i < u_len) : (i += 1) {
+			const w: u16 = (@as(u16, u[i]) << s) | carry;
+			un_buf[i] = @truncate(w);
+			carry = w >> 8;
+		}
+		un_buf[u_len] = @intCast(carry);
+		// Left-shift v by s bits into vn.
+		var carry_v: u16 = 0;
+		i = 0;
+		while (i < v_len) : (i += 1) {
+			const w: u16 = (@as(u16, v[i]) << s) | carry_v;
+			vn[i] = @truncate(w);
+			carry_v = w >> 8;
+		}
+		// vn[v_len-1] now has high bit set (>= 128); no extension needed.
+		std.debug.assert(carry_v == 0);
+		std.debug.assert((vn[v_len - 1] & 0x80) != 0);
+	}
+
+	const n = v_len;
+	const m = u_len - v_len; // q has m+1 bytes (positions 0..=m).
+
+	// Initialize q_out to all zeros so we can write only non-zero positions.
+	@memset(q_out[0 .. m + 1], 0);
+
+	// Main loop: D2 .. D7. Process quotient bytes from high to low.
+	const v_top: u16 = vn[n - 1];
+	const v_second: u16 = vn[n - 2];
+	var j_plus_one: usize = m + 1;
+	while (j_plus_one > 0) {
+		j_plus_one -= 1;
+		const j = j_plus_one;
+
+		// D3: Estimate q_hat.
+		const u_top: u16 = un_buf[j + n];
+		const u_next: u16 = un_buf[j + n - 1];
+		const window: u32 = (@as(u32, u_top) << 8) | @as(u32, u_next);
+		var qhat: u32 = window / v_top;
+		if (qhat > 0xFF) qhat = 0xFF;
+		var rhat: u32 = window - qhat * v_top;
+		// Refine: while qhat * v[n-2] > (rhat << 8) + u[j+n-2]:
+		const u_third: u32 = un_buf[j + n - 2];
+		while (true) {
+			const lhs: u64 = @as(u64, qhat) * @as(u64, v_second);
+			const rhs: u64 = (@as(u64, rhat) << 8) + u_third;
+			if (lhs <= rhs) break;
+			qhat -= 1;
+			rhat += v_top;
+			if (rhat >= 256) break;
+		}
+
+		// D4: Multiply and subtract un[j..j+n+1] -= qhat * vn[0..n].
+		// Standard Knuth form: accumulator `acc` is signed (i64). Each step:
+		//   p = qhat * vn[k]
+		//   t = un[j+k] - acc - (p & 0xFF)   (i64; can be negative or large)
+		//   un[j+k] = t & 0xFF                (low byte of t in two's-comp form)
+		//   acc = (p >> 8) - (t >> 8)         (arithmetic right shift on signed t)
+		// `acc` represents the borrow propagated to the next byte. Using signed
+		// right-shift handles underflow correctly even when borrow >= 2.
+		var acc: i64 = 0;
+		var k: usize = 0;
+		while (k < n) : (k += 1) {
+			const p: u64 = @as(u64, qhat) * @as(u64, vn[k]);
+			const t: i64 = @as(i64, un_buf[j + k]) - acc - @as(i64, @intCast(p & 0xFF));
+			un_buf[j + k] = @truncate(@as(u64, @bitCast(t)) & 0xFF);
+			acc = @as(i64, @intCast(p >> 8)) - (t >> 8);
+		}
+		// Final byte at un[j+n]: subtract any remaining acc.
+		const t_top: i64 = @as(i64, un_buf[j + n]) - acc;
+		un_buf[j + n] = @truncate(@as(u64, @bitCast(t_top)) & 0xFF);
+		const went_negative = t_top < 0;
+
+		// D5: Test remainder. If negative, qhat was 1 too high — correct.
+		if (went_negative) {
+			qhat -= 1;
+			// Add vn back to un[j..j+n+1], ignoring final carry (cancels the
+			// "negative" we just detected).
+			var carry: u16 = 0;
+			k = 0;
+			while (k < n) : (k += 1) {
+				const sum: u16 = @as(u16, un_buf[j + k]) + @as(u16, vn[k]) + carry;
+				un_buf[j + k] = @truncate(sum);
+				carry = sum >> 8;
+			}
+			// Final carry into un[j+n] cancels the underflow byte.
+			const top_sum: u16 = @as(u16, un_buf[j + n]) + carry;
+			un_buf[j + n] = @truncate(top_sum);
+		}
+
+		q_out[j] = @intCast(qhat);
+	}
+
+	// D7: Denormalize. The remainder is in un_buf[0..n]; right-shift by s bits.
+	if (s == 0) {
+		@memcpy(r_out[0..n], un_buf[0..n]);
+	} else {
+		// Right-shift by s bits, walking high to low.
+		var carry: u16 = 0;
+		var i: usize = n;
+		while (i > 0) {
+			i -= 1;
+			const cur: u16 = un_buf[i];
+			r_out[i] = @intCast(((cur | (carry << 8)) >> s) & 0xFF);
+			carry = cur & ((@as(u16, 1) << s) - 1);
+		}
+	}
+
+	// Canonicalize lengths.
+	var q_len: usize = m + 1;
+	while (q_len > 0 and q_out[q_len - 1] == 0) q_len -= 1;
+	var r_len: usize = n;
+	while (r_len > 0 and r_out[r_len - 1] == 0) r_len -= 1;
+	return .{ .q_len = q_len, .r_len = r_len };
+}
+
+/// Worst-case scratch needed by `divModKnuth` for the given dividend/divisor lengths.
+pub fn divModKnuthScratchNeed(u_len: usize, v_len: usize) usize {
+	return u_len + 1 + v_len;
+}
+
+/// Signed truncated division on raw BLIP payloads (two's-complement LE).
+/// Implements GMP `mpz_tdiv_qr` semantics:
+///   sign(q) = sign(a) XOR sign(b)
+///   sign(rem) = sign(a)  (or 0)
+///   |rem| < |b|
+///   a == q * b + rem
+///
+/// Inputs `a_pay`/`b_pay` are two's-complement LE payload byte slices (the
+/// raw payload region of a BLIP value). The function:
+///   1. Extracts magnitudes by negating any negative payload into scratch.
+///   2. Dispatches to `divModSingleU64` (for 1..8-byte divisor magnitudes) or
+///      `divModKnuth` (for 9+ byte divisor magnitudes).
+///   3. Re-encodes quotient and remainder magnitudes as canonical two's-comp
+///      payloads (negating if their signs are negative). Writes into `q_pay`
+///      and `r_pay` buffers; returns canonical lengths (≥ 1).
+///
+/// Caller guarantees:
+///   - b_pay is not all-zero (DivisionByZero must be checked at the top level).
+///   - q_pay has capacity ≥ a_mag_len + 2 (extra for sign-extension byte).
+///   - r_pay has capacity ≥ b_mag_len + 2.
+///   - work has capacity ≥ a_mag_len + b_mag_len + divModKnuthScratchNeed(a_mag_len, b_mag_len)
+///     (covers magnitude scratch + Knuth working buffer).
+pub fn divModSigned(
+	a_pay: []const u8, b_pay: []const u8,
+	q_pay: []u8, r_pay: []u8,
+	work: []u8,
+) struct { q_len: usize, r_len: usize } {
+	const a_neg = signExtByte(a_pay) == 0xFF;
+	const b_neg = signExtByte(b_pay) == 0xFF;
+
+	// Layout work as: [a_mag | b_mag | knuth_scratch].
+	const a_mag_buf = work[0..a_pay.len];
+	const b_mag_buf = work[a_pay.len .. a_pay.len + b_pay.len];
+	const knuth_work = work[a_pay.len + b_pay.len ..];
+
+	@memcpy(a_mag_buf, a_pay);
+	@memcpy(b_mag_buf, b_pay);
+	if (a_neg) negateInPlace(a_mag_buf);
+	if (b_neg) negateInPlace(b_mag_buf);
+
+	// Canonicalize magnitudes (trim trailing zeros). After negation a positive
+	// payload of length L becomes a magnitude of length ≤ L (high byte may have
+	// been a sign-extension 0xFF that becomes 0x00 after negation, etc).
+	var a_mag_len: usize = a_pay.len;
+	while (a_mag_len > 0 and a_mag_buf[a_mag_len - 1] == 0) a_mag_len -= 1;
+	var b_mag_len: usize = b_pay.len;
+	while (b_mag_len > 0 and b_mag_buf[b_mag_len - 1] == 0) b_mag_len -= 1;
+
+	// Zero dividend → q=0, r=0.
+	if (a_mag_len == 0) {
+		q_pay[0] = 0;
+		r_pay[0] = 0;
+		return .{ .q_len = 1, .r_len = 1 };
+	}
+
+	// Compute unsigned q_mag and r_mag.
+	var q_mag_len: usize = 0;
+	var r_mag_len: usize = 0;
+
+	if (b_mag_len <= 8) {
+		// Single-u64 divisor path. Quotient overwrites a_mag in place; we then
+		// copy it into q_pay. Remainder is a u64.
+		// Build the divisor as u64 LE.
+		var divisor: u64 = 0;
+		for (0..b_mag_len) |k| divisor |= @as(u64, b_mag_buf[k]) << @intCast(8 * k);
+		const out = divModSingleU64(a_mag_buf, a_mag_len, divisor);
+		// Copy quotient bytes to q_pay.
+		@memcpy(q_pay[0..out.q_len], a_mag_buf[0..out.q_len]);
+		q_mag_len = out.q_len;
+		// Write remainder bytes to r_pay (LE).
+		var rem = out.rem;
+		var i: usize = 0;
+		while (rem != 0 or i == 0) : (i += 1) {
+			r_pay[i] = @truncate(rem);
+			rem >>= 8;
+			if (i + 1 >= r_pay.len) break;
+		}
+		// Trim trailing zeros to canonical magnitude length (may be 0 if rem == 0).
+		r_mag_len = i;
+		while (r_mag_len > 0 and r_pay[r_mag_len - 1] == 0) r_mag_len -= 1;
+	} else {
+		// Multi-byte divisor — Knuth Algorithm D.
+		const got = divModKnuth(a_mag_buf, a_mag_len, b_mag_buf, b_mag_len, q_pay, r_pay, knuth_work);
+		q_mag_len = got.q_len;
+		r_mag_len = got.r_len;
+	}
+
+	// Determine output signs. Truncated semantics:
+	//   q_neg = (a_neg XOR b_neg) AND q_mag != 0
+	//   r_neg = a_neg AND r_mag != 0
+	const q_is_neg = (a_neg != b_neg) and q_mag_len != 0;
+	const r_is_neg = a_neg and r_mag_len != 0;
+
+	// Re-encode q_mag as canonical two's-comp payload in q_pay.
+	q_mag_len = encodeMagAsTwosComp(q_pay, q_mag_len, q_is_neg);
+	r_mag_len = encodeMagAsTwosComp(r_pay, r_mag_len, r_is_neg);
+
+	return .{ .q_len = q_mag_len, .r_len = r_mag_len };
+}
+
+/// Take an unsigned magnitude `mag` of length `mag_len` (in `buf[0..mag_len]`,
+/// LE bytes), and re-encode it into the same buffer as a canonical two's-comp
+/// payload of the appropriate sign. Returns the new canonical payload length.
+///
+/// Rules:
+///   - If `mag_len == 0`: store [0x00] and return 1.
+///   - If positive: payload = magnitude bytes, possibly with a 0x00
+///     sign-extension byte appended IF the high bit of the high magnitude byte is set.
+///   - If negative: payload = (~magnitude + 1) of length L, possibly with
+///     extra 0xFF sign-extension byte if high bit of high byte is clear after negation.
+///   - Then canonicalize trailing 0x00 / 0xFF.
+inline fn encodeMagAsTwosComp(buf: []u8, mag_len: usize, is_negative: bool) usize {
+	if (mag_len == 0) {
+		buf[0] = 0x00;
+		return 1;
+	}
+	if (!is_negative) {
+		// High bit of high mag byte set → need 0x00 sign-extension byte.
+		if ((buf[mag_len - 1] & 0x80) != 0) {
+			buf[mag_len] = 0x00;
+			return canonicalLen(buf[0 .. mag_len + 1]);
+		}
+		return canonicalLen(buf[0..mag_len]);
+	}
+	// Negative: in-place negate (treat buf[0..mag_len] as the magnitude).
+	negateInPlace(buf[0..mag_len]);
+	if ((buf[mag_len - 1] & 0x80) == 0) {
+		buf[mag_len] = 0xFF;
+		return canonicalLen(buf[0 .. mag_len + 1]);
+	}
+	return canonicalLen(buf[0..mag_len]);
+}
+
+/// Worst-case scratch needed by `divModSigned` for the given input payload lengths.
+pub fn divModSignedScratchNeed(a_pay_len: usize, b_pay_len: usize) usize {
+	return a_pay_len + b_pay_len + divModKnuthScratchNeed(a_pay_len, b_pay_len);
+}
+
 /// Compare two unsigned LE byte arrays. Returns -1/0/+1.
 fn cmpUnsignedLE(a: []const u8, a_len: usize, b: []const u8, b_len: usize) i8 {
 	if (a_len != b_len) return if (a_len > b_len) 1 else -1;
@@ -2264,6 +2597,239 @@ test "divModSingleU64: 1000 random pairs vs u512 oracle (a_len ≤ 64, full u64 
 	}
 }
 
+// ── M7-3: divModKnuth tests ──────────────────────────────────────────────────
+
+/// Helper: compute a*b for unsigned LE byte arrays via mulMagnitudesU64Unaligned,
+/// returning the canonical-trimmed length and writing into `r`.
+fn testMulUnsigned(a: []const u8, b: []const u8, r: []u8) usize {
+	mulMagnitudesU64Unaligned(a, b, r);
+	var n = a.len + b.len;
+	while (n > 0 and r[n - 1] == 0) n -= 1;
+	return n;
+}
+
+test "divModKnuth: u < v → q=0, r=u" {
+	const allocator = std.testing.allocator;
+	const u = [_]u8{ 0xAB, 0xCD };
+	const v = [_]u8{ 0x11, 0x22, 0x33 };
+	var q: [4]u8 = undefined;
+	var r: [4]u8 = undefined;
+	const work = try allocator.alloc(u8, divModKnuthScratchNeed(u.len, v.len));
+	defer allocator.free(work);
+	const got = divModKnuth(&u, u.len, &v, v.len, &q, &r, work);
+	try testing.expectEqual(@as(usize, 0), got.q_len);
+	try testing.expectEqual(@as(usize, 2), got.r_len);
+	try testing.expectEqualSlices(u8, &u, r[0..got.r_len]);
+}
+
+test "divModKnuth: u == v → q=1, r=0" {
+	const allocator = std.testing.allocator;
+	const v = [_]u8{ 0x11, 0x22, 0x33 };
+	var q: [4]u8 = undefined;
+	var r: [4]u8 = undefined;
+	const work = try allocator.alloc(u8, divModKnuthScratchNeed(v.len, v.len));
+	defer allocator.free(work);
+	const got = divModKnuth(&v, v.len, &v, v.len, &q, &r, work);
+	try testing.expectEqual(@as(usize, 1), got.q_len);
+	try testing.expectEqual(@as(u8, 1), q[0]);
+	try testing.expectEqual(@as(usize, 0), got.r_len);
+}
+
+test "divModKnuth: known small (0xFFFF / 0x0102 = 0xFD r 0x09)" {
+	// 0xFFFF = 65535; 0x0102 = 258; 65535 / 258 = 253 (0xFD); 65535 - 253*258 = 65535 - 65274 = 261 = 0x0105.
+	// Wait: 253 * 258 = 65274; 65535 - 65274 = 261. But 261 > 258 so 253 is too low.
+	// Let me redo: 65535 / 258 = 254.012...; floor = 254. 254*258 = 65532; rem = 3.
+	// So q = 254 = 0xFE, r = 3 = 0x03.
+	const allocator = std.testing.allocator;
+	const u = [_]u8{ 0xFF, 0xFF };
+	const v = [_]u8{ 0x02, 0x01 }; // 258 LE
+	var q: [4]u8 = undefined;
+	var r: [4]u8 = undefined;
+	const work = try allocator.alloc(u8, divModKnuthScratchNeed(u.len, v.len));
+	defer allocator.free(work);
+	const got = divModKnuth(&u, u.len, &v, v.len, &q, &r, work);
+	try testing.expectEqual(@as(usize, 1), got.q_len);
+	try testing.expectEqual(@as(u8, 0xFE), q[0]);
+	try testing.expectEqual(@as(usize, 1), got.r_len);
+	try testing.expectEqual(@as(u8, 0x03), r[0]);
+}
+
+test "divModKnuth: round-trip u = q*v, expect u/v == q exactly" {
+	// Known divisible case: 0x010000 = 65536 = 256 * 256. v=[0x00, 0x01] (256 LE).
+	// q=[0x00, 0x01] (256 LE). u=[0x00, 0x00, 0x01] (65536 LE).
+	const allocator = std.testing.allocator;
+	const u = [_]u8{ 0x00, 0x00, 0x01 };
+	const v = [_]u8{ 0x00, 0x01 };
+	var q: [4]u8 = undefined;
+	var r: [4]u8 = undefined;
+	const work = try allocator.alloc(u8, divModKnuthScratchNeed(u.len, v.len));
+	defer allocator.free(work);
+	const got = divModKnuth(&u, u.len, &v, v.len, &q, &r, work);
+	try testing.expectEqual(@as(usize, 2), got.q_len);
+	try testing.expectEqualSlices(u8, &[_]u8{ 0x00, 0x01 }, q[0..got.q_len]);
+	try testing.expectEqual(@as(usize, 0), got.r_len);
+}
+
+test "divModKnuth: round-trip 100 random (q*v, v) pairs (small sizes)" {
+	// Generate random q (1..16 bytes) and random v (2..8 bytes), compute u = q*v,
+	// then divide u/v and assert quotient back == q, remainder == 0.
+	const allocator = std.testing.allocator;
+	var rng = std.Random.DefaultPrng.init(0x1234_5678_9ABC_DEF0);
+	const r_rng = rng.random();
+	var trial: usize = 0;
+	while (trial < 100) : (trial += 1) {
+		const q_len_in = 1 + @as(usize, r_rng.uintLessThan(u32, 16));
+		const v_len_in = 2 + @as(usize, r_rng.uintLessThan(u32, 7));
+		const q_in = try allocator.alloc(u8, q_len_in);
+		defer allocator.free(q_in);
+		const v_in = try allocator.alloc(u8, v_len_in);
+		defer allocator.free(v_in);
+		for (q_in) |*p| p.* = r_rng.int(u8);
+		for (v_in) |*p| p.* = r_rng.int(u8);
+		// Ensure top bytes are non-zero (canonical).
+		if (q_in[q_len_in - 1] == 0) q_in[q_len_in - 1] = 1;
+		if (v_in[v_len_in - 1] == 0) v_in[v_len_in - 1] = 1;
+		const u_buf = try allocator.alloc(u8, q_len_in + v_len_in + 1);
+		defer allocator.free(u_buf);
+		const u_len = testMulUnsigned(q_in, v_in, u_buf);
+
+		const q_out = try allocator.alloc(u8, u_len);
+		defer allocator.free(q_out);
+		const r_out = try allocator.alloc(u8, v_len_in);
+		defer allocator.free(r_out);
+		const work = try allocator.alloc(u8, divModKnuthScratchNeed(u_len, v_len_in));
+		defer allocator.free(work);
+		const got = divModKnuth(u_buf, u_len, v_in, v_len_in, q_out, r_out, work);
+
+		try testing.expectEqual(q_len_in, got.q_len);
+		try testing.expectEqualSlices(u8, q_in, q_out[0..got.q_len]);
+		try testing.expectEqual(@as(usize, 0), got.r_len);
+	}
+}
+
+test "divModKnuth: random (u, v) pairs vs u4096 oracle (small)" {
+	// Brute-force oracle: u up to 16 bytes (128 bits), v 2..8 bytes.
+	// Use u256 for the oracle (16+8 = 24 bytes, well within u256).
+	const allocator = std.testing.allocator;
+	var rng = std.Random.DefaultPrng.init(0xDEAD_BEEF_CAFE_C0DE);
+	const r_rng = rng.random();
+	var trial: usize = 0;
+	while (trial < 200) : (trial += 1) {
+		const u_len_in = 2 + @as(usize, r_rng.uintLessThan(u32, 15));
+		const v_len_in = 2 + @as(usize, r_rng.uintLessThan(u32, 7));
+		const u_in = try allocator.alloc(u8, u_len_in);
+		defer allocator.free(u_in);
+		const v_in = try allocator.alloc(u8, v_len_in);
+		defer allocator.free(v_in);
+		for (u_in) |*p| p.* = r_rng.int(u8);
+		for (v_in) |*p| p.* = r_rng.int(u8);
+		if (u_in[u_len_in - 1] == 0) u_in[u_len_in - 1] = 1;
+		if (v_in[v_len_in - 1] == 0) v_in[v_len_in - 1] = 1;
+
+		// Oracle via u256.
+		var u_ref: u256 = 0;
+		for (0..u_len_in) |k| u_ref |= @as(u256, u_in[k]) << @intCast(8 * k);
+		var v_ref: u256 = 0;
+		for (0..v_len_in) |k| v_ref |= @as(u256, v_in[k]) << @intCast(8 * k);
+		const q_ref: u256 = u_ref / v_ref;
+		const r_ref: u256 = u_ref % v_ref;
+
+		const q_out = try allocator.alloc(u8, u_len_in + 1);
+		defer allocator.free(q_out);
+		const r_out = try allocator.alloc(u8, v_len_in);
+		defer allocator.free(r_out);
+		const work = try allocator.alloc(u8, divModKnuthScratchNeed(u_len_in, v_len_in));
+		defer allocator.free(work);
+		const got = divModKnuth(u_in, u_len_in, v_in, v_len_in, q_out, r_out, work);
+
+		// Build expected q/r byte arrays and compare. u256 has 32 bytes.
+		var q_bytes: [32]u8 = .{0} ** 32;
+		for (0..32) |k| q_bytes[k] = @truncate(q_ref >> @intCast(8 * k));
+		var q_expect_len: usize = 32;
+		while (q_expect_len > 0 and q_bytes[q_expect_len - 1] == 0) q_expect_len -= 1;
+
+		var r_bytes: [32]u8 = .{0} ** 32;
+		for (0..32) |k| r_bytes[k] = @truncate(r_ref >> @intCast(8 * k));
+		var r_expect_len: usize = 32;
+		while (r_expect_len > 0 and r_bytes[r_expect_len - 1] == 0) r_expect_len -= 1;
+
+		testing.expectEqual(q_expect_len, got.q_len) catch |e| {
+			std.debug.print("trial {d}: u_len={d} v_len={d}, q_expect_len={d} got.q_len={d}\n", .{ trial, u_len_in, v_len_in, q_expect_len, got.q_len });
+			std.debug.print("  u_in={any}\n  v_in={any}\n", .{ u_in, v_in });
+			std.debug.print("  q_expect={any}\n  q_got={any}\n", .{ q_bytes[0..q_expect_len], q_out[0..got.q_len] });
+			return e;
+		};
+		try testing.expectEqualSlices(u8, q_bytes[0..q_expect_len], q_out[0..got.q_len]);
+		try testing.expectEqual(r_expect_len, got.r_len);
+		try testing.expectEqualSlices(u8, r_bytes[0..r_expect_len], r_out[0..got.r_len]);
+	}
+}
+
+test "divModKnuth: round-trip large (256-byte dividend, 32-byte divisor)" {
+	// Build random q (up to 224 bytes) and v (32 bytes), compute u = q*v,
+	// then divide back. 100 trials.
+	const allocator = std.testing.allocator;
+	var rng = std.Random.DefaultPrng.init(0xC0DE_FACE_BAAD_F00D);
+	const r_rng = rng.random();
+	var trial: usize = 0;
+	while (trial < 100) : (trial += 1) {
+		const q_len_in: usize = 1 + @as(usize, r_rng.uintLessThan(u32, 224));
+		const v_len_in: usize = 32;
+		const q_in = try allocator.alloc(u8, q_len_in);
+		defer allocator.free(q_in);
+		const v_in = try allocator.alloc(u8, v_len_in);
+		defer allocator.free(v_in);
+		for (q_in) |*p| p.* = r_rng.int(u8);
+		for (v_in) |*p| p.* = r_rng.int(u8);
+		if (q_in[q_len_in - 1] == 0) q_in[q_len_in - 1] = 1;
+		if (v_in[v_len_in - 1] == 0) v_in[v_len_in - 1] = 1;
+		const u_buf = try allocator.alloc(u8, q_len_in + v_len_in + 1);
+		defer allocator.free(u_buf);
+		const u_len = testMulUnsigned(q_in, v_in, u_buf);
+
+		const q_out = try allocator.alloc(u8, u_len);
+		defer allocator.free(q_out);
+		const r_out = try allocator.alloc(u8, v_len_in);
+		defer allocator.free(r_out);
+		const work = try allocator.alloc(u8, divModKnuthScratchNeed(u_len, v_len_in));
+		defer allocator.free(work);
+		const got = divModKnuth(u_buf, u_len, v_in, v_len_in, q_out, r_out, work);
+
+		try testing.expectEqual(q_len_in, got.q_len);
+		try testing.expectEqualSlices(u8, q_in, q_out[0..got.q_len]);
+		try testing.expectEqual(@as(usize, 0), got.r_len);
+	}
+}
+
+test "divModKnuth: edge — top-byte-of-v already normalized (s=0)" {
+	// v[v_len-1] >= 128 means s=0; tests the no-shift path.
+	const allocator = std.testing.allocator;
+	const u = [_]u8{ 0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC };
+	const v = [_]u8{ 0x33, 0xCC }; // 0xCC has high bit set
+	var q: [8]u8 = undefined;
+	var r: [8]u8 = undefined;
+	const work = try allocator.alloc(u8, divModKnuthScratchNeed(u.len, v.len));
+	defer allocator.free(work);
+	const got = divModKnuth(&u, u.len, &v, v.len, &q, &r, work);
+	// Reference via u128:
+	const u_ref: u128 = 0xBC9A78563412;
+	const v_ref: u128 = 0xCC33;
+	const q_ref: u128 = u_ref / v_ref;
+	const r_ref: u128 = u_ref % v_ref;
+	var q_bytes: [16]u8 = undefined;
+	for (0..16) |k| q_bytes[k] = @truncate(q_ref >> @intCast(8 * k));
+	var q_expect_len: usize = 16;
+	while (q_expect_len > 0 and q_bytes[q_expect_len - 1] == 0) q_expect_len -= 1;
+	var r_bytes: [16]u8 = undefined;
+	for (0..16) |k| r_bytes[k] = @truncate(r_ref >> @intCast(8 * k));
+	var r_expect_len: usize = 16;
+	while (r_expect_len > 0 and r_bytes[r_expect_len - 1] == 0) r_expect_len -= 1;
+	try testing.expectEqual(q_expect_len, got.q_len);
+	try testing.expectEqualSlices(u8, q_bytes[0..q_expect_len], q[0..got.q_len]);
+	try testing.expectEqual(r_expect_len, got.r_len);
+	try testing.expectEqualSlices(u8, r_bytes[0..r_expect_len], r[0..got.r_len]);
+}
+
 // Quick monotonic-clock helper for the bench test, since std.time.Timer was
 // removed in Zig 0.16. Returns nanoseconds since some unspecified epoch
 // (suitable for measuring deltas only).
@@ -2271,6 +2837,50 @@ fn monoNanos() u64 {
 	var ts: std.c.timespec = undefined;
 	_ = std.c.clock_gettime(.MONOTONIC, &ts);
 	return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
+}
+
+test "bench: divModKnuth at 2048-bit / 1024-bit" {
+	// Mp.divMod-equivalent unsigned magnitude division: 256-byte dividend / 128-byte divisor.
+	const allocator = std.testing.allocator;
+	const u_len: usize = 256; // 2048 bits
+	const v_len: usize = 128; // 1024 bits
+	const iters: usize = 1000;
+
+	const u_template = try allocator.alloc(u8, u_len);
+	defer allocator.free(u_template);
+	const v_template = try allocator.alloc(u8, v_len);
+	defer allocator.free(v_template);
+	var rng = std.Random.DefaultPrng.init(0x4242_4242);
+	const rnd = rng.random();
+	for (u_template) |*p| p.* = rnd.int(u8);
+	for (v_template) |*p| p.* = rnd.int(u8);
+	if (v_template[v_len - 1] == 0) v_template[v_len - 1] = 0xAA;
+	if (u_template[u_len - 1] == 0) u_template[u_len - 1] = 0xCC;
+
+	const q_buf = try allocator.alloc(u8, u_len + 2);
+	defer allocator.free(q_buf);
+	const r_buf = try allocator.alloc(u8, v_len + 2);
+	defer allocator.free(r_buf);
+	const work_buf = try allocator.alloc(u8, divModKnuthScratchNeed(u_len, v_len));
+	defer allocator.free(work_buf);
+
+	// Warm-up.
+	_ = divModKnuth(u_template, u_len, v_template, v_len, q_buf, r_buf, work_buf);
+
+	const t_start = monoNanos();
+	{
+		var i: usize = 0;
+		while (i < iters) : (i += 1) {
+			const out = divModKnuth(u_template, u_len, v_template, v_len, q_buf, r_buf, work_buf);
+			std.mem.doNotOptimizeAway(&out);
+		}
+	}
+	const t_total = monoNanos() - t_start;
+	const ns_per_op = @as(f64, @floatFromInt(t_total)) / @as(f64, @floatFromInt(iters));
+	std.debug.print(
+		"\n[bench] divModKnuth 2048-bit / 1024-bit: {d:.0} ns/op\n",
+		.{ns_per_op},
+	);
 }
 
 test "bench: divModSingleByte vs divModSingleU64 at 2048-bit" {

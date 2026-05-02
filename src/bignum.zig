@@ -252,19 +252,22 @@ pub const Mp = struct {
 	/// to think about that, but the inline-i64 fast path snapshots both
 	/// operand values before writing).
 	pub fn divMod(q: *Mp, rem: *Mp, a: *const Mp, b: *const Mp) ArithError!void {
+		// Reject division by zero up front (cheap with cached sign).
+		if (b.cached_sign == 0) return error.DivisionByZero;
+
 		if (a.inline_len <= 9 and b.inline_len <= 9) {
 			const av = decodeInlineSmall(a);
 			const bv = decodeInlineSmall(b);
-			if (bv == 0) return error.DivisionByZero;
-			// i64 minInt / -1 overflows i64 — promote to tier-3 (NYI).
-			if (av == std.math.minInt(i64) and bv == -1) return error.NotImplementedTier3;
-			const qv = @divTrunc(av, bv);
-			const rv = @rem(av, bv);
-			try q.setI64(qv);
-			try rem.setI64(rv);
-			return;
+			// i64 minInt / -1 overflows i64 — promote to tier-3.
+			if (!(av == std.math.minInt(i64) and bv == -1)) {
+				const qv = @divTrunc(av, bv);
+				const rv = @rem(av, bv);
+				try q.setI64(qv);
+				try rem.setI64(rv);
+				return;
+			}
 		}
-		return error.NotImplementedTier3;
+		try tier3DivModOp(q, rem, a, b);
 	}
 
 	/// Truncated quotient: writes a / b into `q`. See `divMod` for sign convention.
@@ -383,6 +386,101 @@ inline fn decodeInlineSmall(self: *const Mp) i64 {
 	}
 	// Length-prefixed: tail invariant gives us the i64 directly.
 	return @bitCast(std.mem.readInt(u64, self.inline_buf[1..9], .little));
+}
+
+/// Tier-3 truncated division: writes a/b into q.heap_buf and a%b into rem.heap_buf.
+/// Sign-magnitude dispatch + Knuth Algorithm D (or single-u64 division for small b).
+/// Sign convention matches GMP `mpz_tdiv_qr` (see `Mp.divMod` doc).
+fn tier3DivModOp(q: *Mp, rem: *Mp, a: *const Mp, b: *const Mp) ArithError!void {
+	const a_bytes = a.bytes();
+	const b_bytes = b.bytes();
+	const a_pay = a_bytes[a.cached_pay_off .. a.cached_pay_off + a.cached_pay_len];
+	const b_pay = b_bytes[b.cached_pay_off .. b.cached_pay_off + b.cached_pay_len];
+
+	const q_pay_max = a_pay.len + 2; // +1 for sign byte, +1 slack
+	const r_pay_max = b_pay.len + 2;
+	const work_need = tier3.divModSignedScratchNeed(a_pay.len, b_pay.len);
+
+	// Stack scratch for small sizes; heap for large.
+	const STACK_PAY = 4096;
+	const STACK_WORK = 8192;
+	var stack_q: [STACK_PAY]u8 = undefined;
+	var stack_r: [STACK_PAY]u8 = undefined;
+	var stack_w: [STACK_WORK]u8 = undefined;
+	var heap_q: ?[]u8 = null;
+	var heap_r: ?[]u8 = null;
+	var heap_w: ?[]u8 = null;
+	defer {
+		if (heap_q) |s| q.allocator.free(s);
+		if (heap_r) |s| rem.allocator.free(s);
+		if (heap_w) |s| q.allocator.free(s);
+	}
+	const q_buf: []u8 = if (q_pay_max <= stack_q.len) stack_q[0..q_pay_max] else blk: {
+		heap_q = try q.allocator.alloc(u8, q_pay_max);
+		break :blk heap_q.?;
+	};
+	const r_buf: []u8 = if (r_pay_max <= stack_r.len) stack_r[0..r_pay_max] else blk: {
+		heap_r = try rem.allocator.alloc(u8, r_pay_max);
+		break :blk heap_r.?;
+	};
+	const w_buf: []u8 = if (work_need <= stack_w.len) stack_w[0..work_need] else blk: {
+		heap_w = try q.allocator.alloc(u8, work_need);
+		break :blk heap_w.?;
+	};
+
+	const got = tier3.divModSigned(a_pay, b_pay, q_buf, r_buf, w_buf);
+
+	// Write canonical BLIP for q and rem from the produced two's-comp payloads.
+	try writeMpFromPayload(q, q_buf[0..got.q_len]);
+	try writeMpFromPayload(rem, r_buf[0..got.r_len]);
+}
+
+/// Encode a canonical two's-complement LE payload `pay` (length ≥ 1) as a
+/// canonical BLIP value and store it in `dst`. Routes inline vs heap.
+fn writeMpFromPayload(dst: *Mp, pay: []const u8) !void {
+	std.debug.assert(pay.len >= 1);
+	// Immediate path: single byte 0..127.
+	if (pay.len == 1 and pay[0] < 0x80) {
+		dst.inline_buf[0] = pay[0];
+		dst.inline_len = 1;
+		dst.heap_offset = 0;
+		dst.cached_pay_off = 0;
+		dst.cached_pay_len = 1;
+		dst.cached_sign = if (pay[0] == 0) 0 else 1;
+		return;
+	}
+	// Length-prefixed: header + payload.
+	const total = pay.len + headerByteCount(pay.len);
+	if (total <= INLINE_CAP) {
+		const hdr_len = try tier3.writeHeader(&dst.inline_buf, pay.len);
+		@memcpy(dst.inline_buf[hdr_len .. hdr_len + pay.len], pay);
+		// Maintain the inline-tail invariant for length ≤ 9.
+		if (total >= 2 and total <= 9) {
+			const L = total - 1;
+			const high_byte = dst.inline_buf[1 + L - 1];
+			const sign_fill: u8 = if ((high_byte & 0x80) != 0) 0xFF else 0;
+			var i: usize = L;
+			while (i < 8) : (i += 1) dst.inline_buf[1 + i] = sign_fill;
+		}
+		dst.inline_len = @intCast(total);
+		dst.heap_offset = 0;
+		dst.cached_pay_off = @intCast(hdr_len);
+		dst.cached_pay_len = @intCast(pay.len);
+		dst.cached_sign = signFromPayload(pay);
+		return;
+	}
+	// Heap path.
+	try dst.ensureHeapCapacity(total + HDR_RESERVE);
+	const hdr_len = headerByteCount(pay.len);
+	const hdr_start = HDR_RESERVE - hdr_len;
+	_ = try tier3.writeHeader(dst.heap_buf[hdr_start .. hdr_start + hdr_len], pay.len);
+	@memcpy(dst.heap_buf[HDR_RESERVE .. HDR_RESERVE + pay.len], pay);
+	dst.heap_offset = @intCast(hdr_start);
+	dst.heap_used = hdr_len + pay.len;
+	dst.inline_len = SENTINEL_HEAP;
+	dst.cached_pay_off = @intCast(hdr_len);
+	dst.cached_pay_len = @intCast(pay.len);
+	dst.cached_sign = signFromPayload(pay);
 }
 
 /// Tier-3 multiplication. Sign-magnitude on byte payloads; result up to
@@ -1138,7 +1236,8 @@ test "divMod: division by zero returns error.DivisionByZero" {
 	try testing.expectError(error.DivisionByZero, Mp.mod(&r, &a, &b));
 }
 
-test "divMod: i64.min / -1 overflows i64, returns NotImplementedTier3" {
+test "divMod: i64.min / -1 promotes to tier 3 and returns 2^63" {
+	// i64.min / -1 = 2^63 which doesn't fit in i64; the tier-3 path handles it.
 	var a = Mp.init(testing.allocator);
 	defer a.deinit();
 	var b = Mp.init(testing.allocator);
@@ -1149,10 +1248,13 @@ test "divMod: i64.min / -1 overflows i64, returns NotImplementedTier3" {
 	defer r.deinit();
 	try a.setI64(std.math.minInt(i64));
 	try b.setI64(-1);
-	try testing.expectError(error.NotImplementedTier3, Mp.divMod(&q, &r, &a, &b));
+	try Mp.divMod(&q, &r, &a, &b);
+	// q should be 2^63 (encoded in 9-byte length-prefixed form). r = 0.
+	try testing.expect(q.bytes().len > 8);
+	try testing.expectEqual(@as(i64, 0), try r.getI64());
 }
 
-test "divMod: tier-3 operands return NotImplementedTier3 (M7-2/3 placeholder)" {
+test "divMod: tier-3 dividend, small divisor (i64.max + 5) / 7" {
 	var a = Mp.init(testing.allocator);
 	defer a.deinit();
 	var b = Mp.init(testing.allocator);
@@ -1161,14 +1263,19 @@ test "divMod: tier-3 operands return NotImplementedTier3 (M7-2/3 placeholder)" {
 	defer q.deinit();
 	var r = Mp.init(testing.allocator);
 	defer r.deinit();
-	// Build a tier-3 operand (> i64): i64.max + 1.
+	// a = i64.max + 5 (tier-3). b = 7 (tier-0).
 	try a.setI64(std.math.maxInt(i64));
-	var one = Mp.init(testing.allocator);
-	defer one.deinit();
-	try one.setI64(1);
-	try a.add(&a, &one); // a = 2^63, tier 3
+	var five = Mp.init(testing.allocator);
+	defer five.deinit();
+	try five.setI64(5);
+	try a.add(&a, &five); // a = 2^63 + 4
 	try b.setI64(7);
-	try testing.expectError(error.NotImplementedTier3, Mp.divMod(&q, &r, &a, &b));
+	try Mp.divMod(&q, &r, &a, &b);
+	// (2^63 + 4) / 7 = ?  2^63 = 9223372036854775808. + 4 = 9223372036854775812.
+	// /7 = 1317624576693539401, r = ?  1317624576693539401 * 7 = 9223372036854775807. Plus 5 = 9223372036854775812 ✓
+	// Wait: 5 + 9223372036854775807 = 9223372036854775812. So /7 quotient = 1317624576693539401 r 5.
+	try testing.expectEqual(@as(i64, 1_317_624_576_693_539_401), try q.getI64());
+	try testing.expectEqual(@as(i64, 5), try r.getI64());
 }
 
 test "divMod: identity a == q*b + rem on 1000 random i64 pairs" {
