@@ -446,9 +446,28 @@ pub const Mp = struct {
 			return;
 		}
 
-		// Larger exponent: left-to-right sliding window. Adaptive window:
-		// w=4 for ≤256-bit, w=5 for ≤2048-bit, w=6 above.
+		// Adaptive sliding-window width. Same heuristic regardless of which
+		// per-multiplication primitive we use (Mont vs schoolbook+mod).
 		const w: u8 = if (e_bits <= 256) 4 else if (e_bits <= 2048) 5 else 6;
+
+		// Montgomery dispatch: requires odd modulus AND a magnitude large enough
+		// to amortise the per-call setup (modInvNeg64, R^2 mod m, base/result
+		// conversions). Cutoff chosen so 64-bit-and-up modular workloads (RSA,
+		// DH, ECC field primes) take the Mont path; tiny moduli stay on
+		// schoolbook+Knuth (where setup amortisation would exceed savings).
+		const m_pay = m_abs.payload();
+		const m_is_odd = (m_pay.len > 0) and ((m_pay[0] & 1) == 1);
+		// Magnitude byte length: positive payload may carry a trailing 0x00
+		// sign-extension byte that isn't part of the magnitude.
+		var m_mag_len: usize = m_pay.len;
+		while (m_mag_len > 0 and m_pay[m_mag_len - 1] == 0) m_mag_len -= 1;
+		const MONT_MIN_BYTES: usize = 8;
+		if (m_is_odd and m_mag_len >= MONT_MIN_BYTES) {
+			try powmMontgomery(r, &base_red, exp, &m_abs, w);
+			return;
+		}
+
+		// Fallback: left-to-right sliding window with schoolbook mul + Knuth mod.
 		try powmSlidingWindow(r, &base_red, exp, &m_abs, w);
 	}
 
@@ -674,6 +693,159 @@ fn powmSlidingWindow(r: *Mp, base_red: *const Mp, exp: *const Mp, m: *const Mp, 
 	}
 
 	try r.setBytes(result.bytes());
+}
+
+/// powm helper: Montgomery sliding-window exponentiation (M7-4.3).
+///
+/// Replaces every `mul + mod` step in the sliding-window loop with a single
+/// `montMul`, which fuses multiply + Montgomery reduction into one O(k^2)
+/// pass over u64 limbs (no Knuth division). Setup cost (one R^2 mod m
+/// computation, then base/result conversion via two extra montMuls)
+/// amortises across the ~bits squarings + ~bits/w multiplications.
+///
+/// Inputs: base_red already reduced into [0, |m|-1]; m positive, ODD,
+/// magnitude length >= 8 bytes (caller decides — Mont's setup makes it
+/// uneconomic below ~64-bit moduli). w in [2, 8].
+fn powmMontgomery(r: *Mp, base_red: *const Mp, exp: *const Mp, m: *const Mp, w: u8) ArithError!void {
+	const allocator = r.allocator;
+	std.debug.assert(w >= 2 and w <= 8);
+
+	// Determine k_limbs from the modulus magnitude byte length.
+	const m_pay = m.payload();
+	var m_mag_byte_len: usize = m_pay.len;
+	while (m_mag_byte_len > 0 and m_pay[m_mag_byte_len - 1] == 0) m_mag_byte_len -= 1;
+	std.debug.assert(m_mag_byte_len >= 8);
+	const k_limbs: usize = (m_mag_byte_len + 7) / 8;
+
+	// Allocate the working limb arrays. All sized k_limbs except scratch
+	// which needs 2*k+1 for the wide accumulator.
+	const m_lim = try allocator.alloc(u64, k_limbs);
+	defer allocator.free(m_lim);
+	const r2 = try allocator.alloc(u64, k_limbs);
+	defer allocator.free(r2);
+	const base_mont = try allocator.alloc(u64, k_limbs);
+	defer allocator.free(base_mont);
+	const result_mont = try allocator.alloc(u64, k_limbs);
+	defer allocator.free(result_mont);
+	const tmp_lim = try allocator.alloc(u64, k_limbs);
+	defer allocator.free(tmp_lim);
+	const sq_mont = try allocator.alloc(u64, k_limbs);
+	defer allocator.free(sq_mont);
+	const scratch = try allocator.alloc(u64, 2 * k_limbs + 1);
+	defer allocator.free(scratch);
+
+	// Window table: 2^(w-1) odd-power Mont-form base values.
+	const tbl_count: usize = @as(usize, 1) << @intCast(w - 1);
+	const table = try allocator.alloc([]u64, tbl_count);
+	defer {
+		for (table) |t| if (t.len > 0) allocator.free(t);
+		allocator.free(table);
+	}
+	for (table) |*t| t.* = &.{};
+	for (table) |*t| t.* = try allocator.alloc(u64, k_limbs);
+
+	// Pack m into limb array. For positive payloads, the magnitude bytes are
+	// payload[0..m_mag_byte_len].
+	tier3.bytesToLimbs(m_pay[0..m_mag_byte_len], m_lim);
+
+	// Pack base into limb array (zero-extended to m_mag_byte_len width).
+	const base_pay = base_red.payload();
+	var base_mag_len: usize = base_pay.len;
+	while (base_mag_len > 0 and base_pay[base_mag_len - 1] == 0) base_mag_len -= 1;
+	const base_padded = try allocator.alloc(u8, m_mag_byte_len);
+	defer allocator.free(base_padded);
+	@memset(base_padded, 0);
+	if (base_mag_len > 0) @memcpy(base_padded[0..base_mag_len], base_pay[0..base_mag_len]);
+	tier3.bytesToLimbs(base_padded, tmp_lim);
+
+	// Setup: m_inv_neg, R^2 mod m.
+	const m_inv_neg = tier3.modInvNeg64(m_lim[0]);
+	tier3.computeR2ModM(m_lim, r2);
+
+	// to_mont(base) = montMul(base, R^2)
+	tier3.montMul(tmp_lim, r2, m_lim, m_inv_neg, base_mont, scratch);
+	// to_mont(1) = montMul(1, R^2) = R mod m. Build "1" in tmp_lim.
+	@memset(tmp_lim, 0);
+	tmp_lim[0] = 1;
+	tier3.montMul(tmp_lim, r2, m_lim, m_inv_neg, result_mont, scratch);
+
+	// table[0] = base_mont; sq_mont = base_mont^2 (Mont form).
+	@memcpy(table[0], base_mont);
+	tier3.montMul(base_mont, base_mont, m_lim, m_inv_neg, sq_mont, scratch);
+	// table[k] = table[k-1] * sq_mont (Mont form).
+	var k_idx: usize = 1;
+	while (k_idx < tbl_count) : (k_idx += 1) {
+		tier3.montMul(table[k_idx - 1], sq_mont, m_lim, m_inv_neg, table[k_idx], scratch);
+	}
+
+	// Sliding-window loop, in Mont form.
+	const e_bits: isize = @intCast(exp.bitLen());
+	var i: isize = e_bits - 1;
+	while (i >= 0) {
+		if (exp.bitAt(@intCast(i)) == 0) {
+			// Single squaring; advance by 1 bit. result = result^2 (Mont).
+			tier3.montMul(result_mont, result_mont, m_lim, m_inv_neg, tmp_lim, scratch);
+			@memcpy(result_mont, tmp_lim);
+			i -= 1;
+		} else {
+			const w_isz: isize = @intCast(w);
+			const lo_limit: isize = if (i - w_isz + 1 >= 0) i - w_isz + 1 else 0;
+			var j: isize = lo_limit;
+			while (j <= i and exp.bitAt(@intCast(j)) == 0) : (j += 1) {}
+			const win_width: usize = @intCast(i - j + 1);
+			var win_val: u32 = 0;
+			var bk: isize = i;
+			while (bk >= j) : (bk -= 1) {
+				win_val = (win_val << 1) | @as(u32, exp.bitAt(@intCast(bk)));
+			}
+			// Square `win_width` times.
+			var sq_iter: usize = 0;
+			while (sq_iter < win_width) : (sq_iter += 1) {
+				tier3.montMul(result_mont, result_mont, m_lim, m_inv_neg, tmp_lim, scratch);
+				@memcpy(result_mont, tmp_lim);
+			}
+			// Multiply by table[(win_val - 1) / 2].
+			const tbl_idx: usize = (@as(usize, @intCast(win_val)) - 1) / 2;
+			tier3.montMul(result_mont, table[tbl_idx], m_lim, m_inv_neg, tmp_lim, scratch);
+			@memcpy(result_mont, tmp_lim);
+			i = j - 1;
+		}
+	}
+
+	// from_mont(result_mont) = montMul(result_mont, 1).
+	@memset(tmp_lim, 0);
+	tmp_lim[0] = 1;
+	const out_lim = try allocator.alloc(u64, k_limbs);
+	defer allocator.free(out_lim);
+	tier3.montMul(result_mont, tmp_lim, m_lim, m_inv_neg, out_lim, scratch);
+
+	// Pack out_lim back to bytes. Result is in [0, m), so its magnitude byte
+	// length is <= m_mag_byte_len.
+	const out_bytes = try allocator.alloc(u8, m_mag_byte_len);
+	defer allocator.free(out_bytes);
+	tier3.limbsToBytes(out_lim, out_bytes);
+	// Trim leading-zero high bytes (canonical magnitude length).
+	var canon_len: usize = m_mag_byte_len;
+	while (canon_len > 0 and out_bytes[canon_len - 1] == 0) canon_len -= 1;
+
+	if (canon_len == 0) {
+		try r.setI64(0);
+		return;
+	}
+
+	// Build canonical positive BLIP payload: append 0x00 sign-extension byte
+	// if high magnitude byte has its top bit set. Then write header + payload.
+	const need_sign_ext = (out_bytes[canon_len - 1] & 0x80) != 0;
+	const pay_len = canon_len + (if (need_sign_ext) @as(usize, 1) else 0);
+
+	const hdr_len = headerByteCount(pay_len);
+	const total = hdr_len + pay_len;
+	const enc_buf = try allocator.alloc(u8, total);
+	defer allocator.free(enc_buf);
+	_ = tier3.writeHeader(enc_buf[0..hdr_len], pay_len) catch unreachable;
+	@memcpy(enc_buf[hdr_len .. hdr_len + canon_len], out_bytes[0..canon_len]);
+	if (need_sign_ext) enc_buf[hdr_len + canon_len] = 0;
+	try r.setBytes(enc_buf);
 }
 
 /// Tier-3 truncated division: writes a/b into q.heap_buf and a%b into rem.heap_buf.

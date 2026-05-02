@@ -1824,6 +1824,237 @@ pub fn mulRawBlip(
 	return try writeBlip(scratch_r[0..canon], out);
 }
 
+// ── Montgomery arithmetic for arbitrary odd modulus (M7-4.3) ────────────────
+//
+// Replaces the Knuth-Algorithm-D "mul-then-mod" inner loop of `Mp.powm` with
+// CIOS Montgomery: each multiplication carries a fused reduction whose cost is
+// a second multiply-add chain (no division), saving the dominant per-iteration
+// cost in modular exponentiation.
+//
+// Definitions (k_limbs = ceil(m_byte_len / 8)):
+//   R   = 2^(64 * k_limbs)        // R > m, R is a power of 2 aligned to a u64 limb
+//   x'  = (x * R) mod m            // Montgomery form of x
+//   montMul(a', b') = a' * b' * R^-1 mod m   // returns Mont form of (a*b mod m)
+//
+// To go in:  a' = montMul(a, R^2 mod m)
+// To go out: a  = montMul(a', 1)
+//
+// All intermediate buffers are u64-limb arrays in little-endian order
+// (limb[0] = least significant). The modulus passed in is also k_limbs of u64.
+// Limb arrays are not exposed to callers — the high-level powm path packs
+// BLIP magnitude bytes into u64 limbs then unpacks at the end.
+
+/// Returns `(-m^(-1)) mod 2^64` for odd `m`. Newton's iteration converges
+/// quadratically for the 2-adic inverse of an odd number; six iterations from
+/// the seed `x = m mod 2^64` give 64 bits of precision (1, 2, 4, 8, 16, 32, 64).
+/// Final negate flips `x = m^-1 mod 2^64` to `-m^-1 mod 2^64` so `t + u*m`'s
+/// low limb cancels in the Montgomery reduction step.
+pub fn modInvNeg64(m: u64) u64 {
+	std.debug.assert((m & 1) == 1); // m must be odd for a 2-adic inverse to exist
+	// Initial guess: m has the property that x = m gives 4 correct low bits
+	// when m is odd (since m * m == 1 mod 8 iff m == 1 or 7 mod 8 ... use the
+	// safe seed instead). The standard tight seed for 5-bit accuracy of m^-1 mod
+	// 2^k for odd m is `(3*m) ^ 2` — gives 5 correct bits, then 6 doublings
+	// reach 5 * 2^6 = 320 bits, well past 64. We use a slightly more
+	// conservative starting point that is independently verified.
+	var x: u64 = m;             // ≥ 4 bits correct
+	x = x *% (2 -% m *% x);     // ≥ 8 bits
+	x = x *% (2 -% m *% x);     // ≥ 16 bits
+	x = x *% (2 -% m *% x);     // ≥ 32 bits
+	x = x *% (2 -% m *% x);     // ≥ 64 bits
+	x = x *% (2 -% m *% x);     // double-check (idempotent past 64 bits)
+	// Now x == m^-1 mod 2^64. Negate two's-complement to get -m^-1.
+	return 0 -% x;
+}
+
+/// CIOS Montgomery reduction of a wide (2*k_limbs) accumulator into a
+/// k_limbs-wide result `out`. After this call `out` holds `(t * R^-1) mod m`,
+/// reduced into `[0, m)`.
+///
+/// `t` length must be exactly `2 * m.len` (read-write — overwritten with
+/// scratch). `out.len == m.len`.
+fn montReduceCios(t: []u64, m: []const u64, m_inv_neg: u64, out: []u64) void {
+	const k = m.len;
+	std.debug.assert(t.len >= 2 * k + 1);
+	std.debug.assert(out.len == k);
+
+	// Process k digits — each iteration zeroes one low limb of `t` by adding
+	// u_i * m at offset i, where u_i = t[i] * m_inv_neg mod 2^64.
+	var i: usize = 0;
+	while (i < k) : (i += 1) {
+		const u: u64 = t[i] *% m_inv_neg;
+		// t[i..] += u * m (k+1 limbs touched, last is the carry slot).
+		var carry: u64 = 0;
+		var j: usize = 0;
+		while (j < k) : (j += 1) {
+			// product = t[i+j] + u * m[j] + carry
+			const prod: u128 = @as(u128, u) * @as(u128, m[j]) + @as(u128, t[i + j]) + @as(u128, carry);
+			t[i + j] = @truncate(prod);
+			carry = @intCast(prod >> 64);
+		}
+		// Propagate carry up the rest of t. Track an additional carry-out
+		// because the final t[2k] may itself overflow once across the k outer
+		// passes (we collect those into `extra_high`).
+		var pos: usize = i + k;
+		while (carry != 0 and pos < t.len) {
+			const sum: u128 = @as(u128, t[pos]) + @as(u128, carry);
+			t[pos] = @truncate(sum);
+			carry = @intCast(sum >> 64);
+			pos += 1;
+		}
+		// By construction t[i] is now zero (the whole point of u).
+		std.debug.assert(t[i] == 0);
+	}
+	// After k iterations, the answer lives in t[k..2k] (and possibly the
+	// carry slot t[2k]). Copy it down. If extra carry was set or result >= m,
+	// subtract m once.
+	const high_carry: u64 = if (t.len > 2 * k) t[2 * k] else 0;
+
+	// out = t[k..2k]
+	@memcpy(out, t[k .. 2 * k]);
+
+	// Conditional subtraction: if high_carry != 0 OR out >= m, subtract m.
+	// (After CIOS, out is bounded by 2m so a single subtract suffices.)
+	const need_sub = high_carry != 0 or cmpLimbsGE(out, m);
+	if (need_sub) {
+		subLimbsInPlace(out, m);
+	}
+}
+
+/// Returns true iff a >= b (both same length, LE limb arrays).
+inline fn cmpLimbsGE(a: []const u64, b: []const u64) bool {
+	std.debug.assert(a.len == b.len);
+	var i: usize = a.len;
+	while (i > 0) {
+		i -= 1;
+		if (a[i] != b[i]) return a[i] > b[i];
+	}
+	return true; // equal
+}
+
+/// In-place subtraction: `target -= sub` (caller guarantees target >= sub).
+inline fn subLimbsInPlace(target: []u64, sub: []const u64) void {
+	std.debug.assert(target.len == sub.len);
+	var borrow: u64 = 0;
+	var i: usize = 0;
+	while (i < target.len) : (i += 1) {
+		const a = target[i];
+		const b = sub[i];
+		const d1 = @subWithOverflow(a, b);
+		const d2 = @subWithOverflow(d1[0], borrow);
+		target[i] = d2[0];
+		borrow = @as(u64, d1[1]) + @as(u64, d2[1]);
+	}
+}
+
+/// Montgomery multiplication: `out = a * b * R^-1 mod m`. All limb arrays are
+/// LE u64 of length `k = m.len`. `scratch` length must be at least `2*k + 1`
+/// (used as the wide intermediate `t`). Caller supplies all buffers.
+pub fn montMul(
+	a: []const u64,
+	b: []const u64,
+	m: []const u64,
+	m_inv_neg: u64,
+	out: []u64,
+	scratch: []u64,
+) void {
+	const k = m.len;
+	std.debug.assert(a.len == k and b.len == k and out.len == k);
+	std.debug.assert(scratch.len >= 2 * k + 1);
+
+	// Stage 1: schoolbook multiply a * b → t (2k limbs, plus carry slot).
+	@memset(scratch[0 .. 2 * k + 1], 0);
+	var i: usize = 0;
+	while (i < k) : (i += 1) {
+		const ai = a[i];
+		if (ai == 0) continue;
+		var carry: u64 = 0;
+		var j: usize = 0;
+		while (j < k) : (j += 1) {
+			const prod: u128 = @as(u128, ai) * @as(u128, b[j]) + @as(u128, scratch[i + j]) + @as(u128, carry);
+			scratch[i + j] = @truncate(prod);
+			carry = @intCast(prod >> 64);
+		}
+		// Propagate the final carry up.
+		var pos: usize = i + k;
+		while (carry != 0 and pos < scratch.len) {
+			const sum: u128 = @as(u128, scratch[pos]) + @as(u128, carry);
+			scratch[pos] = @truncate(sum);
+			carry = @intCast(sum >> 64);
+			pos += 1;
+		}
+	}
+
+	// Stage 2: Montgomery-reduce t into out.
+	montReduceCios(scratch, m, m_inv_neg, out);
+}
+
+/// Pack a little-endian byte slice into a little-endian u64 limb array of
+/// length `k_limbs`. Bytes past the input are zero-extended; bytes past the
+/// limbs are dropped (caller responsibility to size correctly).
+pub fn bytesToLimbs(bytes: []const u8, limbs: []u64) void {
+	@memset(limbs, 0);
+	const max_full = (bytes.len / 8);
+	var i: usize = 0;
+	while (i < max_full and i < limbs.len) : (i += 1) {
+		limbs[i] = std.mem.readInt(u64, bytes[i * 8 ..][0..8], .little);
+	}
+	// Tail bytes (< 8) of the input.
+	const tail_start = max_full * 8;
+	if (tail_start < bytes.len and i < limbs.len) {
+		var tail: [8]u8 = .{0} ** 8;
+		const remaining = bytes.len - tail_start;
+		@memcpy(tail[0..remaining], bytes[tail_start..]);
+		limbs[i] = std.mem.readInt(u64, &tail, .little);
+	}
+}
+
+/// Unpack a little-endian u64 limb array into a little-endian byte slice.
+/// `bytes.len` may be less than `limbs.len * 8` — extra high bytes dropped.
+pub fn limbsToBytes(limbs: []const u64, bytes: []u8) void {
+	@memset(bytes, 0);
+	const max_full = bytes.len / 8;
+	var i: usize = 0;
+	while (i < max_full and i < limbs.len) : (i += 1) {
+		std.mem.writeInt(u64, bytes[i * 8 ..][0..8], limbs[i], .little);
+	}
+	const tail_start = max_full * 8;
+	if (tail_start < bytes.len and i < limbs.len) {
+		var tail: [8]u8 = undefined;
+		std.mem.writeInt(u64, &tail, limbs[i], .little);
+		const remaining = bytes.len - tail_start;
+		@memcpy(bytes[tail_start..], tail[0..remaining]);
+	}
+}
+
+/// Compute `R^2 mod m` where R = 2^(64*k_limbs), m has length k_limbs.
+/// Algorithm: start with x = 1, then double mod m for `2 * 64 * k_limbs` bits.
+/// O(k_limbs * k_limbs) work — fine because this runs once per powm call.
+/// Result written into `out` (length k_limbs).
+pub fn computeR2ModM(m: []const u64, out: []u64) void {
+	const k = m.len;
+	std.debug.assert(out.len == k);
+	@memset(out, 0);
+	out[0] = 1;
+	const total_bits: usize = 2 * 64 * k;
+	var bit: usize = 0;
+	while (bit < total_bits) : (bit += 1) {
+		// out = (out << 1) mod m. Track top-bit carry-out.
+		var c: u64 = 0;
+		var i: usize = 0;
+		while (i < k) : (i += 1) {
+			const new_top = out[i] >> 63;
+			out[i] = (out[i] << 1) | c;
+			c = new_top;
+		}
+		// Reduce: if c set OR out >= m, subtract m (handles "modulus has top
+		// bit set so out is at most 2m-1 after a single shift").
+		if (c != 0 or cmpLimbsGE(out, m)) {
+			subLimbsInPlace(out, m);
+		}
+	}
+}
+
 /// Write a canonical BLIP encoding for the given two's-complement LE payload.
 /// Special cases the immediate range (single-byte 0..127 → no header).
 pub fn writeBlip(payload: []const u8, out: []u8) !usize {
@@ -2936,4 +3167,336 @@ test "bench: divModSingleByte vs divModSingleU64 at 2048-bit" {
 		"\n[bench] divModSingleByte (256B / u8): {d:.0} ns/op\n[bench] divModSingleU64  (256B / u64): {d:.0} ns/op\n[bench] speedup ratio: {d:.2}x\n",
 		.{ ns_per_byte, ns_per_u64, ratio },
 	);
+}
+
+// ── Montgomery primitive tests (M7-4.3) ──────────────────────────────────────
+
+test "modInvNeg64: m * modInvNeg64(m) +% 1 == 0 mod 2^64 for many odd m" {
+	const cases = [_]u64{
+		1, 3, 5, 7, 9, 11, 13, 15, 17,
+		0x123, 0xDEAD_BEEF, 0xFFFF_FFFF, 0xFFFF_FFFF_FFFF_FFFD,
+		0x9E37_79B9_7F4A_7C15, // golden-ratio-derived odd
+		0x123_4567_89AB_CDEF, // arbitrary
+	};
+	for (cases) |m| {
+		const inv = modInvNeg64(m);
+		// inv == -m^-1 mod 2^64, so m * inv == -1 mod 2^64, so m*inv +% 1 == 0.
+		try testing.expectEqual(@as(u64, 0), m *% inv +% 1);
+	}
+}
+
+test "modInvNeg64: random odd values" {
+	var rng = std.Random.DefaultPrng.init(0xDEAD_BEEF_CAFE_BABE);
+	const r = rng.random();
+	var i: usize = 0;
+	while (i < 256) : (i += 1) {
+		var m = r.int(u64) | 1; // ensure odd
+		if (m == 0) m = 1;
+		const inv = modInvNeg64(m);
+		try testing.expectEqual(@as(u64, 0), m *% inv +% 1);
+	}
+}
+
+test "bytesToLimbs / limbsToBytes round-trip" {
+	const bytes = [_]u8{ 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A };
+	var limbs: [2]u64 = undefined;
+	bytesToLimbs(&bytes, &limbs);
+	try testing.expectEqual(@as(u64, 0x0807_0605_0403_0201), limbs[0]);
+	try testing.expectEqual(@as(u64, 0x0000_0000_0000_0A09), limbs[1]);
+
+	var roundtrip: [10]u8 = undefined;
+	limbsToBytes(&limbs, &roundtrip);
+	try testing.expectEqualSlices(u8, &bytes, &roundtrip);
+}
+
+test "montMul: tiny case (m=17) — verify (a*b mod m) == from_mont(montMul(to_mont(a), to_mont(b)))" {
+	// k=1 limb, m=17. R = 2^64. R mod 17 = 16 (since 2^64 mod 17 = 1's-complement... compute).
+	const m_val: u64 = 17;
+	const m: [1]u64 = .{m_val};
+	const m_inv_neg = modInvNeg64(m_val);
+
+	// Compute R^2 mod m by hand: R = 2^64, R mod 17 = ?
+	// 2^4 = 16 = -1 mod 17, so 2^8 = 1, so 2^64 = 1 mod 17. Hence R mod 17 = 1.
+	// R^2 mod 17 = 1.
+	const r2: [1]u64 = .{1};
+
+	var scratch: [4]u64 = undefined;
+
+	// to_mont(a) = montMul(a, R^2)
+	const a_val: u64 = 5;
+	const b_val: u64 = 7;
+	var a_mont: [1]u64 = undefined;
+	var b_mont: [1]u64 = undefined;
+	const a_arr: [1]u64 = .{a_val};
+	const b_arr: [1]u64 = .{b_val};
+	montMul(&a_arr, &r2, &m, m_inv_neg, &a_mont, &scratch);
+	montMul(&b_arr, &r2, &m, m_inv_neg, &b_mont, &scratch);
+
+	// c_mont = montMul(a_mont, b_mont) — should be (a*b) in Mont form
+	var c_mont: [1]u64 = undefined;
+	montMul(&a_mont, &b_mont, &m, m_inv_neg, &c_mont, &scratch);
+
+	// from_mont(c_mont) = montMul(c_mont, 1)
+	const one: [1]u64 = .{1};
+	var c: [1]u64 = undefined;
+	montMul(&c_mont, &one, &m, m_inv_neg, &c, &scratch);
+
+	const expected = (a_val * b_val) % m_val;
+	try testing.expectEqual(expected, c[0]);
+}
+
+test "montMul: random small odd modulus equivalence to (a*b) mod m" {
+	var rng = std.Random.DefaultPrng.init(0xCAFE_F00D_DEAD_BEEF);
+	const r = rng.random();
+
+	var scratch: [16]u64 = undefined;
+	var i: usize = 0;
+	while (i < 64) : (i += 1) {
+		var m_val: u64 = r.int(u64) | 1; // odd
+		if (m_val < 3) m_val = 3;
+		const a_val = r.int(u64) % m_val;
+		const b_val = r.int(u64) % m_val;
+		const m: [1]u64 = .{m_val};
+		const m_inv_neg = modInvNeg64(m_val);
+
+		// R^2 mod m. R = 2^64. Compute (R mod m), then square mod m via u128.
+		// R mod m = (2^64) mod m_val. Trick: R-1 is u64.max, so R mod m =
+		// ((u64.max % m_val) + 1) % m_val.
+		const r_mod: u64 = blk: {
+			const partial = std.math.maxInt(u64) % m_val;
+			break :blk (partial + 1) % m_val;
+		};
+		const r2_val: u64 = @truncate((@as(u128, r_mod) * @as(u128, r_mod)) % @as(u128, m_val));
+		const r2: [1]u64 = .{r2_val};
+
+		const a_arr: [1]u64 = .{a_val};
+		const b_arr: [1]u64 = .{b_val};
+		var a_mont: [1]u64 = undefined;
+		var b_mont: [1]u64 = undefined;
+		montMul(&a_arr, &r2, &m, m_inv_neg, &a_mont, &scratch);
+		montMul(&b_arr, &r2, &m, m_inv_neg, &b_mont, &scratch);
+
+		var c_mont: [1]u64 = undefined;
+		montMul(&a_mont, &b_mont, &m, m_inv_neg, &c_mont, &scratch);
+
+		const one: [1]u64 = .{1};
+		var c: [1]u64 = undefined;
+		montMul(&c_mont, &one, &m, m_inv_neg, &c, &scratch);
+
+		const expected: u64 = @truncate((@as(u128, a_val) * @as(u128, b_val)) % @as(u128, m_val));
+		try testing.expectEqual(expected, c[0]);
+	}
+}
+
+test "montMul: 2-limb random equivalence to schoolbook+mod" {
+	// k=2 limbs (128-bit modulus). Use u256 oracle in scratch.
+	var rng = std.Random.DefaultPrng.init(0x1234_5678_9ABC_DEF0);
+	const r = rng.random();
+
+	var iter: usize = 0;
+	while (iter < 32) : (iter += 1) {
+		// Build a random odd 128-bit modulus.
+		const m0 = r.int(u64) | 1;
+		const m1 = r.int(u64) | 0x8000_0000_0000_0000; // ensure top bit set so it's truly k=2
+		const m: [2]u64 = .{ m0, m1 };
+
+		// Random a, b in [0, m).
+		const a_lo = r.int(u64);
+		const a_hi = r.int(u64) % m1;
+		const a: [2]u64 = .{ a_lo, a_hi };
+		const b_lo = r.int(u64);
+		const b_hi = r.int(u64) % m1;
+		const b: [2]u64 = .{ b_lo, b_hi };
+
+		const m_inv_neg = modInvNeg64(m0);
+
+		// Compute R^2 mod m using u512 arithmetic (R = 2^128, R^2 = 2^256 fits u512).
+		const m_u512: u512 = @as(u512, m0) | (@as(u512, m1) << 64);
+		const a_u512: u512 = @as(u512, a_lo) | (@as(u512, a_hi) << 64);
+		const b_u512: u512 = @as(u512, b_lo) | (@as(u512, b_hi) << 64);
+		const R: u512 = @as(u512, 1) << 128;
+		const r2_u512 = (R * R) % m_u512;
+		const r2: [2]u64 = .{
+			@truncate(r2_u512 & std.math.maxInt(u64)),
+			@truncate((r2_u512 >> 64) & std.math.maxInt(u64)),
+		};
+
+		var scratch: [16]u64 = undefined;
+		var a_mont: [2]u64 = undefined;
+		var b_mont: [2]u64 = undefined;
+		montMul(&a, &r2, &m, m_inv_neg, &a_mont, &scratch);
+		montMul(&b, &r2, &m, m_inv_neg, &b_mont, &scratch);
+
+		var c_mont: [2]u64 = undefined;
+		montMul(&a_mont, &b_mont, &m, m_inv_neg, &c_mont, &scratch);
+
+		const one: [2]u64 = .{ 1, 0 };
+		var c: [2]u64 = undefined;
+		montMul(&c_mont, &one, &m, m_inv_neg, &c, &scratch);
+
+		const expected_u512 = (a_u512 * b_u512) % m_u512;
+		const got_u512 = @as(u512, c[0]) | (@as(u512, c[1]) << 64);
+		try testing.expectEqual(expected_u512, got_u512);
+	}
+}
+
+test "montMul: 8-limb (512-bit) random equivalence to schoolbook + Knuth div" {
+	// k=8 limbs (512-bit modulus). Sanity-check at the size powm cares about.
+	var rng = std.Random.DefaultPrng.init(0xABCD_EF01_2345_6789);
+	const r = rng.random();
+	var allocator = std.testing.allocator;
+
+	const k: usize = 8;
+	var iter: usize = 0;
+	while (iter < 8) : (iter += 1) {
+		var m: [8]u64 = undefined;
+		for (&m) |*x| x.* = r.int(u64);
+		m[0] |= 1;                                    // odd
+		m[k - 1] |= 0x8000_0000_0000_0000;           // top bit set (truly k=8)
+
+		var a: [8]u64 = undefined;
+		var b: [8]u64 = undefined;
+		for (&a, &b) |*ax, *bx| {
+			ax.* = r.int(u64);
+			bx.* = r.int(u64);
+		}
+		// Reduce a, b mod m via subtraction if needed (cheap since high limb dominates).
+		while (cmpLimbsGE(&a, &m)) subLimbsInPlace(&a, &m);
+		while (cmpLimbsGE(&b, &m)) subLimbsInPlace(&b, &m);
+
+		const m_inv_neg = modInvNeg64(m[0]);
+
+		// R^2 mod m: R = 2^512. Compute via repeated squaring of (R mod m).
+		// R mod m: since m fits in 512 bits with high bit set, R = 2^512 > m, so
+		// R mod m = R - m. Wait — but R = 2^512 and m has high bit at position
+		// 511, so m in [2^511, 2^512). Hence R mod m = R - m (single sub).
+		// Limb-wise: R is "1" at limb index 8; subtract m gives a value in [0, m).
+		var r_mod_m: [8]u64 = undefined;
+		// Compute R - m: borrow chain from limb 0.
+		var borrow: u64 = 0;
+		var i: usize = 0;
+		while (i < 8) : (i += 1) {
+			const a_lim: u64 = 0; // R's low 8 limbs are all 0
+			const b_lim: u64 = m[i];
+			const d1 = @subWithOverflow(a_lim, b_lim);
+			const d2 = @subWithOverflow(d1[0], borrow);
+			r_mod_m[i] = d2[0];
+			borrow = @as(u64, d1[1]) + @as(u64, d2[1]);
+		}
+		// borrow consumed by R's "1" at limb 8 — disregard.
+
+		// Now r2 = (r_mod_m * r_mod_m) mod m via montMul trick:
+		// montMul(r_mod_m, r_mod_m) = r_mod_m^2 * R^-1 mod m
+		// = R^2 * R^-1 mod m = R mod m. Hmm, that gives R mod m.
+		// We need R^2 mod m. Compute via:
+		// montMul(R mod m, R mod m, m, ...) = R^2 * R^-1 = R mod m. Not what we want.
+		// Use: R^2 mod m = (R mod m)^2 mod m, computed externally with a big buffer.
+		// We'll do that via Mp.mul + Mp.mod once to seed. But this test is already
+		// at the tier3 layer — to avoid pulling Mp here, allocate u128-style.
+		// Easiest: do schoolbook (r_mod_m * r_mod_m) into 16-limb scratch, then
+		// reduce via repeated subtraction (slow but correct for testing).
+		const sq_buf = try allocator.alloc(u64, 16);
+		defer allocator.free(sq_buf);
+		@memset(sq_buf, 0);
+		// schoolbook square
+		for (0..8) |ii| {
+			var carry: u64 = 0;
+			for (0..8) |jj| {
+				const prod: u128 = @as(u128, r_mod_m[ii]) * @as(u128, r_mod_m[jj]) + @as(u128, sq_buf[ii + jj]) + @as(u128, carry);
+				sq_buf[ii + jj] = @truncate(prod);
+				carry = @intCast(prod >> 64);
+			}
+			var pos = ii + 8;
+			while (carry != 0 and pos < 16) {
+				const s: u128 = @as(u128, sq_buf[pos]) + @as(u128, carry);
+				sq_buf[pos] = @truncate(s);
+				carry = @intCast(s >> 64);
+				pos += 1;
+			}
+		}
+		// Reduce sq_buf mod m. We use montReduceCios trick:
+		//   montReduce(sq_buf) = sq_buf * R^-1 mod m = (R mod m)^2 * R^-1 = R mod m.
+		// Still not R^2 mod m. So instead: use direct repeated subtraction.
+		// But sq_buf has up to 16 limbs and m has 8 — too many subtractions.
+		// Use a different approach: compute R^2 mod m from scratch using
+		// the "shift and reduce" pattern. R^2 = 2^1024.
+		// Start with x = 1; for i in 0..1024: x = (2*x) mod m.
+		var x: [8]u64 = .{ 1, 0, 0, 0, 0, 0, 0, 0 };
+		var bit: usize = 0;
+		while (bit < 1024) : (bit += 1) {
+			// x = (x << 1) mod m. Track top-bit carry.
+			var c: u64 = 0;
+			var jj: usize = 0;
+			while (jj < 8) : (jj += 1) {
+				const new_top = x[jj] >> 63;
+				x[jj] = (x[jj] << 1) | c;
+				c = new_top;
+			}
+			// If c set OR x >= m, subtract m.
+			if (c != 0 or cmpLimbsGE(&x, &m)) {
+				subLimbsInPlace(&x, &m);
+			}
+		}
+		const r2 = x; // R^2 mod m
+
+		var scratch: [32]u64 = undefined;
+		var a_mont: [8]u64 = undefined;
+		var b_mont: [8]u64 = undefined;
+		montMul(&a, &r2, &m, m_inv_neg, &a_mont, &scratch);
+		montMul(&b, &r2, &m, m_inv_neg, &b_mont, &scratch);
+
+		var c_mont: [8]u64 = undefined;
+		montMul(&a_mont, &b_mont, &m, m_inv_neg, &c_mont, &scratch);
+
+		const one: [8]u64 = .{ 1, 0, 0, 0, 0, 0, 0, 0 };
+		var c: [8]u64 = undefined;
+		montMul(&c_mont, &one, &m, m_inv_neg, &c, &scratch);
+
+		// Reference: schoolbook a*b → 16 limbs, then reduce by repeated subtract
+		// of (m << shift). Use the same shift-and-reduce loop as for R^2.
+		const ref_buf = try allocator.alloc(u64, 16);
+		defer allocator.free(ref_buf);
+		@memset(ref_buf, 0);
+		for (0..8) |ii| {
+			var carry: u64 = 0;
+			for (0..8) |jj| {
+				const prod: u128 = @as(u128, a[ii]) * @as(u128, b[jj]) + @as(u128, ref_buf[ii + jj]) + @as(u128, carry);
+				ref_buf[ii + jj] = @truncate(prod);
+				carry = @intCast(prod >> 64);
+			}
+			var pos = ii + 8;
+			while (carry != 0 and pos < 16) {
+				const s: u128 = @as(u128, ref_buf[pos]) + @as(u128, carry);
+				ref_buf[pos] = @truncate(s);
+				carry = @intCast(s >> 64);
+				pos += 1;
+			}
+		}
+		// Now reduce ref_buf mod m using a 16-limb shift-down algorithm:
+		// repeatedly subtract m shifted left by (limbs_high - 8 - 1) limbs * 64.
+		// Easier: rebuild via "shift-1024-times" trick on a fresh accumulator.
+		var acc: [8]u64 = .{ 0, 0, 0, 0, 0, 0, 0, 0 };
+		var b_idx: isize = 16 * 64 - 1;
+		while (b_idx >= 0) : (b_idx -= 1) {
+			// acc = (acc << 1) mod m
+			var cc: u64 = 0;
+			var jj: usize = 0;
+			while (jj < 8) : (jj += 1) {
+				const new_top = acc[jj] >> 63;
+				acc[jj] = (acc[jj] << 1) | cc;
+				cc = new_top;
+			}
+			// Add bit b_idx of ref_buf
+			const bb_idx: usize = @intCast(b_idx);
+			const limb_idx = bb_idx / 64;
+			const bit_in_limb: u6 = @intCast(bb_idx % 64);
+			const bit_val: u64 = (ref_buf[limb_idx] >> bit_in_limb) & 1;
+			acc[0] |= bit_val;
+			// Reduce
+			if (cc != 0 or cmpLimbsGE(&acc, &m)) {
+				subLimbsInPlace(&acc, &m);
+			}
+		}
+		try testing.expectEqualSlices(u64, &acc, &c);
+	}
 }
