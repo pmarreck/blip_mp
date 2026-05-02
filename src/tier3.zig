@@ -917,6 +917,85 @@ pub fn divExactBy5(a: []u8, a_len: usize) usize {
 	return n;
 }
 
+/// Schoolbook (textbook) long division of unsigned LE magnitude `a[0..a_len]`
+/// by single-byte divisor `b`, in place. Walks high-to-low maintaining a
+/// 16-bit window: w = (r << 8) | a[i]; q_byte = w/b; r = w%b. Quotient
+/// canonically trimmed of trailing zero bytes; remainder returned.
+/// This is the inner loop M7-3 (Knuth Algorithm D) reduces to for the
+/// small-divisor case.
+/// Caller guarantees b != 0.
+pub fn divModSingleByte(a: []u8, a_len: usize, b: u8) struct { q_len: usize, rem: u8 } {
+	std.debug.assert(b != 0);
+	if (a_len == 0) return .{ .q_len = 0, .rem = 0 };
+	var r: u16 = 0;
+	const bb: u16 = @as(u16, b);
+	var i: usize = a_len;
+	while (i > 0) {
+		i -= 1;
+		const w: u16 = (r << 8) | @as(u16, a[i]);
+		a[i] = @intCast(w / bb);
+		r = w % bb;
+	}
+	var n = a_len;
+	while (n > 0 and a[n - 1] == 0) n -= 1;
+	return .{ .q_len = n, .rem = @intCast(r) };
+}
+
+/// Same schoolbook long division as `divModSingleByte`, but operating on
+/// 8-byte (u64) chunks: at each step the window is (r << 64) | chunk and
+/// the divide is u128/u64 → u128 quotient, u128%u64 → u64 remainder. On
+/// aarch64 this lowers to a single `udiv` x-register followed by `umsub`
+/// per chunk — roughly 4-6× faster than per-byte for aligned input.
+///
+/// Strategy for unaligned inputs: process the high partial chunk
+/// byte-by-byte first to drive `r` to where the next-lowest 8-byte
+/// boundary aligns; then process aligned u64 chunks down to byte 0.
+/// (Picking the *low* tail instead would leave the schoolbook invariant
+/// inconsistent — we'd need a chunked window with a sub-chunk shift count
+/// which is awkward and slower than just walking the low byte tail
+/// straight via `divModSingleByte` semantics. Doing the partial-chunk
+/// work at the *high* end keeps the chunked loop pure.)
+/// Caller guarantees b != 0.
+pub fn divModSingleU64(a: []u8, a_len: usize, b: u64) struct { q_len: usize, rem: u64 } {
+	std.debug.assert(b != 0);
+	if (a_len == 0) return .{ .q_len = 0, .rem = 0 };
+
+	// Per-byte processing of the high tail so the remaining a[0..aligned_high]
+	// is an integer multiple of 8 bytes.
+	const aligned_high: usize = a_len - (a_len % 8);
+	var r: u64 = 0;
+	var i: usize = a_len;
+	while (i > aligned_high) {
+		i -= 1;
+		// 72-bit window safely fits in u128 (8-bit shift + 64-bit r).
+		const w: u128 = (@as(u128, r) << 8) | @as(u128, a[i]);
+		const q: u64 = @truncate(w / @as(u128, b));
+		// q always fits in u8 only when r < b initially; in general
+		// q here can exceed u8 because the shift was only 8 bits but
+		// r is u64. Each per-byte step is the same inner loop as
+		// divModSingleByte but with a u64 running remainder. We only
+		// store one byte per step, so q must be ≤ 0xFF: it is, because
+		// after the prior step r < b ≤ u64.max, and (r << 8) | byte is
+		// still less than (b << 8), so q < 256. The truncate is exact.
+		a[i] = @intCast(q);
+		r = @intCast(w % @as(u128, b));
+	}
+
+	// Chunked u64 high-to-low.
+	while (i >= 8) {
+		i -= 8;
+		const chunk: u64 = std.mem.readInt(u64, a[i..][0..8], .little);
+		const w: u128 = (@as(u128, r) << 64) | @as(u128, chunk);
+		const q: u64 = @truncate(w / @as(u128, b));
+		std.mem.writeInt(u64, a[i..][0..8], q, .little);
+		r = @truncate(w % @as(u128, b));
+	}
+
+	var n = a_len;
+	while (n > 0 and a[n - 1] == 0) n -= 1;
+	return .{ .q_len = n, .rem = r };
+}
+
 /// Compare two unsigned LE byte arrays. Returns -1/0/+1.
 fn cmpUnsignedLE(a: []const u8, a_len: usize, b: []const u8, b_len: usize) i8 {
 	if (a_len != b_len) return if (a_len > b_len) 1 else -1;
@@ -1961,4 +2040,290 @@ test "mulRawBlip: i64.max * 2 (overflows i64)" {
 	// BLIP: [0x89, ...]
 	const expected = [_]u8{ 0x89, 0xFE, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00 };
 	try testing.expectEqualSlices(u8, &expected, out[0..n]);
+}
+
+// ── M7-2: divModSingleByte / divModSingleU64 tests ───────────────────────────
+
+test "divModSingleByte: divisor = 1 (quotient = a, rem = 0)" {
+	var a = [_]u8{ 0x12, 0x34, 0x56, 0x78 };
+	const r = divModSingleByte(&a, a.len, 1);
+	try testing.expectEqual(@as(usize, 4), r.q_len);
+	try testing.expectEqual(@as(u8, 0), r.rem);
+	try testing.expectEqualSlices(u8, &[_]u8{ 0x12, 0x34, 0x56, 0x78 }, a[0..r.q_len]);
+}
+
+test "divModSingleByte: magnitude all-zero" {
+	var a = [_]u8{ 0, 0, 0, 0 };
+	const r = divModSingleByte(&a, a.len, 7);
+	try testing.expectEqual(@as(usize, 0), r.q_len);
+	try testing.expectEqual(@as(u8, 0), r.rem);
+}
+
+test "divModSingleByte: empty input" {
+	var a: [0]u8 = .{};
+	const r = divModSingleByte(&a, 0, 7);
+	try testing.expectEqual(@as(usize, 0), r.q_len);
+	try testing.expectEqual(@as(u8, 0), r.rem);
+}
+
+test "divModSingleByte: 0xFFFF / 0xFF = 0x101 r 0" {
+	// 0xFFFF = 65535; 65535 / 255 = 257 = 0x0101; rem = 0
+	var a = [_]u8{ 0xFF, 0xFF };
+	const r = divModSingleByte(&a, a.len, 0xFF);
+	try testing.expectEqual(@as(usize, 2), r.q_len);
+	try testing.expectEqual(@as(u8, 0), r.rem);
+	try testing.expectEqualSlices(u8, &[_]u8{ 0x01, 0x01 }, a[0..r.q_len]);
+}
+
+test "divModSingleByte: small known values 1000 / 7" {
+	// 1000 = 0x03E8 little-endian = [0xE8, 0x03]; 1000/7 = 142 r 6
+	// 142 = 0x8E
+	var a = [_]u8{ 0xE8, 0x03 };
+	const r = divModSingleByte(&a, a.len, 7);
+	try testing.expectEqual(@as(usize, 1), r.q_len);
+	try testing.expectEqual(@as(u8, 6), r.rem);
+	try testing.expectEqual(@as(u8, 142), a[0]);
+}
+
+test "divModSingleByte: trims trailing zero bytes" {
+	// 0x100 / 2 = 0x80; result must be a single byte (high byte trimmed).
+	var a = [_]u8{ 0x00, 0x01 };
+	const r = divModSingleByte(&a, a.len, 2);
+	try testing.expectEqual(@as(usize, 1), r.q_len);
+	try testing.expectEqual(@as(u8, 0), r.rem);
+	try testing.expectEqual(@as(u8, 0x80), a[0]);
+}
+
+test "divModSingleByte: round-trip via mulSmallConst (divisible)" {
+	const cases = [_][]const u8{
+		&[_]u8{ 0xFF, 0xFF, 0xFF, 0xFF },
+		&[_]u8{ 0x12, 0x34, 0x56, 0x78 },
+		&[_]u8{0x55},
+		&[_]u8{ 0xCD, 0xCD, 0xCD, 0xCD, 0xCD, 0xCD, 0xCD, 0xCD, 0xCD, 0xCD },
+		&[_]u8{ 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09 },
+	};
+	const divisors = [_]u8{ 2, 3, 5, 7, 11, 13, 17, 100, 200, 255 };
+	for (cases) |a| {
+		for (divisors) |d| {
+			var prod_buf: [32]u8 = undefined;
+			const prod_len = mulSmallConst(a, a.len, d, &prod_buf);
+			const r = divModSingleByte(&prod_buf, prod_len, d);
+			try testing.expectEqual(@as(u8, 0), r.rem);
+			try testing.expectEqualSlices(u8, a, prod_buf[0..r.q_len]);
+		}
+	}
+}
+
+test "divModSingleByte: 1000 random pairs vs u256 oracle (a_len ≤ 32)" {
+	const allocator = std.testing.allocator;
+	var rng = std.Random.DefaultPrng.init(0xC0FFEE_BABE);
+	const r = rng.random();
+	var i: usize = 0;
+	while (i < 1000) : (i += 1) {
+		const a_len = 1 + @as(usize, r.uintLessThan(u32, 32));
+		const buf = try allocator.alloc(u8, a_len);
+		defer allocator.free(buf);
+		for (buf) |*p| p.* = r.int(u8);
+		const divisor: u8 = 1 + r.uintLessThan(u8, 255); // 1..255
+
+		// Reference via u256 (a_len ≤ 32 fits).
+		var ref: u256 = 0;
+		for (0..a_len) |k| ref |= @as(u256, buf[k]) << @intCast(8 * k);
+		const q_ref: u256 = ref / @as(u256, divisor);
+		const r_ref_v: u8 = @intCast(ref % @as(u256, divisor));
+
+		// Compute via divModSingleByte.
+		const work = try allocator.alloc(u8, a_len);
+		defer allocator.free(work);
+		@memcpy(work, buf);
+		const out = divModSingleByte(work, a_len, divisor);
+
+		// Compare remainder.
+		try testing.expectEqual(r_ref_v, out.rem);
+
+		// Compare quotient byte-by-byte using the canonical trimmed length.
+		// Compute expected quotient bytes from q_ref and trim.
+		var q_bytes: [32]u8 = undefined;
+		for (0..32) |k| q_bytes[k] = @truncate(q_ref >> @intCast(8 * k));
+		var expected_len: usize = 32;
+		while (expected_len > 0 and q_bytes[expected_len - 1] == 0) expected_len -= 1;
+		try testing.expectEqual(expected_len, out.q_len);
+		try testing.expectEqualSlices(u8, q_bytes[0..expected_len], work[0..out.q_len]);
+	}
+}
+
+test "divModSingleU64: divisor = 1 (quotient = a, rem = 0)" {
+	var a = [_]u8{ 0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88 };
+	const orig = a;
+	const r = divModSingleU64(&a, a.len, 1);
+	try testing.expectEqual(@as(usize, 16), r.q_len);
+	try testing.expectEqual(@as(u64, 0), r.rem);
+	try testing.expectEqualSlices(u8, &orig, a[0..r.q_len]);
+}
+
+test "divModSingleU64: empty input" {
+	var a: [0]u8 = .{};
+	const r = divModSingleU64(&a, 0, 7);
+	try testing.expectEqual(@as(usize, 0), r.q_len);
+	try testing.expectEqual(@as(u64, 0), r.rem);
+}
+
+test "divModSingleU64: matches divModSingleByte when divisor < 256 (aligned sizes)" {
+	const allocator = std.testing.allocator;
+	var rng = std.Random.DefaultPrng.init(0xBADCAFE);
+	const r = rng.random();
+	const sizes = [_]usize{ 8, 16, 24, 32, 64, 128, 256 };
+	for (sizes) |sz| {
+		var trial: usize = 0;
+		while (trial < 32) : (trial += 1) {
+			const a = try allocator.alloc(u8, sz);
+			defer allocator.free(a);
+			for (a) |*p| p.* = r.int(u8);
+			const d_byte: u8 = 1 + r.uintLessThan(u8, 255);
+
+			const a_byte = try allocator.alloc(u8, sz);
+			defer allocator.free(a_byte);
+			@memcpy(a_byte, a);
+			const a_u64 = try allocator.alloc(u8, sz);
+			defer allocator.free(a_u64);
+			@memcpy(a_u64, a);
+
+			const r_byte = divModSingleByte(a_byte, sz, d_byte);
+			const r_u64 = divModSingleU64(a_u64, sz, @as(u64, d_byte));
+
+			try testing.expectEqual(r_byte.q_len, r_u64.q_len);
+			try testing.expectEqual(@as(u64, r_byte.rem), r_u64.rem);
+			try testing.expectEqualSlices(u8, a_byte[0..r_byte.q_len], a_u64[0..r_u64.q_len]);
+		}
+	}
+}
+
+test "divModSingleU64: matches divModSingleByte for non-aligned tail" {
+	const allocator = std.testing.allocator;
+	var rng = std.Random.DefaultPrng.init(0x1234_5678);
+	const r = rng.random();
+	// Sizes that are NOT multiples of 8 — exercise the tail handling.
+	const sizes = [_]usize{ 1, 2, 3, 5, 7, 9, 11, 15, 17, 23, 31, 33, 63, 65, 100, 127, 129 };
+	for (sizes) |sz| {
+		var trial: usize = 0;
+		while (trial < 16) : (trial += 1) {
+			const a = try allocator.alloc(u8, sz);
+			defer allocator.free(a);
+			for (a) |*p| p.* = r.int(u8);
+			const d_byte: u8 = 1 + r.uintLessThan(u8, 255);
+
+			const a_byte = try allocator.alloc(u8, sz);
+			defer allocator.free(a_byte);
+			@memcpy(a_byte, a);
+			const a_u64 = try allocator.alloc(u8, sz);
+			defer allocator.free(a_u64);
+			@memcpy(a_u64, a);
+
+			const r_byte = divModSingleByte(a_byte, sz, d_byte);
+			const r_u64 = divModSingleU64(a_u64, sz, @as(u64, d_byte));
+
+			try testing.expectEqual(r_byte.q_len, r_u64.q_len);
+			try testing.expectEqual(@as(u64, r_byte.rem), r_u64.rem);
+			try testing.expectEqualSlices(u8, a_byte[0..r_byte.q_len], a_u64[0..r_u64.q_len]);
+		}
+	}
+}
+
+test "divModSingleU64: 1000 random pairs vs u512 oracle (a_len ≤ 64, full u64 divisor)" {
+	const allocator = std.testing.allocator;
+	var rng = std.Random.DefaultPrng.init(0xFEEDFACE);
+	const r = rng.random();
+	var i: usize = 0;
+	while (i < 1000) : (i += 1) {
+		const a_len = 1 + @as(usize, r.uintLessThan(u32, 64));
+		const buf = try allocator.alloc(u8, a_len);
+		defer allocator.free(buf);
+		for (buf) |*p| p.* = r.int(u8);
+		// Full u64 divisor range.
+		var divisor: u64 = r.int(u64);
+		if (divisor == 0) divisor = 1;
+
+		var ref: u512 = 0;
+		for (0..a_len) |k| ref |= @as(u512, buf[k]) << @intCast(8 * k);
+		const q_ref: u512 = ref / @as(u512, divisor);
+		const r_ref_v: u64 = @intCast(ref % @as(u512, divisor));
+
+		const work = try allocator.alloc(u8, a_len);
+		defer allocator.free(work);
+		@memcpy(work, buf);
+		const out = divModSingleU64(work, a_len, divisor);
+
+		try testing.expectEqual(r_ref_v, out.rem);
+
+		var q_bytes: [64]u8 = undefined;
+		for (0..64) |k| q_bytes[k] = @truncate(q_ref >> @intCast(8 * k));
+		var expected_len: usize = 64;
+		while (expected_len > 0 and q_bytes[expected_len - 1] == 0) expected_len -= 1;
+		try testing.expectEqual(expected_len, out.q_len);
+		try testing.expectEqualSlices(u8, q_bytes[0..expected_len], work[0..out.q_len]);
+	}
+}
+
+// Quick monotonic-clock helper for the bench test, since std.time.Timer was
+// removed in Zig 0.16. Returns nanoseconds since some unspecified epoch
+// (suitable for measuring deltas only).
+fn monoNanos() u64 {
+	var ts: std.c.timespec = undefined;
+	_ = std.c.clock_gettime(.MONOTONIC, &ts);
+	return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
+}
+
+test "bench: divModSingleByte vs divModSingleU64 at 2048-bit" {
+	const allocator = std.testing.allocator;
+	const sz: usize = 256; // 2048 bits
+	const iters: usize = 10_000;
+	const divisor_byte: u8 = 0x65; // arbitrary
+	const divisor_u64: u64 = 65537;
+
+	const a_template = try allocator.alloc(u8, sz);
+	defer allocator.free(a_template);
+	var rng = std.Random.DefaultPrng.init(0xABCD_1234);
+	const rnd = rng.random();
+	for (a_template) |*p| p.* = rnd.int(u8);
+
+	const work = try allocator.alloc(u8, sz);
+	defer allocator.free(work);
+
+	// Warm-up + byte form.
+	{
+		@memcpy(work, a_template);
+		_ = divModSingleByte(work, sz, divisor_byte);
+		@memcpy(work, a_template);
+		_ = divModSingleU64(work, sz, divisor_u64);
+	}
+
+	const t_byte_start = monoNanos();
+	{
+		var i: usize = 0;
+		while (i < iters) : (i += 1) {
+			@memcpy(work, a_template);
+			const r = divModSingleByte(work, sz, divisor_byte);
+			std.mem.doNotOptimizeAway(&r);
+		}
+	}
+	const t_byte_total = monoNanos() - t_byte_start;
+
+	const t_u64_start = monoNanos();
+	{
+		var i: usize = 0;
+		while (i < iters) : (i += 1) {
+			@memcpy(work, a_template);
+			const r = divModSingleU64(work, sz, divisor_u64);
+			std.mem.doNotOptimizeAway(&r);
+		}
+	}
+	const t_u64_total = monoNanos() - t_u64_start;
+
+	const ns_per_byte = @as(f64, @floatFromInt(t_byte_total)) / @as(f64, @floatFromInt(iters));
+	const ns_per_u64 = @as(f64, @floatFromInt(t_u64_total)) / @as(f64, @floatFromInt(iters));
+	const ratio = ns_per_byte / ns_per_u64;
+	std.debug.print(
+		"\n[bench] divModSingleByte (256B / u8): {d:.0} ns/op\n[bench] divModSingleU64  (256B / u64): {d:.0} ns/op\n[bench] speedup ratio: {d:.2}x\n",
+		.{ ns_per_byte, ns_per_u64, ratio },
+	);
 }
