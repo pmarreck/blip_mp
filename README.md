@@ -46,7 +46,8 @@ Apple Silicon (M-series), aarch64-darwin, Zig 0.16.0 ReleaseFast, libc malloc.
 - **Cryptographic multiplication (1024, 1536, 3072 bit): 1.12–1.46× faster**
 - **Large addition (4096+ bits): 1.03–1.28× faster**
 - **Large multiplication (16384+ bits via Toom-3): 1.03× faster** (modest)
-- **Correctness: 8240/8240 random GMP cross-validation tests pass**
+- **Modular exponentiation (RSA-2048): 11% faster than GMP** (Mp.powm with Montgomery, M7-4.3) — at 1024 and 3072 bit we're at parity. This is the headliner for any serious crypto workload (RSA encrypt/decrypt/sign, DH key exchange, ECC scalar mul).
+- **Correctness: 12029/12029 random GMP cross-validation tests pass** across add, sub, mul, div, mod, divMod, powm, invMod — the complete modular-arithmetic API.
 
 ### The honest losses
 
@@ -122,7 +123,7 @@ Full details in [`CODE_MINIMAP.md`](CODE_MINIMAP.md), benchmark history in [`BEN
 
 **What it isn't (yet):**
 - **FFT multiplication is correctness-shipped but gated off** — full single-prime NTT + two-prime CRT + NEON-SIMD vectorized butterflies live in `src/fft.zig`, all bit-identical to GMP across 8240/8240 cross-checks at sizes up to 256K-bit. But constant factors keep Toom-3 ahead at every operand size in our supported range (M-series-specific finding: pure-NEON Montgomery integrates slower than the existing scalar-inside-vector form because it crowds the NEON pipe and starves M4's dual scalar mul pipes). The 13–15% remaining gap needs alloc-elimination + inline asm, planned in M6-4-E.
-- **No division/modulo** — only add, sub, mul implemented. (`mpz_div`, `mpz_mod`, `mpz_powm` not yet.)
+- **Division and modular inverse lag GMP structurally** (~28× and ~42-60× slower respectively). The gap is byte-base vs limb-base in our Knuth Algorithm D and EEA implementations. Closing it requires a u64-base Knuth reformulation or Lehmer-style half-GCD; significant algorithmic work, planned post-M7.
 - **Single platform validated** — numbers above are all aarch64-darwin (Apple M-series). x86_64 may shift the picture, especially around the asm-vs-clang result.
 - **No C FFI yet** — public surface is Zig-only. Adding `include/blip_mp.h` is a clear extension.
 - **Not optimized for non-aligned operand sizes** — `tier3Op` works on any size but is fastest when payload lengths are multiples of 8 bytes (which most cryptographic sizes are).
@@ -144,7 +145,7 @@ Full details in [`CODE_MINIMAP.md`](CODE_MINIMAP.md), benchmark history in [`BEN
 
 3. **Cross-platform validation on x86_64 Linux + Windows.** Two M-series-specific findings need verification on x86_64: (a) "GMP asm gives ~0% on M-series, AVX-512 may shift it" (M5-5); (b) "pure-NEON Montgomery loses to scalar-inside-vector because of M4's dual scalar mul pipes" (M6-4-A.6) — different scheduler may flip this.
 
-4. **Division and modular operations** — `Mp.div`, `Mp.mod`, `Mp.powm`. Required for serious crypto applications.
+4. **Faster division** — current `Mp.div`/`Mp.divMod` is byte-base Knuth Algorithm D, ~28× behind GMP's `mpn_tdiv_qr`. Reformulating to u64-base would close most of the gap. Indirectly improves `Mp.invMod` too (which is bottlenecked by the per-iteration div in classical EEA). Or: implement Lehmer/half-GCD for invMod as a separate path.
 
 5. **C FFI header** (`include/blip_mp.h`) for downstream consumers.
 

@@ -574,20 +574,26 @@ pub fn mulMagnitudesCRT(
 /// Lane-wise (a + b) mod P. Each lane independent. Inputs assumed in [0, P).
 /// Lowers to NEON add.2d + cmhs.2d + bsl on aarch64. ~1.5–2× scalar throughput
 /// expected once both lanes are useful work.
+///
+/// Note: `corrected` uses wrapping `-%` because the un-selected lane (where
+/// sum < P) would otherwise underflow and trip Debug-mode integer safety
+/// checks. ReleaseFast discards the wrapped value via @select, but Debug
+/// fires the panic before the select runs.
 pub inline fn addModP_x2(a: @Vector(2, u64), b: @Vector(2, u64)) @Vector(2, u64) {
 	const sum = a + b;
 	const p_vec: @Vector(2, u64) = @splat(P);
 	const ge_mask = sum >= p_vec; // @Vector(2, bool)
-	const corrected = sum - p_vec;
+	const corrected = sum -% p_vec;
 	return @select(u64, ge_mask, corrected, sum);
 }
 
 /// Lane-wise (a - b) mod P. Each lane independent. Inputs in [0, P).
+/// `direct` uses wrapping `-%` for the same Debug-safety reason as addModP_x2.
 pub inline fn subModP_x2(a: @Vector(2, u64), b: @Vector(2, u64)) @Vector(2, u64) {
 	const p_vec: @Vector(2, u64) = @splat(P);
 	const lt_mask = a < b; // @Vector(2, bool)
-	const wrapped = a + p_vec - b;
-	const direct = a - b;
+	const wrapped = a + p_vec -% b;
+	const direct = a -% b;
 	return @select(u64, lt_mask, wrapped, direct);
 }
 
@@ -712,9 +718,10 @@ pub inline fn montMul_x2(a_m: @Vector(2, u64), b_m: @Vector(2, u64)) @Vector(2, 
 	const mp: @Vector(2, u64) = @as(@Vector(2, u64), m32) *% @as(@Vector(2, u64), p_v32);
 	const t = (T +% mp) >> shift32;
 
-	// Conditional subtract: vectorized cmhs.2d + select.
+	// Conditional subtract: vectorized cmhs.2d + select. Wrapping `-%` so
+	// the un-selected lane (t < P) doesn't trip Debug-mode integer safety.
 	const ge_mask = t >= p_v;
-	const corrected = t - p_v;
+	const corrected = t -% p_v;
 	return @select(u64, ge_mask, corrected, t);
 }
 

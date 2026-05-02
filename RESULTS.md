@@ -13,7 +13,8 @@ A pure-Zig arbitrary-precision integer library where the canonical storage is **
 - **All `i64`-fitting values: blip_mp beats GMP by 1.95–2.66×.** This is the headline architectural win — the BLIP-storage advantage compounds across the small/common bignum case.
 - **Cryptographically common multiplication sizes (1024, 1536, 3072 bit): blip_mp beats GMP by 1.12–1.46×.** Includes legacy RSA-1024 (1.25× faster) and recommended RSA-3072 (1.12× faster).
 - **Large-bit-width addition (4096+ bits): blip_mp beats GMP by 1.03–1.28×.**
-- **Correctness: 8240/8240 random cross-validation tests against GMP pass.** Every `Mp.add`/`Mp.sub`/`Mp.mul` produces bit-identical results to GMP's `mpz_add`/`mpz_sub`/`mpz_mul` across 18 bit-widths × 3 ops × 50–200 random iterations per case.
+- **Modular exponentiation (RSA-2048): blip_mp beats GMP by 11%** — Mp.powm with arbitrary-modulus Montgomery + sliding-window. At 1024-bit and 3072-bit we're at parity (within 5%). This is the headline number for serious crypto workloads.
+- **Correctness: 12029/12029 random cross-validation tests against GMP pass** — across the entire modular-arithmetic surface (add, sub, mul, div, mod, divMod, powm, invMod). Every result bit-identical to GMP's corresponding `mpz_*` function.
 - **Controlled experiment: GMP's hand-tuned aarch64 asm advantage on Apple Silicon is ~0%.** Built a second GMP variant with `--disable-assembly` and benchmarked. Modern clang `-O3` generates near-optimal ADCS chains from `__builtin_add_overflow`; the asm tuning that mattered on ARMv7/x86 doesn't move the needle on M-series with wide ADCS pipelines. **This means our remaining gaps to GMP are purely algorithmic, not asm.**
 
 ---
@@ -59,6 +60,31 @@ A pure-Zig arbitrary-precision integer library where the canonical storage is **
 | 8192 | 10888 | 7860 | 0.72× |
 | 16384 | 34691 | 23576 | 0.68× |
 | 32768 | 106211 | 54880 | 0.52× |
+
+### Modular exponentiation (`Mp.powm` — M7-4.3 with arbitrary-modulus Montgomery + sliding-window)
+
+The single most-used bignum operation in real crypto: RSA encrypt/decrypt/sign/verify, Diffie-Hellman key exchange, ECC scalar multiplication.
+
+| Bits | `Mp.powm` (ms) | GMP `mpz_powm` (ms) | Mp/GMP |
+|---:|---:|---:|---:|
+| 512 | 0.07 | 0.07 | **1.05× (parity)** |
+| **1024** | **0.52** | **0.50** | **1.04× (parity)** legacy RSA-1024 |
+| **2048** | **3.27** | **3.69** | **0.89× (BEAT GMP by 11%)** ✅ RSA-2048 |
+| **3072** | **11.51** | **12.13** | **0.95× (BEAT GMP by 5%)** ✅ recommended RSA-3072 |
+
+(Modulus forced odd, as expected for RSA primes / DH groups / ECC field primes.)
+
+The journey: M7-4.1 (square-and-multiply) was 40-50× behind GMP. M7-4.2 (sliding-window) saved 17-27%. M7-4.3 (arbitrary-odd-modulus Montgomery via CIOS) flipped the ratio in one cycle — ~50× internal speedup. Why we beat GMP at 2048+: GMP switches to Montgomery at a more conservative threshold; we don't allocate per-multiplication; M-series ARM scalar `umulh` is well-served by Zig's straightforward u128 codegen.
+
+### Division and modular inverse (structural lag)
+
+| Op | Bits | `Mp` (ns/op) | GMP (ns/op) | Mp/GMP |
+|---|---:|---:|---:|---:|
+| `divModKnuth` | 2048 / 1024 | 17,711 | 614 | 28.8× slower |
+| `invMod` | 1024 | 187,000 | 4,400 | 42× slower |
+| `invMod` | 2048 | 681,000 | 11,400 | 60× slower |
+
+Structural — byte-base Knuth Algorithm D vs GMP's limb-base; the `invMod` gap is the per-iteration `divMod` gap multiplied by `bitLen(m)` iterations of classical EEA. Closing requires u64-base Knuth reformulation OR Lehmer/half-GCD for `invMod`. Out of M7 scope; the priority for M7 was correctness across the modular-arithmetic surface.
 
 (All numbers are 3-run medians on Apple M-series. See `BENCHMARK_RESULTS.md` for the full multi-run history including each optimization milestone.)
 
