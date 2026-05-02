@@ -312,6 +312,42 @@ fn setBothPositive(
 	try mp.setBytes(blip_buf[0 .. hdr_len + byte_count]);
 }
 
+/// Like `setBothPositive` but forces low bit set (odd value). Used for the
+/// powm perf benchmark so the Montgomery-form fast path engages.
+fn setBothPositiveOdd(
+	mp: *Mp,
+	gmp: *mpz_t,
+	allocator: std.mem.Allocator,
+	rng: std.Random,
+	bits: usize,
+) !void {
+	if (bits <= 60) {
+		const mask: i64 = if (bits >= 63) std.math.maxInt(i64) else (@as(i64, 1) << @intCast(bits)) - 1;
+		const raw = rng.int(i64);
+		var value = if (raw < 0) -(raw & mask) * @as(i64, -1) else raw & mask;
+		var abs_value: i64 = if (value < 0) -value else value;
+		abs_value |= 1; // odd
+		_ = &value;
+		try mp.setI64(abs_value);
+		__gmpz_set_si(gmp, @intCast(abs_value));
+		return;
+	}
+	const byte_count = (bits + 7) / 8;
+	const payload = try allocator.alloc(u8, byte_count);
+	defer allocator.free(payload);
+	for (payload) |*p| p.* = rng.int(u8);
+	payload[byte_count - 1] &= 0x7F; // positive
+	payload[0] |= 1; // odd
+
+	__gmpz_import(gmp, byte_count, -1, 1, 0, 0, payload.ptr);
+
+	const blip_buf = try allocator.alloc(u8, byte_count + 16);
+	defer allocator.free(blip_buf);
+	const hdr_len = try blip_mp.tier3.writeHeader(blip_buf, byte_count);
+	@memcpy(blip_buf[hdr_len .. hdr_len + byte_count], payload);
+	try mp.setBytes(blip_buf[0 .. hdr_len + byte_count]);
+}
+
 const TestSpec = struct { op: Op, bits: usize, iters: usize };
 
 fn iterCount(op: Op, bits: usize) usize {
@@ -330,14 +366,15 @@ fn iterCount(op: Op, bits: usize) usize {
 		return 15;
 	}
 	// powm scales as O(bits * mul_cost) — bits squarings each O(bits^1.58).
-	// Use much smaller iteration counts since powm is the slowest op.
+	// Mont path (M7-4.3) lets us run 3072/4096-bit cases in reasonable time.
 	if (op == .powm) {
 		if (bits <= 64) return 100;
 		if (bits <= 256) return 50;
 		if (bits <= 512) return 20;
 		if (bits <= 1024) return 10;
 		if (bits <= 2048) return 5;
-		return 2;
+		if (bits <= 3072) return 4;
+		return 3;
 	}
 	// add/sub are cheap.
 	if (bits <= 1024) return 200;
@@ -349,7 +386,10 @@ const SIZES = [_]usize{ 8, 16, 32, 60, 64, 128, 192, 256, 384, 512, 768, 1024, 1
 const OPS = [_]Op{ .add, .sub, .mul, .divq, .divr };
 // powm runs at smaller bit widths to keep wall-clock reasonable. The full op
 // performs `bits` squarings plus ~bits/2 multiplications, each O(bits^1.58).
-const POWM_SIZES = [_]usize{ 8, 16, 32, 60, 64, 128, 192, 256, 384, 512, 768, 1024, 1536, 2048 };
+// Extended to 3072 / 4096 since M7-4.3 (Montgomery) made those tractable —
+// 4096-bit Mont powm runs in ~30 ms, not the ~3 sec the old schoolbook+Knuth
+// path would've needed.
+const POWM_SIZES = [_]usize{ 8, 16, 32, 60, 64, 128, 192, 256, 384, 512, 768, 1024, 1536, 2048, 3072, 4096 };
 
 pub fn main() !u8 {
 	const allocator = std.heap.c_allocator;
@@ -546,9 +586,9 @@ pub fn main() !u8 {
 	for (PERF_SIZES, PERF_ITERS) |bits, iters| {
 		try setBoth(&blip_a, &gmp_a, allocator, rng, bits);
 		try setBothPositive(&blip_b, &gmp_b, allocator, rng, bits);
-		try setBothPositive(&blip_m, &gmp_m, allocator, rng, bits);
-		// Force mod odd to land near "RSA-like" workload (cosmetic; doesn't
-		// affect blip_mp's algorithm choice — sliding-window helps regardless).
+		try setBothPositiveOdd(&blip_m, &gmp_m, allocator, rng, bits);
+		// Modulus is forced ODD here so the Mont path engages — matches the
+		// RSA / DH / ECC reality that real-world moduli are odd.
 		const t0_start = nowNs();
 		for (0..iters) |_| {
 			try Mp.powm(&blip_r, &blip_a, &blip_b, &blip_m);
