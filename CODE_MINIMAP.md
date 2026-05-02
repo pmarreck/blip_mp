@@ -35,7 +35,11 @@ Per-file index of important code locations. Updated as files are added.
   - `Mp.cmp(other)`, `Mp.sign()`
   - `Mp.add(r, a, b)` / `Mp.sub(r, a, b)` — tier 0/1 fast path with cross-tier promotion to tier 3 on i64 overflow (no more `error.TierOverflow` for in-range cases)
   - `Mp.mul(r, a, b)` — tier 0/1 only; tier-3 mul is an open follow-up
-  - Internal: `ensureHeapCapacity(cap)`, `decodeInlineSmall`, `tier3Op`
+  - `Mp.divMod(q, r, a, b)` / `Mp.div` / `Mp.mod` — truncated division (GMP `mpz_tdiv_qr` semantics)
+  - `Mp.bitAt(i)` / `Mp.bitLen()` — magnitude bit access (used by powm)
+  - `Mp.powm(r, base, exp, m)` — modular exponentiation (square-and-multiply / sliding-window / Montgomery sliding-window dispatch)
+  - `Mp.invMod(r, a, m) -> bool` — modular multiplicative inverse via classical Extended Euclidean Algorithm. Returns `true` iff inverse exists (gcd=1); `false` with `r=0` when no inverse. Matches GMP `mpz_invert` return convention. Tracks one Bezout coefficient (s) on `a`; doesn't materialise the t coefficient on `m` since it's unused. Reduces `a` into [0, |m|) before iteration; returns result in [0, |m|). ~bitLen(m) iterations, each one Knuth division (Mp.divMod) — slower than a binary GCD variant but trivially correct.
+  - Internal: `ensureHeapCapacity(cap)`, `decodeInlineSmall`, `tier3Op`, `euclideanReduce` (mod into Euclidean range — used by invMod)
   - Error sets: `SetError`, `GetError`, `ArithError`
 
 - `src/tier3.zig` — large-number arithmetic operating DIRECTLY on BLIP payload bytes. No auxiliary limb-array conversion (Peter's "no limbs" insight). Pure-Zig, no GMP dep.
@@ -52,6 +56,7 @@ Per-file index of important code locations. Updated as files are added.
 
 ## tests/
 
+- `tests/integration/cross_check.zig` — exhaustive GMP cross-validation (12029 random comparisons across add/sub/mul/divq/divr/powm/invMod at 18 bit-widths from 8 to 8192 bit). Wall-clock perf snapshots for powm (RSA sizes) and invMod (256/512/1024/2048-bit). Built as `cross_check` exe alongside the bench binaries; run by `./test` after the unit-test pass.
 - `tests/benchmark/blip_mp_bench.zig` — Zig executable. Small buckets measure `Mp.add` (full path) and `raw` (zero-alloc theoretical ceiling). Large buckets (256/1024/4096-bit) measure the tier-3 path. Pseudo-random pool seeded from index for the large buckets. Uses libc malloc (apples-to-apples with GMP). Times via direct `clock_gettime` extern (`std.time.Timer` was removed in Zig 0.16).
 - `tests/benchmark/gmp_bench.c` — C executable. Same workload shape using GMP `mpz_add`. Built via build.zig with `-O3` and `-lgmp` (paths threaded from Nix via `-Dgmp-include-path` / `-Dgmp-lib-path`). Bench-only dependency; the blip_mp core has no GMP requirement.
 

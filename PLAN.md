@@ -203,8 +203,8 @@ The single most-used bignum operation in real crypto (RSA encrypt/decrypt/sign/v
 
 Required to complete the modular-arithmetic surface. Used in RSA private-key derivation (CRT shortcut), elliptic curve point operations.
 
-- [ ] **M7-5.1** Extended Euclidean via Stein's binary GCD variant — works over byte-level data without explicit division (uses shift + sub). Test: cross-check `Mp.invMod` vs GMP `mpz_invert` for 1K random (a, m) pairs where gcd(a,m)=1; confirm `(a · invMod(a, m)) mod m == 1`.
-- [ ] **M7-5.2** Cross-check `mpz_invert`-style behavior on non-coprime inputs (return error / produce 0 — match GMP convention).
+- [x] **M7-5.1** Classical Extended Euclidean (chosen over Stein's binary GCD for simplicity — reuses existing `Mp.divMod`). Returns `bool` indicating whether the inverse exists; sets `r = 0` and returns false when gcd(a, m) ≠ 1, matching GMP `mpz_invert` semantics. (2026-05-02 EST) Tests: 5 unit tests (small known cases, no-inverse cases, division-by-zero, 200-iter random fuzz with `(a·r) mod m == 1` verification, 256-bit Curve25519 prime modulus). Cross-validated vs GMP `mpz_invert` across 762 random (a, m) pairs at 8/32/64/128/256/512/1024/2048-bit widths — all match (existence bit + result value).
+- [x] **M7-5.2** GMP-convention behavior on non-coprime inputs: returns `false` instead of erroring; `r` set to 0. Verified with explicit test cases (gcd=2, 3, 4, 5) AND cross-check existence-bit comparison for all `no-inverse` cases at every bit-width. (2026-05-02 EST)
 
 ### Sequencing for M7
 

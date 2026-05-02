@@ -63,6 +63,13 @@ pub const ArithError = SetError || GetError || error{
 	NegativeExponentNotSupported, // powm with exp < 0 (would require modular inverse — M7-5)
 };
 
+/// Reduce `a` modulo |m| (Euclidean), into a buffer-managed Mp.
+/// Centralised so invMod and other modular ops can normalise inputs.
+fn euclideanReduce(out: *Mp, a: *const Mp, m_abs: *const Mp) ArithError!void {
+	try out.mod(a, m_abs);
+	if (out.cached_sign < 0) try out.add(out, m_abs);
+}
+
 pub const Mp = struct {
 	inline_buf: [INLINE_CAP]u8 align(8),
 	inline_len: u8,
@@ -469,6 +476,103 @@ pub const Mp = struct {
 
 		// Fallback: left-to-right sliding window with schoolbook mul + Knuth mod.
 		try powmSlidingWindow(r, &base_red, exp, &m_abs, w);
+	}
+
+	/// Modular multiplicative inverse via classical Extended Euclidean Algorithm.
+	/// Sets `r = a^-1 mod |m|`. Returns `true` iff the inverse exists, i.e.
+	/// gcd(|a|, |m|) == 1. When no inverse exists, returns `false` and sets
+	/// `r = 0` (matches GMP `mpz_invert` convention: returns 1 on success,
+	/// 0 on failure, with `rop` undefined on failure — we set to 0).
+	///
+	/// Errors: `DivisionByZero` if `m == 0`. Modulus sign is ignored (taken
+	/// absolute). `a` is reduced into [0, |m|) before the algorithm runs.
+	///
+	/// Algorithm: classical EEA tracks (r0, r1) with Bezout coefficient s such
+	/// that a*s ≡ r mod m. Each step: q = r0/r1; (r0,r1)=(r1,r0-q*r1);
+	/// (s0,s1)=(s1,s0-q*s1). Terminates when r1 == 0; if r0 == 1 the inverse
+	/// is s0 mod m. We don't track the t coefficient (on m) since we don't
+	/// need it. ~bitLen(m) iterations, each O(n^2) Knuth division — slower
+	/// than a binary GCD variant, but reuses every existing Mp op and is
+	/// trivially correct under the signed-two's-complement representation.
+	pub fn invMod(r: *Mp, a: *const Mp, m: *const Mp) ArithError!bool {
+		if (m.cached_sign == 0) return error.DivisionByZero;
+		const allocator = r.allocator;
+
+		// |m|.
+		var m_abs = Mp.init(allocator);
+		defer m_abs.deinit();
+		if (m.cached_sign < 0) {
+			var zero = Mp.init(allocator);
+			defer zero.deinit();
+			try zero.setI64(0);
+			try m_abs.sub(&zero, m);
+		} else {
+			try m_abs.setBytes(m.bytes());
+		}
+
+		// Inverse mod 1 is 0 (everything is congruent to 0 mod 1, including 1
+		// and 0 — match GMP: returns 1 with rop = 0).
+		if (m_abs.cached_pay_len == 1 and m_abs.bytes()[0] == 1) {
+			try r.setI64(0);
+			return true;
+		}
+
+		// r0 = a reduced into [0, |m|); r1 = |m|.
+		// Note: we use r0/r1 swapped relative to the usual Euclid presentation
+		// because we want s0 (Bezout coefficient on a) at termination.
+		var r0 = Mp.init(allocator);
+		defer r0.deinit();
+		try euclideanReduce(&r0, a, &m_abs);
+		// gcd(0, m) = m ≠ 1 (we already handled m == 1) → no inverse.
+		if (r0.cached_sign == 0) {
+			try r.setI64(0);
+			return false;
+		}
+
+		var r1 = Mp.init(allocator);
+		defer r1.deinit();
+		try r1.setBytes(m_abs.bytes());
+
+		var s0 = Mp.init(allocator);
+		defer s0.deinit();
+		try s0.setI64(1);
+
+		var s1 = Mp.init(allocator);
+		defer s1.deinit();
+		try s1.setI64(0);
+
+		var q = Mp.init(allocator);
+		defer q.deinit();
+		var rem = Mp.init(allocator);
+		defer rem.deinit();
+		var tmp = Mp.init(allocator);
+		defer tmp.deinit();
+		var new_s = Mp.init(allocator);
+		defer new_s.deinit();
+
+		while (r1.cached_sign != 0) {
+			// q = r0 / r1; rem = r0 - q*r1 = r0 mod r1.
+			try Mp.divMod(&q, &rem, &r0, &r1);
+			// (r0, r1) = (r1, rem). Move via swap-into-r0 then write rem into r1.
+			try tmp.setBytes(r1.bytes());
+			try r0.setBytes(tmp.bytes());
+			try r1.setBytes(rem.bytes());
+			// (s0, s1) = (s1, s0 - q * s1).
+			try tmp.mul(&q, &s1);
+			try new_s.sub(&s0, &tmp);
+			try s0.setBytes(s1.bytes());
+			try s1.setBytes(new_s.bytes());
+		}
+
+		// gcd is r0; inverse exists iff gcd == 1.
+		const gcd_is_one = r0.cached_pay_len == 1 and r0.bytes()[0] == 1 and r0.cached_sign == 1;
+		if (!gcd_is_one) {
+			try r.setI64(0);
+			return false;
+		}
+		// Inverse is s0 mod |m|, in [0, |m|).
+		try euclideanReduce(r, &s0, &m_abs);
+		return true;
 	}
 
 	/// Returns true iff this Mp's encoded form fits in the i64 universe
@@ -1916,6 +2020,144 @@ test "powm: medium magnitude — 7^100 mod 13 = 9 (verified manually)" {
 	try m.setI64(13);
 	try Mp.powm(&r, &b, &e, &m);
 	try testing.expectEqual(@as(i64, 9), try r.getI64());
+}
+
+test "invMod: small known cases" {
+	// Reference values verified by hand:
+	//   3^-1 mod 11 = 4  (3*4 = 12 = 11+1)
+	//   7^-1 mod 26 = 15 (7*15 = 105 = 4*26 + 1)
+	//   2^-1 mod 5  = 3  (2*3 = 6 = 5+1)
+	//   3^-1 mod 7  = 5  (3*5 = 15 = 2*7 + 1)
+	//   10^-1 mod 17 = 12 (10*12 = 120 = 7*17 + 1)
+	const Case = struct { a: i64, m: i64, expected: i64 };
+	const cases = [_]Case{
+		.{ .a = 3, .m = 11, .expected = 4 },
+		.{ .a = 7, .m = 26, .expected = 15 },
+		.{ .a = 2, .m = 5, .expected = 3 },
+		.{ .a = 3, .m = 7, .expected = 5 },
+		.{ .a = 10, .m = 17, .expected = 12 },
+		.{ .a = 1, .m = 5, .expected = 1 }, // 1^-1 mod m = 1
+	};
+	var a_mp = Mp.init(testing.allocator);
+	defer a_mp.deinit();
+	var m_mp = Mp.init(testing.allocator);
+	defer m_mp.deinit();
+	var r_mp = Mp.init(testing.allocator);
+	defer r_mp.deinit();
+	for (cases) |c| {
+		try a_mp.setI64(c.a);
+		try m_mp.setI64(c.m);
+		const ok = try Mp.invMod(&r_mp, &a_mp, &m_mp);
+		try testing.expect(ok);
+		try testing.expectEqual(c.expected, try r_mp.getI64());
+	}
+}
+
+test "invMod: returns false when no inverse exists" {
+	// gcd(a, m) != 1 → no inverse
+	const Case = struct { a: i64, m: i64 };
+	const cases = [_]Case{
+		.{ .a = 2, .m = 4 }, // gcd = 2
+		.{ .a = 6, .m = 9 }, // gcd = 3
+		.{ .a = 0, .m = 5 }, // gcd(0, 5) = 5
+		.{ .a = 4, .m = 8 }, // gcd = 4
+	};
+	var a_mp = Mp.init(testing.allocator);
+	defer a_mp.deinit();
+	var m_mp = Mp.init(testing.allocator);
+	defer m_mp.deinit();
+	var r_mp = Mp.init(testing.allocator);
+	defer r_mp.deinit();
+	for (cases) |c| {
+		try a_mp.setI64(c.a);
+		try m_mp.setI64(c.m);
+		const ok = try Mp.invMod(&r_mp, &a_mp, &m_mp);
+		try testing.expect(!ok);
+	}
+}
+
+test "invMod: division by zero modulus" {
+	var a = Mp.init(testing.allocator);
+	defer a.deinit();
+	var m = Mp.init(testing.allocator);
+	defer m.deinit();
+	var r = Mp.init(testing.allocator);
+	defer r.deinit();
+	try a.setI64(3);
+	try m.setI64(0);
+	try testing.expectError(error.DivisionByZero, Mp.invMod(&r, &a, &m));
+}
+
+test "invMod: result satisfies (a * r) mod m == 1 for 200 random small pairs" {
+	var prng = std.Random.DefaultPrng.init(0xBEEF_F00D_CAFE);
+	const rand = prng.random();
+	var a = Mp.init(testing.allocator);
+	defer a.deinit();
+	var m = Mp.init(testing.allocator);
+	defer m.deinit();
+	var r = Mp.init(testing.allocator);
+	defer r.deinit();
+	var prod = Mp.init(testing.allocator);
+	defer prod.deinit();
+	var rem = Mp.init(testing.allocator);
+	defer rem.deinit();
+	var verified: usize = 0;
+	var iter: usize = 0;
+	while (iter < 200) : (iter += 1) {
+		// m: random odd > 2 in i32 range. a in [1, m).
+		const mv_raw = rand.intRangeAtMost(i64, 3, 1_000_000);
+		const mv: i64 = mv_raw | 1;
+		const av = rand.intRangeAtMost(i64, 1, mv - 1);
+		try a.setI64(av);
+		try m.setI64(mv);
+		const ok = try Mp.invMod(&r, &a, &m);
+		if (!ok) continue;
+		// Verify: (a * r) mod m == 1.
+		try prod.mul(&a, &r);
+		try rem.mod(&prod, &m);
+		try testing.expectEqual(@as(i64, 1), try rem.getI64());
+		// r should be in [0, m).
+		const rv = try r.getI64();
+		try testing.expect(rv >= 0 and rv < mv);
+		verified += 1;
+	}
+	try testing.expect(verified > 100);
+}
+
+test "invMod: large modulus — 256-bit random with verification" {
+	// Use a known prime modulus (so every nonzero a has an inverse).
+	// 2^255 - 19 (Curve25519 prime): definitely prime, definitely > 1.
+	// Construct as 0xed ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff ff 7f
+	var m = Mp.init(testing.allocator);
+	defer m.deinit();
+	var mag = [_]u8{0} ** 32;
+	mag[31] = 0x7f;
+	var i: usize = 0;
+	while (i < 31) : (i += 1) mag[i] = 0xff;
+	mag[0] = 0xed;
+	// BLIP encoding: header 0x80 | L for L<=31 → for L=32 needs continuation.
+	// L=32 → header byte = 0xA0 (0x80 | (32 & 0x1F)=0x80) with cont. Use writer.
+	var enc_buf: [40]u8 = undefined;
+	const hdr_len = try tier3.writeHeader(&enc_buf, 32);
+	@memcpy(enc_buf[hdr_len .. hdr_len + 32], &mag);
+	try m.setBytes(enc_buf[0 .. hdr_len + 32]);
+
+	var a = Mp.init(testing.allocator);
+	defer a.deinit();
+	try a.setI64(7); // 7 is coprime to the prime; inverse exists.
+
+	var r = Mp.init(testing.allocator);
+	defer r.deinit();
+	const ok = try Mp.invMod(&r, &a, &m);
+	try testing.expect(ok);
+	// Verify (7 * r) mod m == 1.
+	var prod = Mp.init(testing.allocator);
+	defer prod.deinit();
+	var rem = Mp.init(testing.allocator);
+	defer rem.deinit();
+	try prod.mul(&a, &r);
+	try rem.mod(&prod, &m);
+	try testing.expectEqual(@as(i64, 1), try rem.getI64());
 }
 
 test "divMod: identity a == q*b + rem on 1000 random i64 pairs" {
