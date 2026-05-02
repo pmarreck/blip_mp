@@ -117,11 +117,18 @@ Constant-time per-op work in `tier3Op` — `bytes()` call, aliasing check, `ensu
 
 **Closeable in pure Zig** with more aggressive inlining + size-specialized fast paths. Not asm-related (per M5-5).
 
-### 2. 4K+ bit multiplication: missing FFT
+### 2. 4K+ bit multiplication: FFT primitives shipped, gap closed but not flipped
 
-GMP uses Schönhage-Strassen Number-Theoretic Transform (NTT) at high thresholds. O(n log n log log n) vs our Karatsuba's O(n^1.58). At 32K-bit, GMP is 1.93× faster than blip_mp purely on this algorithmic difference.
+GMP uses Schönhage-Strassen Number-Theoretic Transform (NTT) at high thresholds. O(n log n log log n) vs our Karatsuba's O(n^1.58). Originally GMP was 1.93× faster than blip_mp at 32K-bit purely on this algorithmic difference.
 
-**Implementable in pure Zig** (~500–1000 lines: NTT over a prime field with chosen roots of unity, butterfly transforms with bit-reversal permutation, modular arithmetic on pointwise products, byte ↔ digit conversion at boundaries with carry propagation). Real engineering project, not a quick win.
+**M6-3 / M6-4 status (2026-05-02):** A full pure-Zig NTT FFT mul stack now lives in `src/fft.zig` — single-prime NTT over p=998244353, two-prime CRT extension to 256K-bit, NEON-SIMD vectorized butterflies, plus scaffolding variants (Stockham auto-sort, Montgomery-form NTT, radix-4). All correctness-validated bit-identically against GMP and schoolbook. The vectorized NTT in production reduced 32K-bit Mp.mul from 191K → 135K ns (1.40× full-FFT speedup), closing the FFT-vs-Toom-3 gap from 1.93× to 1.15×.
+
+**FFT remains gated off in production** (`FFT_THRESHOLD = 99999` in `src/tier3.zig`) because Toom-3 still wins at 117K ns vs FFT's 135K — a 13–15% remaining gap. Two non-obvious findings emerged from the implementation effort:
+
+- **Pure-NEON Montgomery integrates SLOWER on M4** despite winning the microbench (0.70 vs 0.76 ns/vec_op). Asm inspection showed the existing `mulModP_x2` is using M4's two scalar mul pipes for `mul`+`umulh`+`msub` per lane, *while* the NEON pipe handles surrounding add/sub/load/store. Pure-NEON Mont moves all work onto NEON, starving the parallelism.
+- **Radix-4 NTT does NOT reduce mults** the way the floating-point FFT literature claims. The classical 25% reduction depends on multiplication by `i` (4th root of unity) being a free real-imaginary swap. In NTT, `i = ω_4 mod p` is a generic non-trivial constant — full mulModP. Verified at N=8192: radix-2 = 53,248 muls; radix-4 mixed = 53,248 muls (identical).
+
+The remaining 13–15% gap requires alloc-elimination (caller-supplied scratch, ~6–9K ns), wiring Stockham into production with that scratch, and possibly hand-scheduled aarch64 inline asm for the butterfly inner loop. Roadmap detail in PLAN.md M6-4-E.
 
 ### 3. Toom-3 with diminishing returns
 
