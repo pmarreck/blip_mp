@@ -15,6 +15,13 @@
 
 const std = @import("std");
 const encoding = @import("encoding.zig");
+const fft = @import("fft.zig");
+
+// FFT dispatch threshold (bytes per operand). Below this, Toom-3 / Karatsuba
+// are faster due to FFT's per-call setup cost (allocating two u64[N] arrays,
+// forward+inverse NTTs over [0..N), pointwise modular multiplies). Initial
+// guess; calibrate with bench in M6-3.13.
+pub const FFT_THRESHOLD: usize = 3072;
 
 // ── Header read/write supporting L >= 32 (continuation) ──────────────────────
 
@@ -1206,6 +1213,7 @@ pub fn mulRawBlip(
 	scratch_r: []u8,
 	scratch_k: []u8,
 	out: []u8,
+	fft_alloc: ?std.mem.Allocator,
 ) !usize {
 	const a_pay = try payloadOf(a_blip);
 	const b_pay = try payloadOf(b_blip);
@@ -1222,8 +1230,12 @@ pub fn mulRawBlip(
 	if (b_neg) negateInPlace(scratch_b[0..b_pay.len]);
 
 	const r_len = a_pay.len + b_pay.len;
-	// Algorithm selection: Toom-3 (≥ 1024 bytes) → Karatsuba → chunked u64.
-	if (a_pay.len == b_pay.len and a_pay.len >= TOOM3_THRESHOLD and scratch_k.len >= toom3ScratchNeed(a_pay.len)) {
+	// Algorithm selection: FFT (≥ 3K-byte equal operands w/ allocator) →
+	// Toom-3 (≥ 2K bytes) → Karatsuba (≥ 256) → chunked u64 schoolbook.
+	const can_fft = fft_alloc != null and a_pay.len == b_pay.len and a_pay.len >= FFT_THRESHOLD and a_pay.len + b_pay.len <= fft.MAX_FFT_COMBINED_LEN;
+	if (can_fft) {
+		_ = try fft.mulMagnitudes(fft_alloc.?, scratch_a[0..a_pay.len], scratch_b[0..b_pay.len], scratch_r[0..r_len]);
+	} else if (a_pay.len == b_pay.len and a_pay.len >= TOOM3_THRESHOLD and scratch_k.len >= toom3ScratchNeed(a_pay.len)) {
 		@memset(scratch_r[0..r_len], 0);
 		mulToom3(scratch_a[0..a_pay.len], scratch_b[0..b_pay.len], scratch_r[0..r_len], scratch_k);
 	} else if (a_pay.len == b_pay.len and a_pay.len >= KARATSUBA_THRESHOLD and scratch_k.len >= karatsubaScratchNeed(a_pay.len)) {
@@ -1550,7 +1562,7 @@ test "mulRawBlip: small positive * positive (6 * 7 = 42)" {
 	var sb: [4]u8 = undefined;
 	var sr: [16]u8 = undefined;
 	var out: [16]u8 = undefined;
-	const n = try mulRawBlip(&[_]u8{0x06}, &[_]u8{0x07}, &sa, &sb, &sr, &[_]u8{}, &out);
+	const n = try mulRawBlip(&[_]u8{0x06}, &[_]u8{0x07}, &sa, &sb, &sr, &[_]u8{}, &out, null);
 	try testing.expectEqualSlices(u8, &[_]u8{0x2A}, out[0..n]); // 42 immediate
 }
 
@@ -1560,7 +1572,7 @@ test "mulRawBlip: positive * negative = negative (-6 * 7 = -42)" {
 	var sr: [16]u8 = undefined;
 	var out: [16]u8 = undefined;
 	// -6 = 0x81 0xFA (i8 -6); +7 = 0x07 immediate
-	const n = try mulRawBlip(&[_]u8{ 0x81, 0xFA }, &[_]u8{0x07}, &sa, &sb, &sr, &[_]u8{}, &out);
+	const n = try mulRawBlip(&[_]u8{ 0x81, 0xFA }, &[_]u8{0x07}, &sa, &sb, &sr, &[_]u8{}, &out, null);
 	// -42 = i8 0xD6 → BLIP [0x81, 0xD6]
 	try testing.expectEqualSlices(u8, &[_]u8{ 0x81, 0xD6 }, out[0..n]);
 }
@@ -1570,7 +1582,7 @@ test "mulRawBlip: negative * negative = positive (-6 * -7 = 42)" {
 	var sb: [4]u8 = undefined;
 	var sr: [16]u8 = undefined;
 	var out: [16]u8 = undefined;
-	const n = try mulRawBlip(&[_]u8{ 0x81, 0xFA }, &[_]u8{ 0x81, 0xF9 }, &sa, &sb, &sr, &[_]u8{}, &out);
+	const n = try mulRawBlip(&[_]u8{ 0x81, 0xFA }, &[_]u8{ 0x81, 0xF9 }, &sa, &sb, &sr, &[_]u8{}, &out, null);
 	try testing.expectEqualSlices(u8, &[_]u8{0x2A}, out[0..n]); // 42 immediate
 }
 
@@ -1579,7 +1591,7 @@ test "mulRawBlip: result is zero (anything * 0)" {
 	var sb: [4]u8 = undefined;
 	var sr: [16]u8 = undefined;
 	var out: [16]u8 = undefined;
-	const n = try mulRawBlip(&[_]u8{0x05}, &[_]u8{0x00}, &sa, &sb, &sr, &[_]u8{}, &out);
+	const n = try mulRawBlip(&[_]u8{0x05}, &[_]u8{0x00}, &sa, &sb, &sr, &[_]u8{}, &out, null);
 	try testing.expectEqualSlices(u8, &[_]u8{0x00}, out[0..n]);
 }
 
@@ -1655,14 +1667,14 @@ test "mulRawBlip: large equal-size operands via Karatsuba" {
 	var sk: [256]u8 = undefined; // ~4n = 128 + slack
 	var out: [128]u8 = undefined;
 
-	const n = try mulRawBlip(&a_blip, &b_blip, &sa, &sb, &sr, &sk, &out);
+	const n = try mulRawBlip(&a_blip, &b_blip, &sa, &sb, &sr, &sk, &out, null);
 
 	// Verify by recomputing with the schoolbook path (passing empty scratch_k forces fallback).
 	var sa2: [64]u8 = undefined;
 	var sb2: [64]u8 = undefined;
 	var sr2: [128]u8 = undefined;
 	var out2: [128]u8 = undefined;
-	const n2 = try mulRawBlip(&a_blip, &b_blip, &sa2, &sb2, &sr2, &[_]u8{}, &out2);
+	const n2 = try mulRawBlip(&a_blip, &b_blip, &sa2, &sb2, &sr2, &[_]u8{}, &out2, null);
 	try testing.expectEqualSlices(u8, out2[0..n2], out[0..n]);
 }
 
@@ -1807,7 +1819,7 @@ test "mulRawBlip: i64.max * 2 (overflows i64)" {
 	var sb: [16]u8 = undefined;
 	var sr: [32]u8 = undefined;
 	var out: [32]u8 = undefined;
-	const n = try mulRawBlip(max_blip, two_blip, &sa, &sb, &sr, &[_]u8{}, &out);
+	const n = try mulRawBlip(max_blip, two_blip, &sa, &sb, &sr, &[_]u8{}, &out, null);
 	// Expected: 2 * (2^63 - 1) = 2^64 - 2.
 	// As signed canonical: needs L=9 with leading 0x00.
 	// LE payload: [0xFE, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00]

@@ -403,7 +403,7 @@ fn tier3MulOp(r: *Mp, a: *const Mp, b: *const Mp) ArithError!void {
 		break :blk heap_k.?;
 	};
 
-	const written = try tier3.mulRawBlip(a_bytes, b_bytes, sa, sb, sr, sk, out_buf);
+	const written = try tier3.mulRawBlip(a_bytes, b_bytes, sa, sb, sr, sk, out_buf, r.allocator);
 	try r.setBytes(out_buf[0..written]);
 }
 
