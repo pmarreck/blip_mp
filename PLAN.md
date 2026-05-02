@@ -113,40 +113,55 @@ The honest verdict from M6-3.13/3.14: pure-software NTT in u64 land cannot beat 
 
 Modular butterflies on aarch64 NEON: pack 2 × u64 lanes per `uint64x2_t`, do `add`/`sub`/`mul` lane-wise, lower `% P` to magic-number multiply via vectorized `umulh` (the high-half multiply). Expected 2-3× on the inner loop (more if we pack 4 × u32 by halving the prime).
 
-- [ ] **M6-4-A.1** Bench harness: a microbench that times *only* the butterfly inner loop (no FFT setup overhead). Establishes a per-op baseline for `mulModP` (~5 ns each on M4) and a NEON target (≤ 2 ns each).
-- [ ] **M6-4-A.2** Vectorized `addModP_x2(uint64x2_t a, uint64x2_t b) → uint64x2_t` + `subModP_x2`. Test: lane-by-lane equivalent to scalar.
-- [ ] **M6-4-A.3** Vectorized `mulModP_x2` via NEON `mul` + `umulh` + magic-constant `umlsl`/`umulh` chain. Test: 100K random pairs, lane-equivalent to scalar.
-- [ ] **M6-4-A.4** Vectorized butterfly pair: `(u, t) = (a[i] ± a[i+half] · w)` for two indices at once. Tricky case: paired indices may not be adjacent depending on `len`. Strategy: at level len ≥ 4, butterflies within one (i..i+half) block are independent — pack them.
-- [ ] **M6-4-A.5** Replace inner loop in `nttWithTwiddles` with vectorized version. Cross-check via `ntt-round-trip` test + GMP cross-check at FFT-enabled sizes.
-- [ ] **M6-4-A.6** Bench. Target: 32K-bit FFT path drops from 191K ns to ≤ 95K ns (matches Toom-3). If hit, lower FFT_THRESHOLD; if exceeded, raise it.
+- [x] **M6-4-A.1** Microbench harness `tests/benchmark/fft_microbench.zig` (2026-05-02 EST)
+- [x] **M6-4-A.2** Vectorized `addModP_x2` + `subModP_x2`. **1.66–1.85× lane speedup.** (2026-05-02 EST)
+- [x] **M6-4-A.3** Vectorized `mulModP_x2` (hybrid scalar-inside-vector — exploits M4's dual scalar mul pipes alongside NEON). **1.34–1.43× lane speedup.** (2026-05-02 EST)
+- [x] **M6-4-A.4** Vectorized butterfly `nttWithTwiddlesVec` — paired (k, k+1) lanes when half ≥ 2. (2026-05-02 EST)
+- [x] **M6-4-A.5** Production `mulMagnitudes` switched to vec NTT. 8240/8240 GMP pass. (2026-05-02 EST)
+- [x] **M6-4-A.6** Bench: 32K-bit FFT path 191K → 135K ns (1.40× full-FFT). Did NOT hit ≤ 95K target — Toom-3 still wins at 117K ns. The remaining 13–15% needs algorithmic restructuring or alloc-elimination, not more SIMD. (2026-05-02 EST)
 
-Expected gain alone: 1.5–2.5× on the FFT path. Suffices to TIE Toom-3, not yet beat it.
+Actual gain: 1.40× full-FFT speedup. Closed Toom-3 gap from 1.93× to 1.15×. Substantial but not flipped.
 
-#### M6-4-B — Montgomery reduction with deferred final reduction
+#### M6-4-B — Montgomery reduction (scaffolding shipped, integrates SLOWER on M4)
 
-Unlike Barrett, Montgomery defers the conditional subtract across multiple multiplies, paying the reduction cost only when the result needs to leave Montgomery form. In the NTT inner loop, both inputs and outputs are already in Montgomery form, so the per-multiply cost drops to one `umulh` + one `mul` + one `add` + one masked subtract (saved across many iterations).
+- [x] **M6-4-B.1–B.4** `to_mont` / `from_mont` / `montMul` (scalar) + `montMul_x2` (pure-NEON, no umulh) + `nttWithTwiddlesMontVec`. Bit-equivalent vs `(a*b)%P` on 100K random. (2026-05-02 EST)
+- [x] **M6-4-B.5** Bench: Mont microbench WINS (0.70 vs 0.76 ns/vec_op for `mulModP_x2`), but integrates SLOWER (39K vs 35K ns/pass at N=8192). Mp.mul 32K-bit Mont-FFT: 152K ns (REGRESSES from 135K). (2026-05-02 EST)
 
-- [ ] **M6-4-B.1** Helper: `to_mont(x) = x · R mod P` and `from_mont(x) = x · R⁻¹ mod P` where R = 2^32. Test: round-trip identity on 100K random.
-- [ ] **M6-4-B.2** `mulMont(a_mont, b_mont) → c_mont` with deferred reduction (Montgomery's CIOS form). Test: equivalent to `mulModP(from_mont(a), from_mont(b))`.
-- [ ] **M6-4-B.3** Convert NTT entry/exit to/from Montgomery form ONCE per call (not per butterfly). All inner-loop work stays in Mont form.
-- [ ] **M6-4-B.4** Combined with M6-4-A: vectorized `mulMont_x2`. Test: lane-equivalent.
-- [ ] **M6-4-B.5** Bench. Combined Mont + SIMD target: 32K-bit FFT ≤ 50K ns (better than Toom-3's 108K).
+Root cause (asm-verified): on M4, pure-NEON Mont moves all work onto NEON pipe, starving the dual scalar mul pipes that the existing `mulModP_x2` exploits. Mont kept as scaffolding for x86_64 / different M-series silicon revisions.
 
-Expected combined gain: 3-5× on the FFT path. Now FFT decisively wins above ~16K-bit.
+Actual gain: NEGATIVE on M4. Counter-intuitive but rigorously demonstrated.
 
-#### M6-4-C — Stockham auto-sort (skip the bit-reversal pass)
+#### M6-4-C — Stockham auto-sort (scaffolding shipped, ~9% per pass / ~1-2% per full mul)
 
-Bit-reversal permutation is O(N) memory shuffles with poor cache behavior. Stockham's variant interleaves the permutation INTO the butterflies, doubling the working memory but eliminating the separate pass.
+- [x] **M6-4-C.1** `nttStockham` (scalar) + `nttStockhamVec` (vec). Bit-exact match across N in {2..8192}. (2026-05-02 EST)
+- [x] **M6-4-C.2** Production NOT switched — pattern preserved. Stockham per-pass 32.7K vs 35.7K vec-CT (1.10×). (2026-05-02 EST)
+- [x] **M6-4-C.3** Bench: bit-reversal at N=8192 cost only ~3K ns/pass not the projected ~8K. OOO + L1 prefetch hide most random-access cost on M-series. (2026-05-02 EST)
 
-- [ ] **M6-4-C.1** `nttStockham` — out-of-place butterflies with implicit bit-reversal. Test: produces same output as `nttWithTwiddles` (after both have entry+exit aligned).
-- [ ] **M6-4-C.2** Replace nttWithTwiddles call sites with nttStockham in the production path (mulMagnitudes / mulMagnitudesCRT). Verify all tests pass.
-- [ ] **M6-4-C.3** Bench. Expected: marginal ~5-10% on top of A+B, but at no correctness risk.
+Actual gain: ~9% per NTT pass, ~1-2% per full mul.
 
-#### M6-4-D — Once A+B+C land: production enablement
+#### M6-4-D — Radix-4 NTT (scaffolding + critical pedagogical correction)
 
-- [ ] **M6-4-D.1** Calibrate FFT_THRESHOLD and FFT_CRT_THRESHOLD via bench. Set each to the smallest size where it beats Toom-3.
-- [ ] **M6-4-D.2** Re-run 8240 GMP cross-check with FFT enabled at the new thresholds. Confirm bit-identical.
-- [ ] **M6-4-D.3** Update README.md and RESULTS.md with the new headline numbers.
+- [x] **M6-4-D** `nttRadix4Vec` — radix-4 mixed (with one radix-2 pass when log2(N) is odd). Bit-exact vs vec-CT. **CRITICAL FINDING:** the classical 25% radix-4 mult-reduction comes from FLOATING-POINT FFT lit where multiplication by `i` is FREE. In NTT, `i = ω_4 mod p` is a generic non-trivial constant — full mulModP. Mult counts at N=8192: radix-2 = 53,248; radix-4 mixed = 53,248 (IDENTICAL). Bench: 36.7K vs 37.4K (1.02×, within noise). (2026-05-02 EST)
+
+Actual gain: ~0%. Standard FFT trade-off literature corrected for NTT.
+
+#### M6-4 cumulative status at 32K-bit Mp.mul (2026-05-02 EST)
+
+```
+Pre-SIMD (M6-3.13 baseline):    191K ns
+Post-A.5 (vec NTT in production): 135K ns  (1.40× speedup)
+Post-A.6 / B / C / D scaffolds:  135K ns  (no production change)
+Toom-3 baseline:                 117K ns  ← still wins by 13–15%
+```
+
+Closed FFT-vs-Toom-3 gap from 1.93× to 1.15×. Substantial but not flipped.
+
+#### M6-4-E — Remaining levers to flip the ratio (future work)
+
+- [ ] **M6-4-E.1** Caller-supplied scratch — eliminate per-call alloc/free of `pa`/`pb`/`tw_fwd`/`tw_inv` (4 allocs × ~1-2K ns = 4-8K ns saved). Brings 32K-bit FFT from 135K → ~127K ns.
+- [ ] **M6-4-E.2** Wire Stockham into production with caller-supplied scratch (avoids the extra-buffer regression that diluted M6-4-C.2). Brings to ~123K ns.
+- [ ] **M6-4-E.3** Hand-scheduled aarch64 inline asm for the butterfly inner loop — schedules mul/umulh on scalar pipes WHILE NEON handles add/sub/load/store. Architecturally what M4 wants, fragile (M-series-specific). Possibly closes remaining 6-9 K ns.
+- [ ] **M6-4-E.4** OR accept Toom-3 as production winner in supported range. FFT primitives essential when extending past Toom-3's natural crossover (~512K-bit+).
 
 ### Sequencing decision (revised after empirical M6-3 finding)
 
