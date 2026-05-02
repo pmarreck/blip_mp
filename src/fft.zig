@@ -163,6 +163,65 @@ pub fn ntt(a: []u64, invert: bool) void {
 	}
 }
 
+// ── Byte-magnitude FFT multiplication ───────────────────────────────────────
+
+/// Maximum combined operand length (a.len + b.len) supportable by the
+/// single-prime variant. Constraint: at NTT length N (next pow2 ≥ a.len+b.len),
+/// each pointwise convolution sum is ≤ N · 255² and must fit in one residue
+/// mod P. Worst case: a_len = b_len, max_sum = min(a_len, b_len) · 255² < P.
+/// Empirically: at a_len = b_len = 4096, max_sum ≈ 2.66·10⁸ < P ≈ 9.98·10⁸.
+/// Add a comfortable margin: cap at a_len + b_len ≤ 14000.
+pub const MAX_FFT_COMBINED_LEN: usize = 14000;
+
+/// Multiply two unsigned magnitudes (little-endian byte arrays) via NTT.
+/// Returns the byte length of the product (trailing zeros trimmed).
+///
+/// Preconditions:
+///   - a.len + b.len ≤ MAX_FFT_COMBINED_LEN
+///   - out.len ≥ a.len + b.len
+///
+/// Algorithm: zero-pad both operands to power-of-2 length N, forward-NTT,
+/// pointwise-multiply mod P, inverse-NTT, then byte-carry-propagate the
+/// resulting digit-sum array back to bytes.
+pub fn mulMagnitudes(allocator: std.mem.Allocator, a: []const u8, b: []const u8, out: []u8) !usize {
+	if (a.len == 0 or b.len == 0) return 0;
+	const need_len = a.len + b.len;
+	std.debug.assert(out.len >= need_len);
+	std.debug.assert(need_len <= MAX_FFT_COMBINED_LEN);
+
+	var N: usize = 1;
+	while (N < need_len) N <<= 1;
+
+	const pa = try allocator.alloc(u64, N);
+	defer allocator.free(pa);
+	const pb = try allocator.alloc(u64, N);
+	defer allocator.free(pb);
+
+	@memset(pa, 0);
+	@memset(pb, 0);
+	for (a, 0..) |byte, i| pa[i] = byte;
+	for (b, 0..) |byte, i| pb[i] = byte;
+
+	ntt(pa, false);
+	ntt(pb, false);
+	for (0..N) |i| pa[i] = mulModP(pa[i], pb[i]);
+	ntt(pa, true);
+
+	// Carry propagation through the byte-output buffer.
+	var carry: u64 = 0;
+	var i: usize = 0;
+	while (i < need_len) : (i += 1) {
+		const val = pa[i] + carry;
+		out[i] = @truncate(val & 0xFF);
+		carry = val >> 8;
+	}
+	std.debug.assert(carry == 0);
+
+	var len = need_len;
+	while (len > 0 and out[len - 1] == 0) len -= 1;
+	return len;
+}
+
 // ── Tests ───────────────────────────────────────────────────────────────────
 
 const testing = std.testing;
@@ -244,6 +303,101 @@ test "ntt round-trip: invNtt(ntt(a)) == a" {
 		ntt(a, false);
 		ntt(a, true);
 		try testing.expectEqualSlices(u64, orig, a);
+	}
+}
+
+// Schoolbook unsigned multiply: little-endian byte arrays. Returns out length.
+fn schoolbookMul(a: []const u8, b: []const u8, out: []u8) usize {
+	@memset(out[0 .. a.len + b.len], 0);
+	for (a, 0..) |av, i| {
+		var carry: u32 = 0;
+		for (b, 0..) |bv, j| {
+			const cur: u32 = @as(u32, out[i + j]) + @as(u32, av) * @as(u32, bv) + carry;
+			out[i + j] = @truncate(cur & 0xFF);
+			carry = cur >> 8;
+		}
+		out[i + b.len] = @truncate(carry);
+	}
+	var len = a.len + b.len;
+	while (len > 0 and out[len - 1] == 0) len -= 1;
+	return len;
+}
+
+test "mulMagnitudes: matches schoolbook on small known cases" {
+	const cases = [_]struct {
+		a: []const u8,
+		b: []const u8,
+	}{
+		.{ .a = &.{1}, .b = &.{1} },
+		.{ .a = &.{0xFF}, .b = &.{0xFF} },
+		.{ .a = &.{ 0x12, 0x34 }, .b = &.{ 0x56, 0x78 } },
+		.{ .a = &.{ 0xFF, 0xFF, 0xFF, 0xFF }, .b = &.{ 0xFF, 0xFF, 0xFF, 0xFF } },
+	};
+	for (cases) |c| {
+		var ref_buf: [16]u8 = undefined;
+		var fft_buf: [16]u8 = undefined;
+		const ref_len = schoolbookMul(c.a, c.b, &ref_buf);
+		const fft_len = try mulMagnitudes(testing.allocator, c.a, c.b, &fft_buf);
+		try testing.expectEqual(ref_len, fft_len);
+		try testing.expectEqualSlices(u8, ref_buf[0..ref_len], fft_buf[0..fft_len]);
+	}
+}
+
+test "mulMagnitudes: matches schoolbook on random sizes 64..2048 bytes" {
+	var prng = std.Random.DefaultPrng.init(0xCAFEBABEDEADBEEF);
+	const rand = prng.random();
+	const sizes = [_]usize{ 64, 128, 256, 512, 1024, 2048 };
+	for (sizes) |sz| {
+		const a = try testing.allocator.alloc(u8, sz);
+		defer testing.allocator.free(a);
+		const b = try testing.allocator.alloc(u8, sz);
+		defer testing.allocator.free(b);
+		const ref = try testing.allocator.alloc(u8, 2 * sz);
+		defer testing.allocator.free(ref);
+		const got = try testing.allocator.alloc(u8, 2 * sz);
+		defer testing.allocator.free(got);
+
+		for (a) |*x| x.* = rand.int(u8);
+		for (b) |*x| x.* = rand.int(u8);
+		// Ensure top bytes are non-zero so neither operand is "shorter than declared".
+		a[sz - 1] = (a[sz - 1] | 0x80);
+		b[sz - 1] = (b[sz - 1] | 0x80);
+
+		const ref_len = schoolbookMul(a, b, ref);
+		const got_len = try mulMagnitudes(testing.allocator, a, b, got);
+		try testing.expectEqual(ref_len, got_len);
+		try testing.expectEqualSlices(u8, ref[0..ref_len], got[0..got_len]);
+	}
+}
+
+test "mulMagnitudes: unequal operand lengths" {
+	var prng = std.Random.DefaultPrng.init(0x1234567890ABCDEF);
+	const rand = prng.random();
+	const pairs = [_]struct { a: usize, b: usize }{
+		.{ .a = 100, .b = 50 },
+		.{ .a = 1, .b = 4096 },
+		.{ .a = 4096, .b = 1 },
+		.{ .a = 3000, .b = 1500 },
+	};
+	for (pairs) |p| {
+		const a = try testing.allocator.alloc(u8, p.a);
+		defer testing.allocator.free(a);
+		const b = try testing.allocator.alloc(u8, p.b);
+		defer testing.allocator.free(b);
+		const ref = try testing.allocator.alloc(u8, p.a + p.b);
+		defer testing.allocator.free(ref);
+		const got = try testing.allocator.alloc(u8, p.a + p.b);
+		defer testing.allocator.free(got);
+
+		for (a) |*x| x.* = rand.int(u8);
+		for (b) |*x| x.* = rand.int(u8);
+		a[p.a - 1] |= 0x80;
+		b[p.b - 1] |= 0x80;
+
+		const ref_len = schoolbookMul(a, b, ref);
+		const got_len = try mulMagnitudes(testing.allocator, a, b, got);
+		try testing.expectEqual(ref_len, got_len);
+		try testing.expectEqualSlices(u8, ref[0..ref_len], got[0..got_len]);
 	}
 }
 
