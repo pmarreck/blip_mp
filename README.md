@@ -53,7 +53,7 @@ Apple Silicon (M-series), aarch64-darwin, Zig 0.16.0 ReleaseFast, libc malloc.
 We're slower than GMP at:
 - **128–2048 bit addition** (0.36–0.79× of GMP). Bookkeeping overhead in our `tier3Op` dominates at small sizes; closing the gap is implementation polish, not algorithm.
 - **128–256 bit multiplication** (0.40–0.67×). Same per-op overhead.
-- **8192+ bit multiplication** (0.52–0.72×). **GMP uses Schönhage-Strassen FFT mul; we don't yet.** This is the only place where GMP has a fundamentally better algorithm. See roadmap.
+- **8192+ bit multiplication** (0.52–0.72×). GMP uses Schönhage-Strassen FFT mul. We have a full pure-Zig FFT stack (single-prime NTT + two-prime CRT + NEON-SIMD butterflies) but it's currently gated off in production — even with the 1.40× speedup from vectorization (32K-bit FFT path: 191K → 135K ns), Toom-3 still wins at 117K ns. 13–15% gap remaining; M6-4-E ladder in PLAN.md targets the alloc-elimination + Stockham + inline-asm levers needed to flip it.
 
 ### Surprise: GMP's hand-tuned aarch64 asm gives ~0% advantage on Apple Silicon
 
@@ -121,7 +121,7 @@ Full details in [`CODE_MINIMAP.md`](CODE_MINIMAP.md), benchmark history in [`BEN
 **What this library is:** a research-grade arbitrary-precision integer library that validates the BLIP-storage paradigm and beats GMP at common sizes on Apple Silicon. Pure Zig, no asm, no LGPL constraint.
 
 **What it isn't (yet):**
-- **No FFT multiplication** — at ≥ 8K-bit operand sizes, GMP's Schönhage-Strassen wins. We have Karatsuba + Toom-3 only. FFT is the next major feature.
+- **FFT multiplication is correctness-shipped but gated off** — full single-prime NTT + two-prime CRT + NEON-SIMD vectorized butterflies live in `src/fft.zig`, all bit-identical to GMP across 8240/8240 cross-checks at sizes up to 256K-bit. But constant factors keep Toom-3 ahead at every operand size in our supported range (M-series-specific finding: pure-NEON Montgomery integrates slower than the existing scalar-inside-vector form because it crowds the NEON pipe and starves M4's dual scalar mul pipes). The 13–15% remaining gap needs alloc-elimination + inline asm, planned in M6-4-E.
 - **No division/modulo** — only add, sub, mul implemented. (`mpz_div`, `mpz_mod`, `mpz_powm` not yet.)
 - **Single platform validated** — numbers above are all aarch64-darwin (Apple M-series). x86_64 may shift the picture, especially around the asm-vs-clang result.
 - **No C FFI yet** — public surface is Zig-only. Adding `include/blip_mp.h` is a clear extension.
@@ -138,17 +138,17 @@ Full details in [`CODE_MINIMAP.md`](CODE_MINIMAP.md), benchmark history in [`BEN
 
 **In priority order:**
 
-1. **Schönhage-Strassen FFT multiplication** (~500–1000 lines pure Zig). Closes the 8K+ bit mul gap to GMP. This is the single biggest remaining gap — at 32K-bit mul we're 1.93× behind purely on this algorithmic deficit. Implementing as a TDD ladder: NTT primitives → modular arithmetic → butterfly → bit-reversal → carry propagation → integration.
+1. **Finish the FFT-vs-Toom-3 flip** (M6-4-E in PLAN.md). The FFT primitives, CRT extension, and NEON-SIMD butterfly are all shipped and correctness-validated; closed Toom-3 gap from 1.93× to 1.15×. Remaining 13–15% needs caller-supplied scratch (eliminates 4 per-call allocs ≈ 6–9K ns), wiring Stockham into production, and possibly hand-scheduled aarch64 inline asm for the butterfly inner loop.
 
 2. **Tighter `tier3Op` bookkeeping** for 128–2048 bit add. Closes the small-add gap (currently 0.36–0.79× of GMP). Pure refactoring — fold `bytes()` indirection, aliasing check, ensureHeapCapacity into a single inline path with size-specialized variants. Probably ~half-day of work.
 
-3. **Toom-Cook 4-way** as a step between Toom-3 and FFT for 4K-16K bit mul. Modest expected gain.
+3. **Cross-platform validation on x86_64 Linux + Windows.** Two M-series-specific findings need verification on x86_64: (a) "GMP asm gives ~0% on M-series, AVX-512 may shift it" (M5-5); (b) "pure-NEON Montgomery loses to scalar-inside-vector because of M4's dual scalar mul pipes" (M6-4-A.6) — different scheduler may flip this.
 
 4. **Division and modular operations** — `Mp.div`, `Mp.mod`, `Mp.powm`. Required for serious crypto applications.
 
-5. **Cross-platform validation** on x86_64 Linux + Windows. The "asm gives 0%" result is M-series-specific; AVX-512 may shift it.
+5. **C FFI header** (`include/blip_mp.h`) for downstream consumers.
 
-6. **C FFI header** (`include/blip_mp.h`) for downstream consumers.
+6. **Toom-Cook 4-way** for 4K-16K bit mul. Deprioritized — its modest 15-30% gain isn't worth the implementation cost while FFT remains the headliner. M6-2.1 + M6-2.2 helpers (`divExactBy5`, `mulSmallSignedConst`) are in tier3.zig as future-work building blocks.
 
 7. **`hyperfine` integration** in `./bm` for proper statistical benchmark aggregation. Current numbers are 3-run hand medians.
 
