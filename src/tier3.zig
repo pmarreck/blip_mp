@@ -763,6 +763,37 @@ pub fn divExactBy3(a: []u8, a_len: usize) usize {
 	return n;
 }
 
+/// Multiply a sign-magnitude value by a small unsigned constant c (0..255).
+/// Returns the new (sign, len) pair; output magnitude in `out`.
+/// `c == 0` zeroes the result. Sign-magnitude `0` (sign=0) absorbs any c.
+pub fn mulSmallSignedConst(in: SM, mag: []const u8, c: u8, out: []u8) SM {
+	if (in.sign == 0 or c == 0) return .{ .sign = 0, .len = 0 };
+	const new_len = mulSmallConst(mag, in.len, c, out);
+	return .{ .sign = in.sign, .len = new_len };
+}
+
+/// In-place exact division by 5 (caller guarantees a is divisible by 5).
+/// Hensel division: 5⁻¹ mod 256 = 0xCD (since 5 * 0xCD = 1025 ≡ 1 mod 256).
+/// Used by Toom-4 interpolation.
+pub fn divExactBy5(a: []u8, a_len: usize) usize {
+	const inv5: u8 = 0xCD;
+	var borrow: u16 = 0;
+	var i: usize = 0;
+	while (i < a_len) : (i += 1) {
+		const cur: i32 = @as(i32, a[i]) - @as(i32, @intCast(borrow));
+		const cur_low: u8 = @truncate(@as(u32, @bitCast(cur)) & 0xFF);
+		const q_byte: u8 = @truncate(@as(u32, cur_low) *% @as(u32, inv5) & 0xFF);
+		a[i] = q_byte;
+		const prod: u16 = @as(u16, q_byte) * 5;
+		var new_borrow: u16 = prod >> 8;
+		if (cur < 0) new_borrow += 1;
+		borrow = new_borrow;
+	}
+	var n = a_len;
+	while (n > 0 and a[n - 1] == 0) n -= 1;
+	return n;
+}
+
 /// Compare two unsigned LE byte arrays. Returns -1/0/+1.
 fn cmpUnsignedLE(a: []const u8, a_len: usize, b: []const u8, b_len: usize) i8 {
 	if (a_len != b_len) return if (a_len > b_len) 1 else -1;
@@ -1644,6 +1675,73 @@ test "mulSmallConst: byte-array * 3" {
 	try testing.expectEqual(@as(u8, 0xFF), out[0]);
 	try testing.expectEqual(@as(u8, 0xFF), out[1]);
 	try testing.expectEqual(@as(u8, 0xFF), out[2]);
+}
+
+test "divExactBy5: round-trip" {
+	// Cases with no trailing zeros (mulSmallConst trims, so round-trip
+	// only round-trips canonical values).
+	const cases = [_][]const u8{
+		&[_]u8{ 0xFF, 0xFF, 0xFF, 0xFF },
+		&[_]u8{ 0x12, 0x34, 0x56, 0x78 },
+		&[_]u8{0x55},
+		&[_]u8{ 0xCD, 0xCD, 0xCD, 0xCD, 0xCD, 0xCD, 0xCD, 0xCD, 0xCD, 0xCD },
+		&[_]u8{ 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09 },
+	};
+	for (cases) |a| {
+		var prod_buf: [16]u8 = undefined;
+		const prod_len = mulSmallConst(a, a.len, 5, &prod_buf);
+		const back_len = divExactBy5(&prod_buf, prod_len);
+		try testing.expectEqualSlices(u8, a, prod_buf[0..back_len]);
+	}
+}
+
+test "mulSmallSignedConst: positive × positive" {
+	const mag = [_]u8{ 0xC8, 0x00 }; // 200 unsigned
+	var out: [4]u8 = undefined;
+	const r = mulSmallSignedConst(.{ .sign = 1, .len = 2 }, &mag, 3, &out);
+	// 200 * 3 = 600 = 0x258
+	try testing.expectEqual(@as(i8, 1), r.sign);
+	try testing.expectEqual(@as(usize, 2), r.len);
+	try testing.expectEqual(@as(u8, 0x58), out[0]);
+	try testing.expectEqual(@as(u8, 0x02), out[1]);
+}
+
+test "mulSmallSignedConst: negative × positive" {
+	const mag = [_]u8{0x32}; // 50
+	var out: [4]u8 = undefined;
+	const r = mulSmallSignedConst(.{ .sign = -1, .len = 1 }, &mag, 4, &out);
+	// -50 * 4 = -200, magnitude 200 = 0xC8
+	try testing.expectEqual(@as(i8, -1), r.sign);
+	try testing.expectEqual(@as(usize, 1), r.len);
+	try testing.expectEqual(@as(u8, 0xC8), out[0]);
+}
+
+test "mulSmallSignedConst: zero result" {
+	const mag = [_]u8{0x05};
+	var out: [4]u8 = undefined;
+	const r = mulSmallSignedConst(.{ .sign = 1, .len = 1 }, &mag, 0, &out);
+	try testing.expectEqual(@as(i8, 0), r.sign);
+	try testing.expectEqual(@as(usize, 0), r.len);
+}
+
+test "mulSmallSignedConst: zero magnitude" {
+	var out: [4]u8 = undefined;
+	const r = mulSmallSignedConst(.{ .sign = 0, .len = 0 }, &[_]u8{}, 5, &out);
+	try testing.expectEqual(@as(i8, 0), r.sign);
+	try testing.expectEqual(@as(usize, 0), r.len);
+}
+
+test "divExactBy5: known small values" {
+	// 25 / 5 = 5
+	var a = [_]u8{0x19};
+	const n1 = divExactBy5(&a, 1);
+	try testing.expectEqual(@as(usize, 1), n1);
+	try testing.expectEqual(@as(u8, 0x05), a[0]);
+	// 100 / 5 = 20
+	var b = [_]u8{0x64};
+	const n2 = divExactBy5(&b, 1);
+	try testing.expectEqual(@as(usize, 1), n2);
+	try testing.expectEqual(@as(u8, 0x14), b[0]);
 }
 
 test "divExactBy3: round-trip" {
