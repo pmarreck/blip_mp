@@ -17,29 +17,108 @@ const std = @import("std");
 const encoding = @import("encoding.zig");
 const fft = @import("fft.zig");
 
-// FFT dispatch threshold (bytes per operand). Currently set above
-// MAX_FFT_COMBINED_LEN/2, effectively DISABLING FFT in production.
+// FFT dispatch threshold (bytes per operand). Operand payload-byte count
+// at-or-above which the production multiply path uses the NTT-based
+// `fft.mulMagnitudesWithScratch` instead of Toom-3 / Karatsuba / schoolbook.
 //
-// Why disabled: bench at 32K-bit shows pure-Zig NTT FFT runs at 191K ns/op
-// vs Toom-3 at 108K ns (1.77x SLOWER), even after precomputed twiddles cut
-// 410K → 191K. Constant factors dominated by `% P` modular reduction. The
-// single-prime variant caps operand size at ~56K-bit (min(a,b) * 65025 < P
-// ≈ 9.98e8 → max ~15350 bytes per operand), and the Toom-3-vs-FFT crossover
-// in our supported range is unfavorable: Toom-3 stays ahead everywhere.
+// Currently DISABLED (99999). Even after M6-4-E.1+E.2 (caller-supplied
+// scratch + Stockham auto-sort wired through `fft_scratch` cache,
+// eliminating per-call alloc/free of 5 large u64 buffers), the FFT path
+// at 32K-bit measures ~128K ns/op vs Toom-3's 119K ns — a ~7-8% gap
+// remains across our entire supported size range:
+//   16K-bit:  Toom-3 39K vs FFT  56K  (FFT 1.43x slower)
+//   32K-bit:  Toom-3 119K vs FFT 128K (FFT 1.08x slower)
+//   49K-bit:  Toom-3 206K vs FFT 258K (FFT 1.25x slower)
+// 65K-bit and up exceed MAX_FFT_COMBINED_LEN=14000 so always use Toom-3.
 //
-// Future work to make FFT production-viable:
-//   (1) Two-prime CRT to extend size range past 56K-bit (asymptotic FFT win
-//       lands well beyond our current cap).
-//   (2) Properly-debugged Barrett or Montgomery reduction for ~2x mulModP
-//       speedup. Hand-rolled Barrett attempt produced wrong results — needs
-//       a unit-test scaffold to debug step-by-step.
-//   (3) SIMD butterflies (NEON on aarch64) for ~2-4x.
-//   (4) Stockham auto-sort to skip the bit-reversal pass entirely.
-//
-// The FFT primitives (modular arith, NTT, mulMagnitudes) are kept and
-// correctness-validated (8240/8240 GMP cross-checks at 24K and 32K bit
-// when temporarily enabled — bit-identical to GMP).
+// E.1+E.2 dropped FFT from 135K → 128K at 32K-bit (a real 4-5% win on
+// the FFT path itself) — see PLAN.md M6-4-E for the remaining levers
+// (E.3: hand-scheduled aarch64 inline asm; E.4: accept Toom-3).
 pub const FFT_THRESHOLD: usize = 99999;
+
+// ── Per-thread FFT scratch cache (M6-4-E.1) ──────────────────────────────────
+//
+// Eliminates the per-call alloc/free of the 5 large u64 buffers FFT
+// multiplication needs (pa, pb, tw_fwd, tw_inv, stockham_scratch). At
+// N=8192 those allocations cost ~4-8 K ns on libc malloc; with caller-
+// supplied scratch we pay that once per thread, never again.
+//
+// The cache holds the largest buffers we've ever requested. Because the
+// 4 "N-sized" buffers and "N/2-sized" twiddle tables compose monotonically,
+// we just track `cached_N` and grow on first miss for a larger size.
+// Any subsequent call with `N <= cached_N` reuses the existing slabs in O(1).
+//
+// Thread-local: each thread has its own cache. No locking. The cost is one
+// `threadlocal` lookup per FFT-eligible mul (single TLS load on aarch64).
+//
+// Allocator: borrowed from the FFT path's `fft_alloc` argument the first
+// time we allocate; reused thereafter. If a different allocator is passed
+// later the cache transparently reallocates — but in practice every caller
+// uses the same `Mp.allocator` for its lifetime.
+const FftScratch = struct {
+	cached_N: usize = 0,
+	pa: []u64 = &.{},
+	pb: []u64 = &.{},
+	tw_fwd: []u64 = &.{},
+	tw_inv: []u64 = &.{},
+	stockham: []u64 = &.{},
+	owner_alloc: ?std.mem.Allocator = null,
+
+	fn ensureCapacity(self: *FftScratch, allocator: std.mem.Allocator, N: usize) !void {
+		if (self.cached_N >= N and self.owner_alloc != null) {
+			// Cache hit. Allocator identity is checked on alloc to avoid
+			// freeing under the wrong allocator below.
+			if (allocatorEq(self.owner_alloc.?, allocator)) return;
+			// Allocator changed — release under the old one and re-alloc.
+			self.releaseUnsafe();
+		}
+		// Need to (re)allocate with the new size.
+		if (self.owner_alloc) |old_alloc| {
+			old_alloc.free(self.pa);
+			old_alloc.free(self.pb);
+			old_alloc.free(self.tw_fwd);
+			old_alloc.free(self.tw_inv);
+			old_alloc.free(self.stockham);
+		}
+		self.pa = try allocator.alloc(u64, N);
+		errdefer allocator.free(self.pa);
+		self.pb = try allocator.alloc(u64, N);
+		errdefer allocator.free(self.pb);
+		self.tw_fwd = try allocator.alloc(u64, N / 2);
+		errdefer allocator.free(self.tw_fwd);
+		self.tw_inv = try allocator.alloc(u64, N / 2);
+		errdefer allocator.free(self.tw_inv);
+		self.stockham = try allocator.alloc(u64, N);
+		self.cached_N = N;
+		self.owner_alloc = allocator;
+	}
+
+	fn releaseUnsafe(self: *FftScratch) void {
+		if (self.owner_alloc) |a| {
+			a.free(self.pa);
+			a.free(self.pb);
+			a.free(self.tw_fwd);
+			a.free(self.tw_inv);
+			a.free(self.stockham);
+		}
+		self.* = .{};
+	}
+};
+
+inline fn allocatorEq(a: std.mem.Allocator, b: std.mem.Allocator) bool {
+	return a.ptr == b.ptr and a.vtable == b.vtable;
+}
+
+threadlocal var fft_scratch: FftScratch = .{};
+
+/// Release any per-thread FFT scratch buffers held by this thread.
+/// Optional: long-lived processes that want to reclaim memory after a
+/// burst of large multiplications can call this. Tests use it to satisfy
+/// leak detectors when the production code allocates through a tracked
+/// allocator. Idempotent.
+pub fn releaseFftScratch() void {
+	fft_scratch.releaseUnsafe();
+}
 
 // Two-prime CRT FFT dispatch threshold (bytes per operand). Lifts the
 // per-operand cap from ~7K bytes (single-prime) to ~32K bytes by running the
@@ -1274,7 +1353,23 @@ pub fn mulRawBlip(
 	if (can_fft_crt) {
 		_ = try fft.mulMagnitudesCRT(fft_alloc.?, scratch_a[0..a_pay.len], scratch_b[0..b_pay.len], scratch_r[0..r_len]);
 	} else if (can_fft) {
-		_ = try fft.mulMagnitudes(fft_alloc.?, scratch_a[0..a_pay.len], scratch_b[0..b_pay.len], scratch_r[0..r_len]);
+		// E.1 + E.2 — use cached caller-supplied scratch. First call per
+		// thread allocs the 5 buffers under fft_alloc; every subsequent
+		// call with N <= cached_N reuses them. Saves 4-8 K ns/mul at N=8192.
+		const need_len_fft = a_pay.len + b_pay.len;
+		var N_fft: usize = 1;
+		while (N_fft < need_len_fft) N_fft <<= 1;
+		try fft_scratch.ensureCapacity(fft_alloc.?, N_fft);
+		_ = fft.mulMagnitudesWithScratch(
+			scratch_a[0..a_pay.len],
+			scratch_b[0..b_pay.len],
+			scratch_r[0..r_len],
+			fft_scratch.pa,
+			fft_scratch.pb,
+			fft_scratch.tw_fwd,
+			fft_scratch.tw_inv,
+			fft_scratch.stockham,
+		);
 	} else if (a_pay.len == b_pay.len and a_pay.len >= TOOM3_THRESHOLD and scratch_k.len >= toom3ScratchNeed(a_pay.len)) {
 		@memset(scratch_r[0..r_len], 0);
 		mulToom3(scratch_a[0..a_pay.len], scratch_b[0..b_pay.len], scratch_r[0..r_len], scratch_k);

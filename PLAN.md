@@ -158,10 +158,59 @@ Closed FFT-vs-Toom-3 gap from 1.93× to 1.15×. Substantial but not flipped.
 
 #### M6-4-E — Remaining levers to flip the ratio (future work)
 
-- [ ] **M6-4-E.1** Caller-supplied scratch — eliminate per-call alloc/free of `pa`/`pb`/`tw_fwd`/`tw_inv` (4 allocs × ~1-2K ns = 4-8K ns saved). Brings 32K-bit FFT from 135K → ~127K ns.
-- [ ] **M6-4-E.2** Wire Stockham into production with caller-supplied scratch (avoids the extra-buffer regression that diluted M6-4-C.2). Brings to ~123K ns.
-- [ ] **M6-4-E.3** Hand-scheduled aarch64 inline asm for the butterfly inner loop — schedules mul/umulh on scalar pipes WHILE NEON handles add/sub/load/store. Architecturally what M4 wants, fragile (M-series-specific). Possibly closes remaining 6-9 K ns.
+- [x] **M6-4-E.1** Caller-supplied scratch via thread-local FftScratch cache in tier3.zig. mulMagnitudesWithScratch shipped. (2026-05-02 EST)
+- [x] **M6-4-E.2** Stockham wired into production via mulMagnitudesWithScratch. **32K-bit Mp.mul: 135K → 128K ns. FFT-vs-Toom-3 gap 1.15× → 1.07-1.08×.** Honest finding: libc malloc on M4 costs ~700-900 ns per call, not the projected 1-2K ns; the rest of the win came from finally uncovering Stockham's per-pass +9% × 3 passes. (2026-05-02 EST)
+- [ ] **M6-4-E.3** Hand-scheduled aarch64 inline asm for the butterfly inner loop — schedules mul/umulh on scalar pipes WHILE NEON handles add/sub/load/store. Architecturally what M4 wants, fragile (M-series-specific). ~9-10K ns gap remaining; this is the last lever.
 - [ ] **M6-4-E.4** OR accept Toom-3 as production winner in supported range. FFT primitives essential when extending past Toom-3's natural crossover (~512K-bit+).
+
+## Milestone 7 — Division, modulo, and modular exponentiation
+
+The big missing arithmetic feature. Required for serious crypto applications (RSA, DH, ECC scalar operations). Same correctness-first discipline: every result bit-identical to GMP's `mpz_tdiv_qr` / `mpz_mod` / `mpz_powm`, validated via cross-check.
+
+**Goal:** ship `Mp.div` (truncated), `Mp.mod`, `Mp.divMod`, `Mp.powm` with at least competitive performance vs GMP across the typical operand range. Same byte-direct paradigm as add/sub/mul — read u64/u128 chunks from BLIP payload bytes, write canonical bytes back.
+
+### M7-1 — Tier 0/1 division (i64 fast path)
+
+- [ ] **M7-1.1** `Mp.divMod_i64` using native `@divTrunc` + `@mod`. Dispatch from `Mp.div`/`Mp.mod` when both operands fit in i64 (which is most accumulator workloads). Test: round-trip vs Zig builtins; sign convention matches GMP's `mpz_tdiv_qr` (truncated, quotient sign = sign(a)*sign(b), remainder sign = sign(a)).
+- [ ] **M7-1.2** Wire into Mp.div / Mp.mod with tier-3 promotion stub (returns `error.NotImplemented` for now). Cross-check `Mp.divMod` vs GMP for 100+ random i64 pairs.
+
+### M7-2 — Tier 3 division by single byte (the foundation)
+
+The classic schoolbook long division reduces to "divide a multi-byte number by a single byte (or single u64) and capture the remainder." Every higher-level division algorithm uses this as its inner loop. Hensel division (already used in `divExactBy3`/`divExactBy5`) handles the EXACT case; we need TRUNCATED division for the general case.
+
+- [ ] **M7-2.1** `divModSingleByte(a: []u8, b: u8) -> { quotient: []u8 (in place), remainder: u8 }`. Schoolbook: `r = 0; for i from high to low: r = r*256 + a[i]; q[i] = r/b; r = r%b`. Test: 100K random (multi-byte dividend × single-byte divisor) pairs vs GMP `mpz_tdiv_qr_ui`.
+- [ ] **M7-2.2** Chunked u64 form `divModSingleU64(a: []u8, b: u64) -> u64 remainder` — read 8 bytes at a time. Test: equivalence to byte-at-a-time.
+- [ ] **M7-2.3** Bench. This is the inner loop everything else uses; it must be fast.
+
+### M7-3 — Tier 3 long division (Knuth Algorithm D)
+
+The general dividend / divisor case where divisor is multi-byte. Knuth Algorithm D in TAOCP volume 2 §4.3.1 is the standard reference (essentially: normalize the divisor so its high byte ≥ 128, do schoolbook quotient digit estimation per quotient byte using top-byte-pair / top-byte, correct off-by-one with multi-byte multiply-and-subtract).
+
+- [ ] **M7-3.1** `divModKnuth(dividend: []u8, divisor: []u8, q: []u8, r: []u8) -> { q_len, r_len }`. Test: cross-check against GMP `mpz_tdiv_qr` for 1K random pairs across {64, 128, 256, 512, 1024, 2048, 4096} bit dividends and {32, 64, 128, 256, 512} bit divisors.
+- [ ] **M7-3.2** Sign handling — `mpz_tdiv_qr` truncated semantics. Both inputs may be negative. Quotient sign = sign(a) XOR sign(b); remainder sign = sign(a). Test: 8 sign combinations × random sizes.
+- [ ] **M7-3.3** Wire into `Mp.div` / `Mp.mod` / `Mp.divMod` for tier-3 operands. Add to `tests/integration/cross_check.zig` so the 8240-check suite picks up div/mod.
+
+### M7-4 — Modular exponentiation `Mp.powm(base, exp, mod) = base^exp mod mod`
+
+The single most-used bignum operation in real crypto (RSA encrypt/decrypt/sign/verify, DH key exchange, EC scalar multiplication via doubling). Square-and-multiply is the basic algorithm; sliding-window and/or Montgomery's ladder are the standard optimizations.
+
+- [ ] **M7-4.1** Square-and-multiply `Mp.powm` using `Mp.mul` + `Mp.mod` from M7-3. Constant-time variant NOT required for this milestone (we're a numerical library, not a crypto primitive — leave the constant-time variant for a later "secure-mode" pass). Test: cross-check vs GMP `mpz_powm` for 100 random RSA-style triples (base 2048-bit, exp 2048-bit, mod 2048-bit; verify result matches).
+- [ ] **M7-4.2** Sliding-window optimization (window size 4-6) — precomputes a small table of `base^k` for k in {1, 3, 5, ..., 2^w - 1}, scans the exponent in w-bit chunks. Reduces multiplication count by ~25-40%. Test: equivalence to square-and-multiply.
+- [ ] **M7-4.3** Montgomery-form `powm` — reuse the `montMul` infrastructure from M6-4-B. Each multiplication + mod becomes one Montgomery multiplication. Massive win at 1024+ bit. Test: equivalence to non-Mont version.
+- [ ] **M7-4.4** Bench. Compare to `mpz_powm` at RSA-1024, RSA-2048, RSA-3072. Target: within 2× of GMP at all sizes (GMP has decades of `mpn_powm` tuning; getting close is real work).
+
+### M7-5 — Modular inverse `Mp.invMod(a, m) -> a^-1 mod m` (extended Euclidean)
+
+Required to complete the modular-arithmetic surface. Used in RSA private-key derivation (CRT shortcut), elliptic curve point operations.
+
+- [ ] **M7-5.1** Extended Euclidean via Stein's binary GCD variant — works over byte-level data without explicit division (uses shift + sub). Test: cross-check `Mp.invMod` vs GMP `mpz_invert` for 1K random (a, m) pairs where gcd(a,m)=1; confirm `(a · invMod(a, m)) mod m == 1`.
+- [ ] **M7-5.2** Cross-check `mpz_invert`-style behavior on non-coprime inputs (return error / produce 0 — match GMP convention).
+
+### Sequencing for M7
+
+Bottom-up: M7-1 (i64 fast path) → M7-2 (single-byte divisor, the inner loop) → M7-3 (general long division) → M7-4 (powm, the headliner) → M7-5 (invMod, completes the API). Each substep is a single TDD cycle.
+
+Total expected: comparable scope to M3 (tier-3 add/sub/mul), maybe larger because Knuth Algorithm D's quotient-digit-estimation has subtleties.
 
 ### Sequencing decision (revised after empirical M6-3 finding)
 
