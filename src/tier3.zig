@@ -3712,6 +3712,88 @@ test "bench: divModKnuthU64 at 2048-bit / 1024-bit" {
 	);
 }
 
+test "bench: divModKnuthU64 at 4096-bit / 2048-bit" {
+	const allocator = std.testing.allocator;
+	const u_limbs: usize = 64; // 4096 bits
+	const v_limbs: usize = 32; // 2048 bits
+	const iters: usize = 500;
+
+	const u_template = try allocator.alloc(u64, u_limbs);
+	defer allocator.free(u_template);
+	const v_template = try allocator.alloc(u64, v_limbs);
+	defer allocator.free(v_template);
+	var rng = std.Random.DefaultPrng.init(0x4040_4040);
+	const rnd = rng.random();
+	for (u_template) |*p| p.* = rnd.int(u64);
+	for (v_template) |*p| p.* = rnd.int(u64);
+	if (v_template[v_limbs - 1] == 0) v_template[v_limbs - 1] = 0xAAAA_AAAA_AAAA_AAAA;
+	if (u_template[u_limbs - 1] == 0) u_template[u_limbs - 1] = 0xCCCC_CCCC_CCCC_CCCC;
+
+	const u_buf = try allocator.alloc(u64, u_limbs + 1);
+	defer allocator.free(u_buf);
+	const q_buf = try allocator.alloc(u64, u_limbs);
+	defer allocator.free(q_buf);
+	const r_buf = try allocator.alloc(u64, v_limbs);
+	defer allocator.free(r_buf);
+
+	@memcpy(u_buf[0..u_limbs], u_template);
+	u_buf[u_limbs] = 0;
+	_ = divModKnuthU64(u_buf, u_limbs, v_template, v_limbs, q_buf, r_buf);
+
+	const t_start = monoNanos();
+	var i: usize = 0;
+	while (i < iters) : (i += 1) {
+		@memcpy(u_buf[0..u_limbs], u_template);
+		u_buf[u_limbs] = 0;
+		const out = divModKnuthU64(u_buf, u_limbs, v_template, v_limbs, q_buf, r_buf);
+		std.mem.doNotOptimizeAway(&out);
+	}
+	const t_total = monoNanos() - t_start;
+	const ns_per_op = @as(f64, @floatFromInt(t_total)) / @as(f64, @floatFromInt(iters));
+	std.debug.print("\n[bench] divModKnuthU64 4096-bit / 2048-bit: {d:.0} ns/op\n", .{ns_per_op});
+}
+
+test "bench: divModKnuthU64 at 8192-bit / 4096-bit" {
+	const allocator = std.testing.allocator;
+	const u_limbs: usize = 128; // 8192 bits
+	const v_limbs: usize = 64; // 4096 bits
+	const iters: usize = 200;
+
+	const u_template = try allocator.alloc(u64, u_limbs);
+	defer allocator.free(u_template);
+	const v_template = try allocator.alloc(u64, v_limbs);
+	defer allocator.free(v_template);
+	var rng = std.Random.DefaultPrng.init(0x8080_8080);
+	const rnd = rng.random();
+	for (u_template) |*p| p.* = rnd.int(u64);
+	for (v_template) |*p| p.* = rnd.int(u64);
+	if (v_template[v_limbs - 1] == 0) v_template[v_limbs - 1] = 0xAAAA_AAAA_AAAA_AAAA;
+	if (u_template[u_limbs - 1] == 0) u_template[u_limbs - 1] = 0xCCCC_CCCC_CCCC_CCCC;
+
+	const u_buf = try allocator.alloc(u64, u_limbs + 1);
+	defer allocator.free(u_buf);
+	const q_buf = try allocator.alloc(u64, u_limbs);
+	defer allocator.free(q_buf);
+	const r_buf = try allocator.alloc(u64, v_limbs);
+	defer allocator.free(r_buf);
+
+	@memcpy(u_buf[0..u_limbs], u_template);
+	u_buf[u_limbs] = 0;
+	_ = divModKnuthU64(u_buf, u_limbs, v_template, v_limbs, q_buf, r_buf);
+
+	const t_start = monoNanos();
+	var i: usize = 0;
+	while (i < iters) : (i += 1) {
+		@memcpy(u_buf[0..u_limbs], u_template);
+		u_buf[u_limbs] = 0;
+		const out = divModKnuthU64(u_buf, u_limbs, v_template, v_limbs, q_buf, r_buf);
+		std.mem.doNotOptimizeAway(&out);
+	}
+	const t_total = monoNanos() - t_start;
+	const ns_per_op = @as(f64, @floatFromInt(t_total)) / @as(f64, @floatFromInt(iters));
+	std.debug.print("\n[bench] divModKnuthU64 8192-bit / 4096-bit: {d:.0} ns/op\n", .{ns_per_op});
+}
+
 test "bench: divModSingleByte vs divModSingleU64 at 2048-bit" {
 	const allocator = std.testing.allocator;
 	const sz: usize = 256; // 2048 bits

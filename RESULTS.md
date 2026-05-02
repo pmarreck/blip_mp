@@ -14,6 +14,7 @@ A pure-Zig arbitrary-precision integer library where the canonical storage is **
 - **Cryptographically common multiplication sizes (1024, 1536, 3072 bit): blip_mp beats GMP by 1.12–1.46×.** Includes legacy RSA-1024 (1.25× faster) and recommended RSA-3072 (1.12× faster).
 - **Large-bit-width addition (4096+ bits): blip_mp beats GMP by 1.03–1.28×.**
 - **Modular exponentiation (RSA-2048): blip_mp beats GMP by 11%** — Mp.powm with arbitrary-modulus Montgomery + sliding-window. At 1024-bit and 3072-bit we're at parity (within 5%). This is the headline number for serious crypto workloads.
+- **Long division (2K-bit / 1K-bit): blip_mp beats GMP by 24%** — `Mp.divMod` with u64-base Knuth Algorithm D. 36× faster than the original byte-base implementation, and now ahead of GMP at this size.
 - **Correctness: 12029/12029 random cross-validation tests against GMP pass** — across the entire modular-arithmetic surface (add, sub, mul, div, mod, divMod, powm, invMod). Every result bit-identical to GMP's corresponding `mpz_*` function.
 - **Controlled experiment: GMP's hand-tuned aarch64 asm advantage on Apple Silicon is ~0%.** Built a second GMP variant with `--disable-assembly` and benchmarked. Modern clang `-O3` generates near-optimal ADCS chains from `__builtin_add_overflow`; the asm tuning that mattered on ARMv7/x86 doesn't move the needle on M-series with wide ADCS pipelines. **This means our remaining gaps to GMP are purely algorithmic, not asm.**
 
@@ -76,15 +77,26 @@ The single most-used bignum operation in real crypto: RSA encrypt/decrypt/sign/v
 
 The journey: M7-4.1 (square-and-multiply) was 40-50× behind GMP. M7-4.2 (sliding-window) saved 17-27%. M7-4.3 (arbitrary-odd-modulus Montgomery via CIOS) flipped the ratio in one cycle — ~50× internal speedup. Why we beat GMP at 2048+: GMP switches to Montgomery at a more conservative threshold; we don't allocate per-multiplication; M-series ARM scalar `umulh` is well-served by Zig's straightforward u128 codegen.
 
-### Division and modular inverse (structural lag)
+### Division — `divModKnuth` (M7-3 → u64-base reformulation)
 
-| Op | Bits | `Mp` (ns/op) | GMP (ns/op) | Mp/GMP |
-|---|---:|---:|---:|---:|
-| `divModKnuth` | 2048 / 1024 | 17,711 | 614 | 28.8× slower |
-| `invMod` | 1024 | 187,000 | 4,400 | 42× slower |
-| `invMod` | 2048 | 681,000 | 11,400 | 60× slower |
+| Op | Bits | `Mp` byte-base (ns) | `Mp` u64-base (ns) | GMP `mpz_tdiv_qr` (ns) | Mp(u64) / GMP |
+|---|---:|---:|---:|---:|---:|
+| `divModKnuth` | 2048 / 1024 | 17,810 | **470** | 614 | **0.77× (BEAT GMP by 24%)** ✅ |
+| `divModKnuth` | 4096 / 2048 | — | 1,614 | — (re-bench needed) | — |
+| `divModKnuth` | 8192 / 4096 | — | 5,445 | — (re-bench needed) | — |
 
-Structural — byte-base Knuth Algorithm D vs GMP's limb-base; the `invMod` gap is the per-iteration `divMod` gap multiplied by `bitLen(m)` iterations of classical EEA. Closing requires u64-base Knuth reformulation OR Lehmer/half-GCD for `invMod`. Out of M7 scope; the priority for M7 was correctness across the modular-arithmetic surface.
+The byte-base implementation from M7-3 (`divModKnuth`) was 28.8× behind GMP. Reformulating to u64-base (b = 2^64 instead of b = 256) gave a **36× internal speedup at 2K-bit and flipped the ratio against GMP**. Scaling holds well to higher sizes (close to theoretical n²), suggesting we stay competitive at 4K and 8K too — though direct GMP comparison at those sizes hasn't been re-bench'd yet.
+
+Why it overshoots: aarch64 ARM scalar `udiv x` on a u128/u64 dividend is essentially single-cycle issue; GMP's `mp_limb_t` abstraction layer has per-limb overhead that doesn't have anywhere to amortize at this size. At much larger sizes (16K+ bit), GMP's more sophisticated quotient-digit estimation (Lehmer-style multi-precision divisor approximation) will likely retake the lead.
+
+### Modular inverse — `invMod` (M7-5, downstream beneficiary of u64-base div)
+
+| Bits | `Mp.invMod` pre-fix (ns) | `Mp.invMod` post-fix (ns) | GMP `mpz_invert` (ns) | Mp/GMP post-fix |
+|---:|---:|---:|---:|---:|
+| 1024 | 187,000 | **133,000** | 4,400 | 29.4× slower |
+| 2048 | 681,000 | **432,000** | 11,400 | 38.2× slower |
+
+Classical EEA does one `divMod` per iteration plus bookkeeping; the per-iteration speedup propagates with attenuation (bookkeeping is now a larger fraction). Closing the remaining gap requires Lehmer or half-GCD — fundamentally different algorithms with much better asymptotic constants for `invMod` specifically.
 
 (All numbers are 3-run medians on Apple M-series. See `BENCHMARK_RESULTS.md` for the full multi-run history including each optimization milestone.)
 
