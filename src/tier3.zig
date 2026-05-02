@@ -41,6 +41,25 @@ const fft = @import("fft.zig");
 // when temporarily enabled — bit-identical to GMP).
 pub const FFT_THRESHOLD: usize = 99999;
 
+// Two-prime CRT FFT dispatch threshold (bytes per operand). Lifts the
+// per-operand cap from ~7K bytes (single-prime) to ~32K bytes by running the
+// convolution under TWO NTT-friendly primes (998244353 and 985661441) and
+// CRT-merging each digit via Garner's form. See `mulMagnitudesCRT` in fft.zig.
+//
+// Default: DISABLED (99999). Bench (2026-05-02, M4) shows CRT-FFT loses to
+// Toom-3 across the entire supported range:
+//   16384-bit:  Toom-3  39196 ns vs CRT-FFT 176547 ns (4.5x slower)
+//   32768-bit:  Toom-3 117304 ns vs CRT-FFT 379836 ns (3.2x slower)
+//   49152-bit:  Toom-3 200425 ns vs CRT-FFT 807460 ns (4.0x slower)
+//   65536-bit:  Toom-3 353955 ns vs CRT-FFT 818249 ns (2.3x slower)
+//   98304-bit:  Toom-3 606920 ns vs CRT-FFT 1891244 ns (3.1x slower)
+// CRT doubles the NTT work (two convolutions instead of one) so the constant
+// factor is ~2x worse than the single-prime FFT, which already lost to Toom-3.
+// Path forward: SIMD butterflies (NEON ~2-4x), Stockham auto-sort (skip the
+// bit-reverse), or Montgomery multiplication. Until then, kept correctness-
+// validated and ready to enable behind this single threshold.
+pub const FFT_CRT_THRESHOLD: usize = 99999;
+
 // ── Header read/write supporting L >= 32 (continuation) ──────────────────────
 
 pub const Header = struct {
@@ -1248,10 +1267,13 @@ pub fn mulRawBlip(
 	if (b_neg) negateInPlace(scratch_b[0..b_pay.len]);
 
 	const r_len = a_pay.len + b_pay.len;
-	// Algorithm selection: FFT (≥ 3K-byte equal operands w/ allocator) →
+	// Algorithm selection: CRT-FFT (extended range) → single-prime FFT →
 	// Toom-3 (≥ 2K bytes) → Karatsuba (≥ 256) → chunked u64 schoolbook.
+	const can_fft_crt = fft_alloc != null and a_pay.len == b_pay.len and a_pay.len >= FFT_CRT_THRESHOLD and a_pay.len + b_pay.len <= fft.MAX_FFT_CRT_COMBINED_LEN;
 	const can_fft = fft_alloc != null and a_pay.len == b_pay.len and a_pay.len >= FFT_THRESHOLD and a_pay.len + b_pay.len <= fft.MAX_FFT_COMBINED_LEN;
-	if (can_fft) {
+	if (can_fft_crt) {
+		_ = try fft.mulMagnitudesCRT(fft_alloc.?, scratch_a[0..a_pay.len], scratch_b[0..b_pay.len], scratch_r[0..r_len]);
+	} else if (can_fft) {
 		_ = try fft.mulMagnitudes(fft_alloc.?, scratch_a[0..a_pay.len], scratch_b[0..b_pay.len], scratch_r[0..r_len]);
 	} else if (a_pay.len == b_pay.len and a_pay.len >= TOOM3_THRESHOLD and scratch_k.len >= toom3ScratchNeed(a_pay.len)) {
 		@memset(scratch_r[0..r_len], 0);

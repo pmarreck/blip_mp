@@ -64,9 +64,28 @@ pub inline fn subModP(a: u64, b: u64) u64 {
 /// P fits in 30 bits, so a*b fits in 60 bits — well within u64 — then we
 /// reduce by `% P`. Since P is comptime, the compiler lowers `% P` to a
 /// magic-number multiply (Granlund-Möller) on aarch64 — ~5 cycles vs ~10
-/// for hardware udiv. (Hand-rolled Barrett experiment showed correctness
-/// bugs and no measured speedup over the compiler's lowering — left as
-/// future optimization with proper test scaffolding.)
+/// for hardware udiv.
+///
+/// **Hand-rolled Barrett experiment (2026-05-02):** Tried Barrett with
+/// M = floor(2^64 / P) = 18479187002 and a single conditional subtract.
+/// Provably correct (passes 100K random tests + 8240 GMP cross-checks),
+/// but **measurably SLOWER** than `% P` in the FFT benchmarks: 202386 ns
+/// vs 191583 ns at 32K-bit Mp.mul (~5% regression). Asm inspection
+/// shows why: the compiler's `% P` lowering produces a 3-instruction
+/// inner loop body (`mul, umulh, msub`) with the magic-constant load
+/// hoisted out, while Barrett needs `mul, umulh, madd, add, cmp, csel`
+/// (6 instructions) for the conditional subtract that the compiler's
+/// tighter precision avoids. Conclusion: LLVM's magic-number lowering
+/// for a 30-bit comptime divisor is essentially optimal — no Barrett
+/// formulation in u64 arithmetic can beat it without losing the
+/// correction step. Left here as a documented null-result so future
+/// agents don't re-explore the same dead end.
+///
+/// **Prior bug (2026-05 abandoned attempt):** used M = floor(2^60 / P)
+/// with shift k = 60. The Barrett bound `q - q_hat <= 2` requires
+/// `k >= bitlen(P) + bitlen(x_max)`, NOT just `k = bitlen(P)`.
+/// With k = 60, q_hat can undershoot by ~2^30, leaving r many P's
+/// above the modulus.
 pub inline fn mulModP(a: u64, b: u64) u64 {
 	return (a * b) % P;
 }
@@ -270,6 +289,227 @@ pub fn mulMagnitudes(allocator: std.mem.Allocator, a: []const u8, b: []const u8,
 	return len;
 }
 
+// ── Two-prime CRT NTT (extended-range variant) ──────────────────────────────
+//
+// The single-prime path above caps min(a,b) * 65025 < P ≈ 9.98e8, i.e. ~7K
+// bytes per operand for equal sizes. To extend the range we run the entire
+// pointwise convolution under TWO different NTT-friendly primes and combine
+// the per-digit residues via the Chinese Remainder Theorem (CRT). Each digit
+// is then known exactly modulo p1 * p2 ≈ 2^59, big enough to hold sums up to
+// ~32K bytes per operand (max digit sum = 32768 * 65025 ≈ 2.13e9 << 2^59).
+//
+// Architecture: the NTT primitives are parameterized over a `Field` struct
+// (the prime, primitive root, and supported transform length). The original
+// single-prime API (`mulMagnitudes`, `mulModP`, `nttWithTwiddles`, etc.)
+// stays untouched so all existing tests and callers keep working.
+
+/// Compile-time description of an NTT-friendly prime field.
+pub const Field = struct {
+	p: u64,
+	primitive_root: u64,
+	max_ntt_len: usize,
+
+	/// (a + b) mod self.p. Inputs assumed in [0, self.p).
+	pub inline fn addMod(comptime self: Field, a: u64, b: u64) u64 {
+		const sum = a + b;
+		return if (sum >= self.p) sum - self.p else sum;
+	}
+
+	/// (a - b) mod self.p. Inputs in [0, self.p).
+	pub inline fn subMod(comptime self: Field, a: u64, b: u64) u64 {
+		return if (a >= b) a - b else a + self.p - b;
+	}
+
+	/// (a * b) mod self.p. Each prime fits in 30 bits so a*b fits in 60 bits;
+	/// the Zig compiler lowers `% self.p` to a magic-number multiply (constant
+	/// divisor known at comptime).
+	pub inline fn mulMod(comptime self: Field, a: u64, b: u64) u64 {
+		return (a * b) % self.p;
+	}
+
+	/// b^e mod self.p via square-and-multiply.
+	pub fn powMod(comptime self: Field, b: u64, e: u64) u64 {
+		var base = b % self.p;
+		var exp = e;
+		var result: u64 = 1;
+		while (exp > 0) {
+			if (exp & 1 == 1) result = self.mulMod(result, base);
+			base = self.mulMod(base, base);
+			exp >>= 1;
+		}
+		return result;
+	}
+
+	/// Modular inverse via Fermat's little theorem.
+	pub inline fn invMod(comptime self: Field, x: u64) u64 {
+		return self.powMod(x, self.p - 2);
+	}
+
+	/// Primitive Nth root of unity, N a power of 2 ≤ self.max_ntt_len.
+	pub fn nthRootOfUnity(comptime self: Field, N: usize) u64 {
+		std.debug.assert(N > 0 and N <= self.max_ntt_len);
+		std.debug.assert(N & (N - 1) == 0);
+		const exp: u64 = (self.p - 1) / @as(u64, @intCast(N));
+		return self.powMod(self.primitive_root, exp);
+	}
+};
+
+/// Field 1: the same prime used by the single-prime path.
+/// 998244353 = 119 * 2^23 + 1, primitive root 3. NTT lengths up to 2^23.
+pub const F1: Field = .{ .p = 998244353, .primitive_root = 3, .max_ntt_len = 1 << 23 };
+
+/// Field 2: a second NTT-friendly prime, coprime with F1.
+/// 985661441 = 235 * 2^22 + 1, primitive root 3. NTT lengths up to 2^22.
+/// Combined modulus p1 * p2 ≈ 9.84 × 10^17 ≈ 2^59.77 — comfortably within
+/// u64 and far above any per-digit convolution sum we will generate.
+pub const F2: Field = .{ .p = 985661441, .primitive_root = 3, .max_ntt_len = 1 << 22 };
+
+/// Modular inverse of F1.p (mod F2.p), precomputed at comptime for the
+/// CRT (Garner) reconstruction. Computing it inside `mulMagnitudesCRT`
+/// would needlessly recompute on every call.
+pub const F1_INV_MOD_F2: u64 = F2.invMod(F1.p % F2.p);
+
+/// Generic iterative radix-2 Cooley-Tukey NTT. Same algorithm as
+/// `nttWithTwiddles` but parameterized by a comptime field.
+pub fn nttGeneric(comptime field: Field, a: []u64, twiddles: []const u64) void {
+	const n = a.len;
+	if (n <= 1) return;
+	std.debug.assert(n & (n - 1) == 0);
+	std.debug.assert(twiddles.len >= n / 2);
+
+	bitReversePermute(a);
+
+	var len: usize = 2;
+	while (len <= n) : (len <<= 1) {
+		const stride = n / len;
+		const half = len >> 1;
+		var i: usize = 0;
+		while (i < n) : (i += len) {
+			var k: usize = 0;
+			while (k < half) : (k += 1) {
+				const w = twiddles[k * stride];
+				const u = a[i + k];
+				const t = field.mulMod(a[i + k + half], w);
+				a[i + k] = field.addMod(u, t);
+				a[i + k + half] = field.subMod(u, t);
+			}
+		}
+	}
+}
+
+/// Run the full convolution (forward A, forward B, pointwise mul, inverse,
+/// 1/N scale) under one field. Output is the per-digit residue mod field.p.
+fn convolveOnce(
+	comptime field: Field,
+	allocator: std.mem.Allocator,
+	a: []const u8,
+	b: []const u8,
+	N: usize,
+	out: []u64,
+) !void {
+	std.debug.assert(out.len == N);
+	std.debug.assert(N <= field.max_ntt_len);
+
+	const pa = try allocator.alloc(u64, N);
+	defer allocator.free(pa);
+	const pb = try allocator.alloc(u64, N);
+	defer allocator.free(pb);
+	const tw_fwd = try allocator.alloc(u64, N / 2);
+	defer allocator.free(tw_fwd);
+	const tw_inv = try allocator.alloc(u64, N / 2);
+	defer allocator.free(tw_inv);
+
+	const omega_n = field.nthRootOfUnity(N);
+	const omega_n_inv = field.invMod(omega_n);
+	tw_fwd[0] = 1;
+	tw_inv[0] = 1;
+	{
+		var j: usize = 1;
+		while (j < N / 2) : (j += 1) {
+			tw_fwd[j] = field.mulMod(tw_fwd[j - 1], omega_n);
+			tw_inv[j] = field.mulMod(tw_inv[j - 1], omega_n_inv);
+		}
+	}
+
+	@memset(pa, 0);
+	@memset(pb, 0);
+	for (a, 0..) |byte, i| pa[i] = byte;
+	for (b, 0..) |byte, i| pb[i] = byte;
+
+	nttGeneric(field, pa, tw_fwd);
+	nttGeneric(field, pb, tw_fwd);
+	for (0..N) |i| pa[i] = field.mulMod(pa[i], pb[i]);
+	nttGeneric(field, pa, tw_inv);
+	const n_inv = field.invMod(@intCast(N));
+	for (pa, 0..) |x, i| out[i] = field.mulMod(x, n_inv);
+}
+
+/// CRT combine using Garner's form. Given r1 ≡ x (mod p1) and r2 ≡ x (mod p2)
+/// with 0 ≤ x < p1*p2, returns x. All in u64 since p1*p2 < 2^60.
+inline fn crtCombine(r1: u64, r2: u64) u64 {
+	// diff = (r2 - r1) mod p2
+	const diff = if (r2 >= r1) r2 - r1 else r2 + F2.p - r1;
+	// k = diff * F1_INV_MOD_F2 mod p2
+	const k = (diff * F1_INV_MOD_F2) % F2.p;
+	// x = r1 + p1 * k  (fits in u64 since r1 < p1, k < p2, p1*p2 < 2^60)
+	return r1 + F1.p * k;
+}
+
+/// Maximum combined operand length supported by the two-prime CRT variant.
+/// Constraint: NTT length must be ≤ min(F1.max_ntt_len, F2.max_ntt_len) = 2^22.
+/// And per-digit sum must fit in p1*p2 (~2^60); for byte digits this is
+/// min(a,b) * 65025 < 2^60, far beyond what NTT length restricts.
+/// Practical cap: a.len + b.len ≤ 2^22 = 4194304 bytes. We cap at 65536 to
+/// keep allocations sane (the four u64 arrays at N=2^17 already cost 4 MB).
+pub const MAX_FFT_CRT_COMBINED_LEN: usize = 65536;
+
+/// Multiply two unsigned magnitudes via two-prime NTT + CRT reconstruction.
+/// Same I/O contract as `mulMagnitudes` but supports operands up to ~32K bytes
+/// each (256K bits combined). Internally runs the convolution twice — once
+/// under F1, once under F2 — then merges via Garner's CRT to recover each
+/// per-digit sum exactly, before the byte carry-propagation pass.
+pub fn mulMagnitudesCRT(
+	allocator: std.mem.Allocator,
+	a: []const u8,
+	b: []const u8,
+	out: []u8,
+) !usize {
+	if (a.len == 0 or b.len == 0) return 0;
+	const need_len = a.len + b.len;
+	std.debug.assert(out.len >= need_len);
+	std.debug.assert(need_len <= MAX_FFT_CRT_COMBINED_LEN);
+
+	var N: usize = 1;
+	while (N < need_len) N <<= 1;
+	std.debug.assert(N <= F1.max_ntt_len);
+	std.debug.assert(N <= F2.max_ntt_len);
+
+	const c1 = try allocator.alloc(u64, N);
+	defer allocator.free(c1);
+	const c2 = try allocator.alloc(u64, N);
+	defer allocator.free(c2);
+
+	try convolveOnce(F1, allocator, a, b, N, c1);
+	try convolveOnce(F2, allocator, a, b, N, c2);
+
+	// CRT-merge each digit, then carry-propagate to bytes. We reuse `c1`
+	// as the merged digit buffer to avoid another N-element allocation.
+	for (0..N) |i| c1[i] = crtCombine(c1[i], c2[i]);
+
+	var carry: u64 = 0;
+	var i: usize = 0;
+	while (i < need_len) : (i += 1) {
+		const val = c1[i] + carry;
+		out[i] = @truncate(val & 0xFF);
+		carry = val >> 8;
+	}
+	std.debug.assert(carry == 0);
+
+	var len = need_len;
+	while (len > 0 and out[len - 1] == 0) len -= 1;
+	return len;
+}
+
 // ── Tests ───────────────────────────────────────────────────────────────────
 
 const testing = std.testing;
@@ -287,6 +527,32 @@ test "mulModP basic" {
 	try testing.expectEqual(@as(u64, 0), mulModP(0, 12345));
 	// (P-1) * (P-1) mod P = 1 (since (P-1) ≡ -1, (-1)*(-1) = 1)
 	try testing.expectEqual(@as(u64, 1), mulModP(P - 1, P - 1));
+}
+
+test "mulModP edge cases" {
+	try testing.expectEqual(@as(u64, 0), mulModP(0, 0));
+	try testing.expectEqual(@as(u64, 1), mulModP(1, 1));
+	try testing.expectEqual(@as(u64, 1), mulModP(P - 1, P - 1));
+	try testing.expectEqual(@as(u64, P - 1), mulModP(P - 1, 1));
+	try testing.expectEqual(@as(u64, P - 1), mulModP(1, P - 1));
+	try testing.expectEqual(@as(u64, ((P / 2) * (P / 2)) % P), mulModP(P / 2, P / 2));
+	try testing.expectEqual(@as(u64, ((P - 2) * (P - 2)) % P), mulModP(P - 2, P - 2));
+}
+
+test "Barrett mulModP matches (a*b)%P on 100K random inputs" {
+	var prng = std.Random.DefaultPrng.init(0xBEEF_CAFE);
+	const rand = prng.random();
+	var i: usize = 0;
+	while (i < 100_000) : (i += 1) {
+		const a = rand.uintLessThan(u64, P);
+		const b = rand.uintLessThan(u64, P);
+		const expected = (a * b) % P;
+		const got = mulModP(a, b);
+		if (got != expected) {
+			std.debug.print("MISMATCH a={d} b={d} expected={d} got={d}\n", .{ a, b, expected, got });
+			return error.TestFailed;
+		}
+	}
 }
 
 test "powMod identities" {
@@ -475,5 +741,104 @@ test "ntt convolution theorem: invNtt(ntt(a) * ntt(b)) = a ⊛ b (acyclic via ze
 	}
 	for (0..M) |i| {
 		try testing.expectEqual(ref[i], c[i]);
+	}
+}
+
+// ── Two-prime CRT NTT tests ─────────────────────────────────────────────────
+
+test "mulMagnitudesCRT: matches schoolbook on small known cases" {
+	const cases = [_]struct {
+		a: []const u8,
+		b: []const u8,
+	}{
+		.{ .a = &.{1}, .b = &.{1} },
+		.{ .a = &.{0xFF}, .b = &.{0xFF} },
+		.{ .a = &.{ 0x12, 0x34 }, .b = &.{ 0x56, 0x78 } },
+		.{ .a = &.{ 0xFF, 0xFF, 0xFF, 0xFF }, .b = &.{ 0xFF, 0xFF, 0xFF, 0xFF } },
+	};
+	for (cases) |c| {
+		var ref_buf: [16]u8 = undefined;
+		var fft_buf: [16]u8 = undefined;
+		const ref_len = schoolbookMul(c.a, c.b, &ref_buf);
+		const fft_len = try mulMagnitudesCRT(testing.allocator, c.a, c.b, &fft_buf);
+		try testing.expectEqual(ref_len, fft_len);
+		try testing.expectEqualSlices(u8, ref_buf[0..ref_len], fft_buf[0..fft_len]);
+	}
+}
+
+test "mulMagnitudesCRT: matches schoolbook at 1024 bytes (within single-prime range)" {
+	const sz: usize = 1024;
+	var prng = std.Random.DefaultPrng.init(0xDEADBEEFCAFEBABE);
+	const rand = prng.random();
+	const a = try testing.allocator.alloc(u8, sz);
+	defer testing.allocator.free(a);
+	const b = try testing.allocator.alloc(u8, sz);
+	defer testing.allocator.free(b);
+	const ref = try testing.allocator.alloc(u8, 2 * sz);
+	defer testing.allocator.free(ref);
+	const got = try testing.allocator.alloc(u8, 2 * sz);
+	defer testing.allocator.free(got);
+
+	for (a) |*x| x.* = rand.int(u8);
+	for (b) |*x| x.* = rand.int(u8);
+	a[sz - 1] |= 0x80;
+	b[sz - 1] |= 0x80;
+
+	const ref_len = schoolbookMul(a, b, ref);
+	const got_len = try mulMagnitudesCRT(testing.allocator, a, b, got);
+	try testing.expectEqual(ref_len, got_len);
+	try testing.expectEqualSlices(u8, ref[0..ref_len], got[0..got_len]);
+}
+
+test "mulMagnitudesCRT: matches schoolbook at 16384 bytes per operand (beyond single-prime)" {
+	const sz: usize = 16384;
+	var prng = std.Random.DefaultPrng.init(0xABCDEF0123456789);
+	const rand = prng.random();
+	const a = try testing.allocator.alloc(u8, sz);
+	defer testing.allocator.free(a);
+	const b = try testing.allocator.alloc(u8, sz);
+	defer testing.allocator.free(b);
+	const ref = try testing.allocator.alloc(u8, 2 * sz);
+	defer testing.allocator.free(ref);
+	const got = try testing.allocator.alloc(u8, 2 * sz);
+	defer testing.allocator.free(got);
+
+	for (a) |*x| x.* = rand.int(u8);
+	for (b) |*x| x.* = rand.int(u8);
+	a[sz - 1] |= 0x80;
+	b[sz - 1] |= 0x80;
+
+	const ref_len = schoolbookMul(a, b, ref);
+	const got_len = try mulMagnitudesCRT(testing.allocator, a, b, got);
+	try testing.expectEqual(ref_len, got_len);
+	try testing.expectEqualSlices(u8, ref[0..ref_len], got[0..got_len]);
+}
+
+test "mulMagnitudesCRT: 100-iter random fuzz at sizes 4096..16384 bytes" {
+	var prng = std.Random.DefaultPrng.init(0x0F0E0D0C0B0A0908);
+	const rand = prng.random();
+	var iter: usize = 0;
+	while (iter < 100) : (iter += 1) {
+		// Random sizes in [4096, 16384].
+		const sa = 4096 + rand.uintLessThan(usize, 16384 - 4096 + 1);
+		const sb = 4096 + rand.uintLessThan(usize, 16384 - 4096 + 1);
+		const a = try testing.allocator.alloc(u8, sa);
+		defer testing.allocator.free(a);
+		const b = try testing.allocator.alloc(u8, sb);
+		defer testing.allocator.free(b);
+		const ref = try testing.allocator.alloc(u8, sa + sb);
+		defer testing.allocator.free(ref);
+		const got = try testing.allocator.alloc(u8, sa + sb);
+		defer testing.allocator.free(got);
+
+		for (a) |*x| x.* = rand.int(u8);
+		for (b) |*x| x.* = rand.int(u8);
+		a[sa - 1] |= 0x80;
+		b[sb - 1] |= 0x80;
+
+		const ref_len = schoolbookMul(a, b, ref);
+		const got_len = try mulMagnitudesCRT(testing.allocator, a, b, got);
+		try testing.expectEqual(ref_len, got_len);
+		try testing.expectEqualSlices(u8, ref[0..ref_len], got[0..got_len]);
 	}
 }

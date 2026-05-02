@@ -100,13 +100,57 @@ Substeps (each is one TDD cycle):
 - [ ] **M6-3.11** Top-level `mulFFT(a, b, r, scratch)`. Composes 3.9 → 3.6 (forward NTT both) → 3.8 (pointwise) → 3.7 (inverse NTT) → 3.10 (carry-propagate). Test: cross-check against schoolbook for many random sizes from 1K to 32K-bit.
 - [ ] **M6-3.12** Algorithm-selector update: dispatch FFT above FFT_THRESHOLD. Calibrate via bench (probably 8K-16K bit operand size).
 - [ ] **M6-3.13** Bench at all sizes 8K-32K-bit. Compare to GMP. Update RESULTS.md.
-- [ ] **M6-3.14** (Optional, follow-up) Two-prime CRT extension to support 64K+ bit operands.
+- [x] **M6-3.1–3.7** NTT primitives + Cooley-Tukey forward/inverse over p=998244353 (2026-05-02 EST)
+- [x] **M6-3.8–3.12** mulMagnitudes + dispatcher integration; 8240/8240 GMP cross-checks pass for 24K and 32K bit when enabled (2026-05-02 EST)
+- [x] **M6-3.13** Bench + precomputed-twiddle optimization (2.14× FFT-path speedup, 410K → 191K ns at 32K-bit) + honest disable: single-prime FFT 1.77× SLOWER than Toom-3 even with twiddle precomp (2026-05-02 EST)
+- [x] **M6-3.14** Two-prime CRT extension (Field abstraction, F1=998244353/F2=985661441, MAX_FFT_CRT_COMBINED_LEN=65536). Schoolbook-validated up to 256K-bit. Gated off — CRT loses to Toom-3 by 2.3–4.5× across the entire supported range because it doubles NTT work atop an already-losing constant factor (2026-05-02 EST)
 
-Expected gain: ~3-5× over Karatsuba/Toom-3 at 32K-bit. Should put us at GMP parity or better at 8K-32K-bit mul.
+### M6-4 — FFT constant-factor crusade (the actual win path)
 
-### Sequencing decision
+The honest verdict from M6-3.13/3.14: pure-software NTT in u64 land cannot beat the compiler's `% P` magic-number lowering on aarch64 (verified empirically — Barrett, Montgomery's simpler half, none win when reduction is per-multiply with no amortization). The crossover with Toom-3 sits above our test range. Three independent multiplicative levers must compound to flip it:
 
-Toom-4 first as warm-up (M6-2): smaller scope, builds infrastructure (Hensel division by 5, larger sign-magnitude interpolation), shows the path. THEN FFT (M6-3): the headliner. If FFT works decisively, Toom-4 becomes optional but it'll already be in.
+#### M6-4-A — NEON-SIMD vectorized butterflies (highest ROI per unit work)
+
+Modular butterflies on aarch64 NEON: pack 2 × u64 lanes per `uint64x2_t`, do `add`/`sub`/`mul` lane-wise, lower `% P` to magic-number multiply via vectorized `umulh` (the high-half multiply). Expected 2-3× on the inner loop (more if we pack 4 × u32 by halving the prime).
+
+- [ ] **M6-4-A.1** Bench harness: a microbench that times *only* the butterfly inner loop (no FFT setup overhead). Establishes a per-op baseline for `mulModP` (~5 ns each on M4) and a NEON target (≤ 2 ns each).
+- [ ] **M6-4-A.2** Vectorized `addModP_x2(uint64x2_t a, uint64x2_t b) → uint64x2_t` + `subModP_x2`. Test: lane-by-lane equivalent to scalar.
+- [ ] **M6-4-A.3** Vectorized `mulModP_x2` via NEON `mul` + `umulh` + magic-constant `umlsl`/`umulh` chain. Test: 100K random pairs, lane-equivalent to scalar.
+- [ ] **M6-4-A.4** Vectorized butterfly pair: `(u, t) = (a[i] ± a[i+half] · w)` for two indices at once. Tricky case: paired indices may not be adjacent depending on `len`. Strategy: at level len ≥ 4, butterflies within one (i..i+half) block are independent — pack them.
+- [ ] **M6-4-A.5** Replace inner loop in `nttWithTwiddles` with vectorized version. Cross-check via `ntt-round-trip` test + GMP cross-check at FFT-enabled sizes.
+- [ ] **M6-4-A.6** Bench. Target: 32K-bit FFT path drops from 191K ns to ≤ 95K ns (matches Toom-3). If hit, lower FFT_THRESHOLD; if exceeded, raise it.
+
+Expected gain alone: 1.5–2.5× on the FFT path. Suffices to TIE Toom-3, not yet beat it.
+
+#### M6-4-B — Montgomery reduction with deferred final reduction
+
+Unlike Barrett, Montgomery defers the conditional subtract across multiple multiplies, paying the reduction cost only when the result needs to leave Montgomery form. In the NTT inner loop, both inputs and outputs are already in Montgomery form, so the per-multiply cost drops to one `umulh` + one `mul` + one `add` + one masked subtract (saved across many iterations).
+
+- [ ] **M6-4-B.1** Helper: `to_mont(x) = x · R mod P` and `from_mont(x) = x · R⁻¹ mod P` where R = 2^32. Test: round-trip identity on 100K random.
+- [ ] **M6-4-B.2** `mulMont(a_mont, b_mont) → c_mont` with deferred reduction (Montgomery's CIOS form). Test: equivalent to `mulModP(from_mont(a), from_mont(b))`.
+- [ ] **M6-4-B.3** Convert NTT entry/exit to/from Montgomery form ONCE per call (not per butterfly). All inner-loop work stays in Mont form.
+- [ ] **M6-4-B.4** Combined with M6-4-A: vectorized `mulMont_x2`. Test: lane-equivalent.
+- [ ] **M6-4-B.5** Bench. Combined Mont + SIMD target: 32K-bit FFT ≤ 50K ns (better than Toom-3's 108K).
+
+Expected combined gain: 3-5× on the FFT path. Now FFT decisively wins above ~16K-bit.
+
+#### M6-4-C — Stockham auto-sort (skip the bit-reversal pass)
+
+Bit-reversal permutation is O(N) memory shuffles with poor cache behavior. Stockham's variant interleaves the permutation INTO the butterflies, doubling the working memory but eliminating the separate pass.
+
+- [ ] **M6-4-C.1** `nttStockham` — out-of-place butterflies with implicit bit-reversal. Test: produces same output as `nttWithTwiddles` (after both have entry+exit aligned).
+- [ ] **M6-4-C.2** Replace nttWithTwiddles call sites with nttStockham in the production path (mulMagnitudes / mulMagnitudesCRT). Verify all tests pass.
+- [ ] **M6-4-C.3** Bench. Expected: marginal ~5-10% on top of A+B, but at no correctness risk.
+
+#### M6-4-D — Once A+B+C land: production enablement
+
+- [ ] **M6-4-D.1** Calibrate FFT_THRESHOLD and FFT_CRT_THRESHOLD via bench. Set each to the smallest size where it beats Toom-3.
+- [ ] **M6-4-D.2** Re-run 8240 GMP cross-check with FFT enabled at the new thresholds. Confirm bit-identical.
+- [ ] **M6-4-D.3** Update README.md and RESULTS.md with the new headline numbers.
+
+### Sequencing decision (revised after empirical M6-3 finding)
+
+The "Toom-4 first" plan in M6-2 is now lower priority. Toom-3 is solidly the best of the schoolbook-class algorithms in our range. Until FFT-class can beat Toom-3 (M6-4), Toom-4's modest 15-30% gain isn't worth the implementation work. Leave M6-2 helpers in (divExactBy5, mulSmallSignedConst) as future-work building blocks.
 
 ## Milestone 4 — Optional follow-ups (ranked by ROI)
 
