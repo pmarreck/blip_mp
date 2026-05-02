@@ -70,6 +70,7 @@ const LARGE_BUCKETS = [_]LargeBucket{
 	.{ .name = "8192-bit",  .bits = 8192 },
 	.{ .name = "16384-bit", .bits = 16384 },
 	.{ .name = "32768-bit", .bits = 32768 },
+	.{ .name = "49152-bit", .bits = 49152 },
 };
 
 const LARGEST_BYTES: usize = 32768 / 8; // 4096 bytes
