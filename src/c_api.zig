@@ -89,10 +89,9 @@ export fn blip_mp_bytes(mp: ?*const Mp) ?[*]const u8 {
 // --- Comparison / sign --------------------------------------------------
 
 export fn blip_mp_cmp(a: *const Mp, b: *const Mp) c_int {
-	// Use cmp() but fall back to sign comparison if it errors (it shouldn't
-	// for well-formed Mps but we're paranoid at the FFI seam).
-	const order = a.cmp(b) catch return blip_mp_sign(a) - blip_mp_sign(b);
-	return switch (order) {
+	// Mp.cmp is now error-free and tier-3-aware (sign-first dispatch +
+	// byte-level magnitude comparison; no i64 overflow risk).
+	return switch (a.cmp(b)) {
 		.lt => -1,
 		.eq => 0,
 		.gt => 1,

@@ -198,10 +198,42 @@ pub const Mp = struct {
 		return @intCast(v);
 	}
 
-	pub fn cmp(a: *const Mp, b: *const Mp) GetError!std.math.Order {
-		const av = try a.getI64();
-		const bv = try b.getI64();
-		return std.math.order(av, bv);
+	/// Total order over signed BLIP-encoded values. Sign-first dispatch
+	/// using the cached_sign field (skips per-call decode); for same-sign
+	/// pairs, compares the canonical payload bytes directly. Works correctly
+	/// for tier-3 values of arbitrary size — no i64 overflow risk.
+	///
+	/// Same-sign comparison logic:
+	///   Both positive: longer payload = larger magnitude = larger value.
+	///                  Equal length, compare bytes high-to-low as unsigned.
+	///   Both negative: longer payload = MORE negative = SMALLER value
+	///                  (canonical encoding strips redundant 0xFF prefix).
+	///                  Equal length, compare two's-complement payload bytes
+	///                  unsigned high-to-low — for negatives this gives the
+	///                  correct numeric order directly (less-negative two's-
+	///                  complement values have larger unsigned bit patterns).
+	pub fn cmp(a: *const Mp, b: *const Mp) std.math.Order {
+		const a_sign = a.cached_sign;
+		const b_sign = b.cached_sign;
+		if (a_sign != b_sign) return std.math.order(a_sign, b_sign);
+		if (a_sign == 0) return .eq;
+
+		const a_pay = a.payload();
+		const b_pay = b.payload();
+
+		if (a_sign > 0) {
+			if (a_pay.len != b_pay.len) return std.math.order(a_pay.len, b_pay.len);
+		} else {
+			// Both negative: longer canonical payload = more negative.
+			if (a_pay.len != b_pay.len) return std.math.order(b_pay.len, a_pay.len);
+		}
+		// Equal-length payloads: compare unsigned LE high-to-low.
+		var i: usize = a_pay.len;
+		while (i > 0) {
+			i -= 1;
+			if (a_pay[i] != b_pay[i]) return std.math.order(a_pay[i], b_pay[i]);
+		}
+		return .eq;
 	}
 
 	pub fn sign(self: *const Mp) GetError!i2 {
@@ -1384,8 +1416,55 @@ test "Mp.cmp across signs and magnitudes" {
 		defer b.deinit();
 		try a.setI64(c.a);
 		try b.setI64(c.b);
-		try testing.expectEqual(c.order, try a.cmp(&b));
+		try testing.expectEqual(c.order, a.cmp(&b));
 	}
+}
+
+test "Mp.cmp: tier-3 same-sign comparison (was: getI64-based regression)" {
+	// Pre-fix: Mp.cmp called getI64 internally, which returns an error
+	// for tier-3 values. Two same-sign tier-3 values couldn't be compared.
+	// Now: byte-level magnitude comparison handles arbitrary sizes.
+	var a = Mp.init(testing.allocator);
+	defer a.deinit();
+	var b = Mp.init(testing.allocator);
+	defer b.deinit();
+	var one = Mp.init(testing.allocator);
+	defer one.deinit();
+	try one.setI64(1);
+
+	// Build two tier-3 positive values: a = i64.max + 5, b = i64.max + 1.
+	// Both > i64.max, so getI64 would error; but a > b should hold.
+	try a.setI64(std.math.maxInt(i64));
+	try b.setI64(std.math.maxInt(i64));
+	try a.add(&a, &one); try a.add(&a, &one); try a.add(&a, &one); try a.add(&a, &one); try a.add(&a, &one);
+	try b.add(&b, &one);
+	try testing.expectEqual(std.math.Order.gt, a.cmp(&b));
+	try testing.expectEqual(std.math.Order.lt, b.cmp(&a));
+	try testing.expectEqual(std.math.Order.eq, a.cmp(&a));
+
+	// Equal tier-3 positives.
+	var a2 = Mp.init(testing.allocator);
+	defer a2.deinit();
+	try a2.setI64(std.math.maxInt(i64));
+	try a2.add(&a2, &one); try a2.add(&a2, &one); try a2.add(&a2, &one); try a2.add(&a2, &one); try a2.add(&a2, &one);
+	try testing.expectEqual(std.math.Order.eq, a.cmp(&a2));
+
+	// Two tier-3 negatives: a_neg = i64.min - 5, b_neg = i64.min - 1.
+	// a_neg < b_neg (more negative).
+	var a_neg = Mp.init(testing.allocator);
+	defer a_neg.deinit();
+	var b_neg = Mp.init(testing.allocator);
+	defer b_neg.deinit();
+	try a_neg.setI64(std.math.minInt(i64));
+	try b_neg.setI64(std.math.minInt(i64));
+	try a_neg.sub(&a_neg, &one); try a_neg.sub(&a_neg, &one); try a_neg.sub(&a_neg, &one); try a_neg.sub(&a_neg, &one); try a_neg.sub(&a_neg, &one);
+	try b_neg.sub(&b_neg, &one);
+	try testing.expectEqual(std.math.Order.lt, a_neg.cmp(&b_neg));
+	try testing.expectEqual(std.math.Order.gt, b_neg.cmp(&a_neg));
+
+	// Cross-sign tier-3.
+	try testing.expectEqual(std.math.Order.gt, a.cmp(&a_neg));
+	try testing.expectEqual(std.math.Order.lt, a_neg.cmp(&a));
 }
 
 test "Mp.sign returns -1/0/+1" {
