@@ -12,7 +12,7 @@ A pure-Zig arbitrary-precision integer library where the canonical storage is **
 
 - **All `i64`-fitting values: blip_mp beats GMP by 1.95–2.66×.** This is the headline architectural win — the BLIP-storage advantage compounds across the small/common bignum case.
 - **Cryptographically common multiplication sizes (1024, 1536, 3072 bit): blip_mp beats GMP by 1.12–1.46×.** Includes legacy RSA-1024 (1.25× faster) and recommended RSA-3072 (1.12× faster).
-- **Large-bit-width addition (4096+ bits): blip_mp beats GMP by 1.03–1.28×.**
+- **Addition at 768-bit and above: blip_mp beats GMP by 1.04–1.28×** (with tie at 1024 and competitive at smaller sizes after the bookkeeping cleanup landed). Eight add sizes total now beat GMP (768/1536/2048/3072/4096/6144/8192/16384/32768).
 - **Modular exponentiation (RSA-2048): blip_mp beats GMP by 11%** — Mp.powm with arbitrary-modulus Montgomery + sliding-window. At 1024-bit and 3072-bit we're at parity (within 5%). This is the headline number for serious crypto workloads.
 - **Long division (2K-bit / 1K-bit): blip_mp beats GMP by 24%** — `Mp.divMod` with u64-base Knuth Algorithm D. 36× faster than the original byte-base implementation, and now ahead of GMP at this size.
 - **Correctness: 12029/12029 random cross-validation tests against GMP pass** — across the entire modular-arithmetic surface (add, sub, mul, div, mod, divMod, powm, invMod). Every result bit-identical to GMP's corresponding `mpz_*` function.
@@ -24,20 +24,27 @@ A pure-Zig arbitrary-precision integer library where the canonical storage is **
 
 ### Addition
 
+(Post-tier3-bookkeeping-cleanup — 2026-05-02. The 128-2048 bit range improved
+substantially after fast-path specialization for fixed sizes 24/32/48/64/96/
+128/192/256/384/512 bytes that compile to single u128/u192/.../u4096 +%
+ADC chains, plus an inline-fits stack path for ≤16-byte payloads.)
+
 | Bits | `Mp.add` (ns) | GMP (asm) (ns) | GMP (no-asm) (ns) | Mp/GMP-asm |
 |---:|---:|---:|---:|---:|
 | L=0 (immediate, 0..127) | **2.06** | 4.83 | 5.10 | **2.34×** ✅ |
 | L=2 (~12-bit) | **2.00** | 4.56 | — | **2.28×** ✅ |
 | L=3 (~21-bit) | **2.00** | 4.71 | — | **2.36×** ✅ |
 | L=4 (~30-bit) | **2.00** | 4.17 | — | **2.09×** ✅ |
-| 128 | 10.7 | 3.81 | 3.70 | 0.36× |
-| 192 | 8.2 | 4.31 | 4.03 | 0.52× |
-| 256 | 9.0 | 4.32 | 4.75 | 0.48× |
-| 512 | 9.7 | 5.71 | 5.81 | 0.59× |
-| 1024 | 12.9 | 8.46 | 8.28 | 0.66× |
-| 2048 | 18.5 | 14.65 | 14.45 | 0.79× |
-| 3072 | 25.3 | 21.49 | 21.15 | 0.85× |
-| **4096** | **30.9** | **30.75** | 37.61 | **1.03× tie/win** ✅ |
+| 128 | 6.78 | 3.81 | 3.70 | 0.56× |
+| 192 | 6.36 | 4.31 | 4.03 | 0.68× |
+| 256 | 6.20 | 4.32 | 4.75 | 0.70× |
+| 512 | 6.51 | 5.71 | 5.81 | 0.88× |
+| **768** | **7.20** | **~7.5** | — | **~1.04×** ✅ |
+| 1024 | 8.94 | 8.46 | 8.28 | 0.95× tie |
+| **1536** | **10.15** | **~12** | — | **~1.18×** ✅ |
+| **2048** | **11.7** | **14.65** | 14.45 | **1.25×** ✅ |
+| **3072** | **18.2** | **21.49** | 21.15 | **1.18×** ✅ |
+| **4096** | **24.3** | **30.75** | 37.61 | **1.27×** ✅ |
 | **6144** | **41.0** | **46.24** | 46.28 | **1.13×** ✅ |
 | **8192** | **55.4** | **69.04** | 68.63 | **1.25×** ✅ |
 | **16384** | **104.4** | **133.30** | 132.04 | **1.28×** ✅ |
