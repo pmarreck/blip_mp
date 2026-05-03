@@ -89,14 +89,18 @@ The byte-base implementation from M7-3 (`divModKnuth`) was 28.8× behind GMP. Re
 
 Why it overshoots: aarch64 ARM scalar `udiv x` on a u128/u64 dividend is essentially single-cycle issue; GMP's `mp_limb_t` abstraction layer has per-limb overhead that doesn't have anywhere to amortize at this size. At much larger sizes (16K+ bit), GMP's more sophisticated quotient-digit estimation (Lehmer-style multi-precision divisor approximation) will likely retake the lead.
 
-### Modular inverse — `invMod` (M7-5, downstream beneficiary of u64-base div)
+### Modular inverse — `invMod` (M7-5 → M9 Lehmer)
 
-| Bits | `Mp.invMod` pre-fix (ns) | `Mp.invMod` post-fix (ns) | GMP `mpz_invert` (ns) | Mp/GMP post-fix |
-|---:|---:|---:|---:|---:|
-| 1024 | 187,000 | **133,000** | 4,400 | 29.4× slower |
-| 2048 | 681,000 | **432,000** | 11,400 | 38.2× slower |
+| Bits | byte-base classical (ns) | u64-base classical (ns) | **u64-base + Lehmer (ns)** | GMP `mpz_invert` (ns) | Mp/GMP final |
+|---:|---:|---:|---:|---:|---:|
+| 256 | — | 19,140 | **6,560** | ~960 | 6.97× slower |
+| 512 | — | 48,130 | **14,510** | ~1,950 | 7.44× slower |
+| 1024 | 187,000 | 128,680 | **33,600** | 4,400 | 7.64× slower |
+| 2048 | 681,000 | 418,550 | **91,100** | 11,400 | 7.85× slower |
 
-Classical EEA does one `divMod` per iteration plus bookkeeping; the per-iteration speedup propagates with attenuation (bookkeeping is now a larger fraction). Closing the remaining gap requires Lehmer or half-GCD — fundamentally different algorithms with much better asymptotic constants for `invMod` specifically.
+Two cumulative speedups: (1) u64-base Knuth div from M7-3.u64 (1.4-1.6× downstream) + (2) **Lehmer's GCD speedup from M9 (2.9-4.6× over classical EEA)**. Combined: ~5-7× faster than the original byte-base baseline; gap to GMP narrowed from 30-60× to 7-8×.
+
+Lehmer (Knuth Algorithm L) processes ~64 EEA iterations per Lehmer step by extracting a partial-quotient sequence from single-limb arithmetic, then applying a 2×2 update matrix to multi-limb (r0, r1, s0, s1) in one pair of multi-limb mul/sub each. The remaining 7-8× gap is what half-GCD (sub-quadratic divide-and-conquer) would close — substantial future engineering project (M10 in PLAN).
 
 (All numbers are 3-run medians on Apple M-series. See `BENCHMARK_RESULTS.md` for the full multi-run history including each optimization milestone.)
 
