@@ -280,6 +280,45 @@ pub const Mp = struct {
 				return;
 			}
 		}
+		// Small-tier-3 fast path: both inline and each payload ≤ 16 bytes
+		// (i.e. fits in u128). Closes the 128-bit Mp.mul gap to GMP — replaces
+		// the full tier3MulOp scratch+dispatch chain with a single u128 × u128
+		// → u256 widening multiply. Result may need heap (max 35 bytes encoded
+		// > INLINE_CAP=24), but we avoid the 80-KB stack frame of tier3MulOp.
+		if (a.inline_len != SENTINEL_HEAP and b.inline_len != SENTINEL_HEAP
+			and a.cached_pay_len <= 16 and b.cached_pay_len <= 16
+			// Aliasing safety: smallInlineTier3Mul reads a.inline_buf/b.inline_buf
+			// (struct fields, not heap) into u128 locals BEFORE writing r — so
+			// r aliasing a or b is fine.
+		) {
+			try smallInlineTier3Mul(r, a, b);
+			return;
+		}
+		// Same-size mul fast path: both payloads exactly N bytes, N ∈ {32,48,64}.
+		// Skips tier3MulOp's 80-KB stack frame and the dispatcher branch ladder.
+		// Snapshots payloads to small stack buffers BEFORE ensureHeapCapacity,
+		// so r aliasing a or b is safe even with reallocation.
+		if (a.cached_pay_len == b.cached_pay_len) {
+			switch (a.cached_pay_len) {
+				24 => {
+					try sameSizeTier3Mul(24, r, a, b);
+					return;
+				},
+				32 => {
+					try sameSizeTier3Mul(32, r, a, b);
+					return;
+				},
+				48 => {
+					try sameSizeTier3Mul(48, r, a, b);
+					return;
+				},
+				64 => {
+					try sameSizeTier3Mul(64, r, a, b);
+					return;
+				},
+				else => {},
+			}
+		}
 		try tier3MulOp(r, a, b);
 	}
 
@@ -1895,6 +1934,295 @@ inline fn smallInlineTier3Add(r: *Mp, a: *const Mp, b: *const Mp, comptime op: T
 		for (pay_buf[0..canon]) |bb| if (bb != 0) { any_nonzero = true; break; };
 		r.cached_sign = if (any_nonzero) 1 else 0;
 	}
+}
+
+/// Load the MAGNITUDE (unsigned absolute value) as a u128 from an inline
+/// payload of length ≤ 16. Sister of `loadPayloadU128` which gives the
+/// sign-extended value; this gives the magnitude. Saves a separate negate
+/// step in the multiplication fast path.
+inline fn loadMagnitudeU128(buf: *const [INLINE_CAP]u8, pay_off: usize, pay_len: usize, sign: i8) u128 {
+	const v: u128 = loadPayloadU128(buf, pay_off, pay_len);
+	// If sign is negative, the loaded u128 is two's-complement of the magnitude
+	// (extended to 128 bits with 0xFF). Negating in u128 (0 -% v) recovers the
+	// magnitude exactly because two's complement wraparound matches.
+	return if (sign < 0) 0 -% v else v;
+}
+
+/// Fast path for tier-3 mul when both operands are inline AND each payload
+/// is ≤ 16 bytes (i.e. fit in u128). Performs the multiplication as a single
+/// u128 × u128 → u256 widening op. Bypasses the entire `tier3MulOp` heap
+/// scratch allocation, signMagnitude separation, mulMagnitudesU64 loop,
+/// canonicalLen scan, and writeBlip overhead — all replaced by ~4 native
+/// u64×u64 multiplies plus a small canonical trim.
+///
+/// For the 128-bit bench bucket this collapses tens of bookkeeping ops down
+/// to a single hardware multiply chain. Result fits in 32 bytes (max 256-bit
+/// magnitude) plus an optional 33rd sign-extension byte; with header the
+/// canonical encoding is up to 35 bytes — exceeds INLINE_CAP=24, so the
+/// result almost always lands in heap_buf via a small ensureHeapCapacity.
+inline fn smallInlineTier3Mul(r: *Mp, a: *const Mp, b: *const Mp) ArithError!void {
+	const a_pay_off: usize = a.cached_pay_off;
+	const b_pay_off: usize = b.cached_pay_off;
+	const a_pay_len: usize = a.cached_pay_len;
+	const b_pay_len: usize = b.cached_pay_len;
+
+	const a_sign = a.cached_sign;
+	const b_sign = b.cached_sign;
+
+	// Zero short-circuit (preserves the canonical 0x00 encoding).
+	if (a_sign == 0 or b_sign == 0) {
+		r.inline_buf[0] = 0x00;
+		r.inline_len = 1;
+		r.heap_offset = 0;
+		r.cached_pay_off = 0;
+		r.cached_pay_len = 1;
+		r.cached_sign = 0;
+		return;
+	}
+
+	const mag_a: u128 = loadMagnitudeU128(&a.inline_buf, a_pay_off, a_pay_len, a_sign);
+	const mag_b: u128 = loadMagnitudeU128(&b.inline_buf, b_pay_off, b_pay_len, b_sign);
+
+	// u128 × u128 → u256. LLVM lowers this to 4 mul + umulh + carry chain on
+	// aarch64. Avoids the per-limb schoolbook loop overhead (8 u64×u64 muls
+	// for the same operand pair via mulMagnitudesU64 plus loop bookkeeping).
+	const prod: u256 = @as(u256, mag_a) * @as(u256, mag_b);
+
+	// Magnitude bytes: 32 bytes for u256. Canonical trim drops trailing zeros
+	// from the high end. Then add a sign-extension byte if needed:
+	//   positive result: high bit set → prepend 0x00 high byte
+	//   negative result: high bit clear → prepend 0xFF high byte
+	var pay_buf: [33]u8 = undefined;
+	std.mem.writeInt(u256, pay_buf[0..32], prod, .little);
+
+	const result_neg = (a_sign < 0) != (b_sign < 0);
+
+	// Trim high zero bytes (magnitude representation).
+	var mag_len: usize = 32;
+	while (mag_len > 1 and pay_buf[mag_len - 1] == 0) mag_len -= 1;
+
+	// Convert magnitude → two's-complement payload.
+	var pay_len: usize = mag_len;
+	if (result_neg) {
+		// Negate in place (two's complement).
+		var carry: u16 = 1;
+		var i: usize = 0;
+		while (i < mag_len) : (i += 1) {
+			const v: u16 = @as(u16, ~pay_buf[i]) + carry;
+			pay_buf[i] = @truncate(v);
+			carry = v >> 8;
+		}
+		// If high bit isn't set after negation (the very rare case where
+		// magnitude was exactly 2^(8*mag_len-1)+0 — actually impossible for
+		// positive magnitudes — but treat defensively), extend by 0xFF.
+		if ((pay_buf[mag_len - 1] & 0x80) == 0) {
+			pay_buf[mag_len] = 0xFF;
+			pay_len = mag_len + 1;
+		}
+	} else {
+		// Positive: if high bit set, extend with 0x00 to keep sign clear.
+		if ((pay_buf[mag_len - 1] & 0x80) != 0) {
+			pay_buf[mag_len] = 0x00;
+			pay_len = mag_len + 1;
+		}
+	}
+
+	// Canonical trim (strips redundant high sign-extension bytes).
+	const canon = canonicalLenSmall(pay_buf[0..pay_len]);
+
+	// Immediate path: single byte 0..127.
+	if (canon == 1 and pay_buf[0] < 0x80) {
+		r.inline_buf[0] = pay_buf[0];
+		r.inline_len = 1;
+		r.heap_offset = 0;
+		r.cached_pay_off = 0;
+		r.cached_pay_len = 1;
+		r.cached_sign = if (pay_buf[0] == 0) 0 else 1;
+		return;
+	}
+
+	// Encode header + payload. canon ∈ [1..33]; header is 1 byte for canon < 32,
+	// 2 bytes otherwise. Total max = 33 + 2 = 35 bytes. Inline only if ≤ 24.
+	const hdr_len: usize = if (canon < 32) 1 else 2;
+	const total = canon + hdr_len;
+
+	if (total <= INLINE_CAP) {
+		// Inline path. canon < 32 here (since 32+1=33 > 24), so hdr_len == 1.
+		std.debug.assert(hdr_len == 1);
+		r.inline_buf[0] = 0x80 | @as(u8, @intCast(canon));
+		var snapshot: [INLINE_CAP]u8 = undefined;
+		@memcpy(snapshot[0..canon], pay_buf[0..canon]);
+		@memcpy(r.inline_buf[1 .. 1 + canon], snapshot[0..canon]);
+		// Maintain inline-tail invariant for total ∈ [2..9].
+		if (total >= 2 and total <= 9) {
+			const L = total - 1;
+			const high_byte = r.inline_buf[1 + L - 1];
+			const sign_fill: u8 = if ((high_byte & 0x80) != 0) 0xFF else 0;
+			var i: usize = L;
+			while (i < 8) : (i += 1) r.inline_buf[1 + i] = sign_fill;
+		}
+		r.inline_len = @intCast(total);
+		r.heap_offset = 0;
+		r.cached_pay_off = 1;
+		r.cached_pay_len = @intCast(canon);
+		r.cached_sign = if (result_neg) -1 else 1;
+		return;
+	}
+
+	// Heap path. Reserve enough room: HDR_RESERVE + canon.
+	try r.ensureHeapCapacity(HDR_RESERVE + canon);
+	const hdr_start = HDR_RESERVE - hdr_len;
+	if (hdr_len == 1) {
+		r.heap_buf[hdr_start] = 0x80 | @as(u8, @intCast(canon));
+	} else {
+		r.heap_buf[hdr_start] = 0x80 | 0x20 | @as(u8, @intCast(canon & 0x1F));
+		r.heap_buf[hdr_start + 1] = @as(u8, @intCast(canon >> 5));
+	}
+	@memcpy(r.heap_buf[HDR_RESERVE .. HDR_RESERVE + canon], pay_buf[0..canon]);
+	r.heap_offset = @intCast(hdr_start);
+	r.heap_used = hdr_len + canon;
+	r.inline_len = SENTINEL_HEAP;
+	r.cached_pay_off = @intCast(hdr_len);
+	r.cached_pay_len = @intCast(canon);
+	r.cached_sign = if (result_neg) -1 else 1;
+}
+
+/// Same-size mul fast path: both operands have payloads of EXACTLY N bytes.
+/// Bypasses tier3MulOp's huge stack frame (~80 KB for the worst-case
+/// dispatch) and Karatsuba/Toom-3 scratch allocation. For N ∈ {32, 48, 64}
+/// the operands typically live in heap_buf — we copy them to small stack
+/// magnitudes (with on-the-fly negate for negatives), call mulMagnitudesU64
+/// directly, and write the canonical result back. Avoids: the dispatch
+/// branch ladder in mulRawBlip, the canonicalLen scan over the result,
+/// and writeBlip's header-byte-counting indirection.
+///
+/// Closes the 256/384/512-bit gap vs GMP — for N=32 (256-bit) this collapses
+/// the per-op overhead from ~10 ns of bookkeeping down to ~3 ns of straight-
+/// line copies and a known-size header write.
+inline fn sameSizeTier3Mul(comptime N: comptime_int, r: *Mp, a: *const Mp, b: *const Mp) ArithError!void {
+	const a_pay = a.payload();
+	const b_pay = b.payload();
+	std.debug.assert(a_pay.len == N);
+	std.debug.assert(b_pay.len == N);
+
+	const a_sign = a.cached_sign;
+	const b_sign = b.cached_sign;
+
+	// Zero short-circuit (preserves the canonical 0x00 encoding).
+	if (a_sign == 0 or b_sign == 0) {
+		r.inline_buf[0] = 0x00;
+		r.inline_len = 1;
+		r.heap_offset = 0;
+		r.cached_pay_off = 0;
+		r.cached_pay_len = 1;
+		r.cached_sign = 0;
+		return;
+	}
+
+	// Stack-buffer the magnitudes. For the same-size path with N ≤ 64, all
+	// scratch fits comfortably on the stack (192 bytes total max for N=64).
+	var mag_a: [N]u8 = undefined;
+	var mag_b: [N]u8 = undefined;
+	@memcpy(mag_a[0..N], a_pay);
+	@memcpy(mag_b[0..N], b_pay);
+	if (a_sign < 0) tier3.negateInPlace(&mag_a);
+	if (b_sign < 0) tier3.negateInPlace(&mag_b);
+
+	// Schoolbook u64 mul into a 2N-byte result. Comptime N is known to be a
+	// multiple of 8 (we only call this for N ∈ {32, 48, 64}), so the chunked
+	// u64 path applies — no per-byte fallback.
+	var prod_buf: [2 * N + 1]u8 = undefined;
+	tier3.mulMagnitudesU64(&mag_a, &mag_b, prod_buf[0 .. 2 * N]);
+
+	const result_neg = (a_sign < 0) != (b_sign < 0);
+
+	// Trim high zero bytes to find the magnitude length.
+	var mag_len: usize = 2 * N;
+	while (mag_len > 1 and prod_buf[mag_len - 1] == 0) mag_len -= 1;
+
+	// Convert magnitude → two's-complement payload (sign-extension byte if
+	// the high bit conflicts with the desired sign).
+	var pay_len: usize = mag_len;
+	if (result_neg) {
+		var carry: u16 = 1;
+		var i: usize = 0;
+		while (i < mag_len) : (i += 1) {
+			const v: u16 = @as(u16, ~prod_buf[i]) + carry;
+			prod_buf[i] = @truncate(v);
+			carry = v >> 8;
+		}
+		if ((prod_buf[mag_len - 1] & 0x80) == 0) {
+			prod_buf[mag_len] = 0xFF;
+			pay_len = mag_len + 1;
+		}
+	} else {
+		if ((prod_buf[mag_len - 1] & 0x80) != 0) {
+			prod_buf[mag_len] = 0x00;
+			pay_len = mag_len + 1;
+		}
+	}
+
+	// Canonical trim is unnecessary here because mag_len is already the
+	// minimal magnitude length (we just stripped trailing zeros) and we only
+	// ADDED a sign-ext byte when needed. So pay_len IS canonical.
+	const canon = pay_len;
+
+	// Immediate path (canon=1, value < 0x80).
+	if (canon == 1 and prod_buf[0] < 0x80) {
+		r.inline_buf[0] = prod_buf[0];
+		r.inline_len = 1;
+		r.heap_offset = 0;
+		r.cached_pay_off = 0;
+		r.cached_pay_len = 1;
+		r.cached_sign = if (prod_buf[0] == 0) 0 else 1;
+		return;
+	}
+
+	// Header is 1 byte for canon < 32, 2 bytes for canon ∈ [32..1024]. For
+	// the N ∈ {32,48,64} same-size path the result is up to 2N+1 = 129 bytes;
+	// header ranges 1..2 bytes.
+	const hdr_len: usize = if (canon < 32) 1 else 2;
+	const total = canon + hdr_len;
+
+	if (total <= INLINE_CAP) {
+		// Rare cancellation case (e.g. the Mp.mul result happens to be small).
+		// canon < 32 here so hdr_len == 1.
+		std.debug.assert(hdr_len == 1);
+		r.inline_buf[0] = 0x80 | @as(u8, @intCast(canon));
+		var snapshot: [INLINE_CAP]u8 = undefined;
+		@memcpy(snapshot[0..canon], prod_buf[0..canon]);
+		@memcpy(r.inline_buf[1 .. 1 + canon], snapshot[0..canon]);
+		if (total >= 2 and total <= 9) {
+			const L = total - 1;
+			const high_byte = r.inline_buf[1 + L - 1];
+			const sign_fill: u8 = if ((high_byte & 0x80) != 0) 0xFF else 0;
+			var i: usize = L;
+			while (i < 8) : (i += 1) r.inline_buf[1 + i] = sign_fill;
+		}
+		r.inline_len = @intCast(total);
+		r.heap_offset = 0;
+		r.cached_pay_off = 1;
+		r.cached_pay_len = @intCast(canon);
+		r.cached_sign = if (result_neg) -1 else 1;
+		return;
+	}
+
+	// Heap path (the common case).
+	try r.ensureHeapCapacity(HDR_RESERVE + canon);
+	const hdr_start = HDR_RESERVE - hdr_len;
+	if (hdr_len == 1) {
+		r.heap_buf[hdr_start] = 0x80 | @as(u8, @intCast(canon));
+	} else {
+		r.heap_buf[hdr_start] = 0x80 | 0x20 | @as(u8, @intCast(canon & 0x1F));
+		r.heap_buf[hdr_start + 1] = @as(u8, @intCast(canon >> 5));
+	}
+	@memcpy(r.heap_buf[HDR_RESERVE .. HDR_RESERVE + canon], prod_buf[0..canon]);
+	r.heap_offset = @intCast(hdr_start);
+	r.heap_used = hdr_len + canon;
+	r.inline_len = SENTINEL_HEAP;
+	r.cached_pay_off = @intCast(hdr_len);
+	r.cached_pay_len = @intCast(canon);
+	r.cached_sign = if (result_neg) -1 else 1;
 }
 
 /// Specialized canonical-length trim for ≤17 byte payloads. Same semantics

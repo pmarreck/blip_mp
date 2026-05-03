@@ -680,10 +680,20 @@ pub fn mulMagnitudes(a: []const u8, b: []const u8, r: []u8) void {
 
 /// Empirically-tuned crossover where Karatsuba starts beating chunked
 /// schoolbook on aarch64. The Karatsuba overhead (sum/sub/add helper
-/// byte-loops, ~150 ns per recursion) amortises only when the saved sub-
-/// multiplication is bigger than the overhead. With our ~50 ns chunked
-/// schoolbook for 32×32 bytes, the crossover is around 256 bytes.
-pub const KARATSUBA_THRESHOLD: usize = 256;
+/// byte-loops + memset of z1_full + recursive call frames) amortises only
+/// when the saved sub-multiplication is bigger than the overhead.
+///
+/// Re-tuned 2026-05-02: for our chunked-u64 schoolbook (≈ 0.0105 ns/byte²
+/// on aarch64 M-series), schoolbook at 256 B costs ≈ 690 ns while the
+/// 3-recursion Karatsuba split into 128-B sub-mults plus two t-byte adds,
+/// one t-byte sum-add, and two subtractions costs ≈ 880 ns. Crossover
+/// empirically lands near 384 B (3072-bit), so bump the threshold to that.
+/// At 384 B Karatsuba and schoolbook are both ≈ 1550 ns; above 384 the
+/// Karatsuba scaling advantage (n^1.585 vs n²) takes over rapidly.
+///
+/// Side benefit: aligns RSA-2048 (256 B operands) with the schoolbook
+/// fast path which beats GMP's mpn_mul_n at this size.
+pub const KARATSUBA_THRESHOLD: usize = 384;
 
 /// out[0..max(a.len, b.len)] = (a + b) mod 2^(8*out.len). Returns carry-out
 /// (0 or 1). For Karatsuba: caller passes out of length t (the larger half),
