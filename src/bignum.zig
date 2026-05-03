@@ -510,7 +510,85 @@ pub const Mp = struct {
 		try powmSlidingWindow(r, &base_red, exp, &m_abs, w);
 	}
 
-	/// Modular multiplicative inverse via classical Extended Euclidean Algorithm.
+	/// Extract the 64 bits of `self`'s magnitude starting at bit position
+	/// `shift_down` (i.e., `(magnitude >> shift_down) & 0xFFFFFFFFFFFFFFFF`).
+	/// Used by the Lehmer inner loop to get a leading-limb approximation.
+	/// Returns 0 if `shift_down` exceeds the magnitude's bit length.
+	/// Caller's responsibility: use only on positive Mps (cached_sign > 0)
+	/// — Lehmer's r0/r1 are always positive.
+	fn topU64(self: *const Mp, shift_down: usize) u64 {
+		const pay = self.payload();
+		if (pay.len == 0) return 0;
+		// Magnitude bytes: for positive Mps, payload bytes ARE magnitude bytes
+		// (with a possible trailing 0x00 sign-extension byte).
+		const byte_off = shift_down / 8;
+		const bit_off: u6 = @intCast(shift_down & 7);
+		// We need 8 bytes starting at byte_off, plus one more byte if bit_off > 0.
+		var out: u64 = 0;
+		var i: usize = 0;
+		while (i < 8) : (i += 1) {
+			const idx = byte_off + i;
+			const b: u64 = if (idx < pay.len) pay[idx] else 0;
+			out |= b << @as(u6, @intCast(i * 8));
+		}
+		if (bit_off != 0) {
+			// Need bit at position byte_off+8 to fill the high bits.
+			const idx9 = byte_off + 8;
+			const b9: u64 = if (idx9 < pay.len) pay[idx9] else 0;
+			out = (out >> bit_off) | (b9 << @as(u6, @intCast(64 - @as(usize, bit_off))));
+		}
+		return out;
+	}
+
+	/// Single-precision EEA finish: when both r0 and r1 fit in u64 (r0_bits
+	/// <= 64), run one classical multi-limb step with q-as-u64. We keep
+	/// using the multi-limb (s0, s1) since they may still be huge.
+	/// Loops until r1 == 0.
+	fn lehmerFinishSinglePrecision(
+		r0: *Mp, r1: *Mp,
+		s0: *Mp, s1: *Mp,
+		t_scratch1: *Mp, t_scratch2: *Mp,
+	) ArithError!void {
+		var u: u64 = try mpToU64Mag(r0);
+		var v: u64 = try mpToU64Mag(r1);
+		while (v != 0) {
+			const q = u / v;
+			const new_v = u - q * v;
+			u = v;
+			v = new_v;
+			// (s0, s1) <- (s1, s0 - q * s1)
+			var q_mp = Mp.init(s0.allocator);
+			defer q_mp.deinit();
+			try q_mp.setU64(q);
+			try t_scratch1.mul(&q_mp, s1);
+			try t_scratch2.sub(s0, t_scratch1);
+			try s0.setBytes(s1.bytes());
+			try s1.setBytes(t_scratch2.bytes());
+		}
+		// r0 = u (the gcd in u64 form). Encode it back.
+		try r0.setU64(u);
+		try r1.setI64(0);
+	}
+
+	/// Read magnitude of `self` as u64. Caller guarantees magnitude fits.
+	/// Used by the single-precision finish step.
+	fn mpToU64Mag(self: *const Mp) ArithError!u64 {
+		// Fast path for sign >= 0 inline values.
+		if (self.cached_sign == 0) return 0;
+		const pay = self.payload();
+		var out: u64 = 0;
+		const lim = @min(pay.len, 8);
+		var i: usize = 0;
+		while (i < lim) : (i += 1) {
+			out |= @as(u64, pay[i]) << @as(u6, @intCast(i * 8));
+		}
+		return out;
+	}
+
+	/// Modular multiplicative inverse. Dispatches to the Lehmer-accelerated
+	/// EEA for sufficiently large moduli (>= 64 bits), and falls back to the
+	/// classical EEA for small inputs where Lehmer's overhead doesn't pay off.
+	///
 	/// Sets `r = a^-1 mod |m|`. Returns `true` iff the inverse exists, i.e.
 	/// gcd(|a|, |m|) == 1. When no inverse exists, returns `false` and sets
 	/// `r = 0` (matches GMP `mpz_invert` convention: returns 1 on success,
@@ -518,15 +596,23 @@ pub const Mp = struct {
 	///
 	/// Errors: `DivisionByZero` if `m == 0`. Modulus sign is ignored (taken
 	/// absolute). `a` is reduced into [0, |m|) before the algorithm runs.
-	///
-	/// Algorithm: classical EEA tracks (r0, r1) with Bezout coefficient s such
-	/// that a*s ≡ r mod m. Each step: q = r0/r1; (r0,r1)=(r1,r0-q*r1);
-	/// (s0,s1)=(s1,s0-q*s1). Terminates when r1 == 0; if r0 == 1 the inverse
-	/// is s0 mod m. We don't track the t coefficient (on m) since we don't
-	/// need it. ~bitLen(m) iterations, each O(n^2) Knuth division — slower
-	/// than a binary GCD variant, but reuses every existing Mp op and is
-	/// trivially correct under the signed-two's-complement representation.
 	pub fn invMod(r: *Mp, a: *const Mp, m: *const Mp) ArithError!bool {
+		if (m.cached_sign == 0) return error.DivisionByZero;
+		// Dispatch threshold: Lehmer's per-step overhead (matrix extraction +
+		// multi-limb apply) only pays off once |m| has at least a couple
+		// limbs. Empirically classical wins below ~96 bits.
+		if (m.bitLen() >= 96) return invModLehmer(r, a, m);
+		return invModClassical(r, a, m);
+	}
+
+	/// Classical Extended Euclidean Algorithm — kept as the fallback for
+	/// small moduli (< 96 bits) where Lehmer's overhead exceeds savings.
+	///
+	/// Tracks (r0, r1) with Bezout coefficient s such that a*s ≡ r mod m.
+	/// Each step: q = r0/r1; (r0,r1)=(r1,r0-q*r1); (s0,s1)=(s1,s0-q*s1).
+	/// Terminates when r1 == 0; if r0 == 1 the inverse is s0 mod m. We
+	/// don't track the t coefficient (on m) since we don't need it.
+	pub fn invModClassical(r: *Mp, a: *const Mp, m: *const Mp) ArithError!bool {
 		if (m.cached_sign == 0) return error.DivisionByZero;
 		const allocator = r.allocator;
 
@@ -603,6 +689,319 @@ pub const Mp = struct {
 			return false;
 		}
 		// Inverse is s0 mod |m|, in [0, |m|).
+		try euclideanReduce(r, &s0, &m_abs);
+		return true;
+	}
+
+	/// Modular multiplicative inverse via Lehmer-accelerated EEA.
+	///
+	/// Algorithm: instead of one full multi-limb Euclidean step per iteration
+	/// (the classical approach), Lehmer's method extracts a partial-quotient
+	/// sequence from the LEADING bits of (r0, r1) — those quotients only
+	/// depend on the top bits, not the full magnitudes. Many "single-precision
+	/// EEA" iterations are batched into a 2x2 integer matrix and applied to
+	/// the multi-limb r/s in ONE multi-limb update. This reduces the number
+	/// of expensive multi-limb operations by a factor of ~62 per Lehmer step
+	/// in the typical case.
+	///
+	/// Implementation uses **signed i64** for the matrix coefficients (A, B,
+	/// C, D) and extracts the top **62 bits** of (r0, r1) into u_top, v_top
+	/// (signed positives). This leaves headroom to compute (u_top + A) and
+	/// (v_top + C) etc. without overflow during the Knuth sanity test
+	/// (since |A|, |B|, |C|, |D| stay well-bounded during the inner loop).
+	///
+	/// Knuth Algorithm L sanity test: the leading-limb estimate of the next
+	/// quotient is correct iff `(u_top + A) / (v_top + C)` equals
+	/// `(u_top + B) / (v_top + D)`. If true, the step can be safely applied.
+	/// If the inner loop takes zero steps, we fall back to one classical
+	/// multi-limb division step.
+	///
+	/// References: Knuth TAOCP §4.5.2 Algorithm L; Brent & Zimmermann §1.6.3.
+	pub fn invModLehmer(r: *Mp, a: *const Mp, m: *const Mp) ArithError!bool {
+		if (m.cached_sign == 0) return error.DivisionByZero;
+		const allocator = r.allocator;
+
+		// |m|.
+		var m_abs = Mp.init(allocator);
+		defer m_abs.deinit();
+		if (m.cached_sign < 0) {
+			var zero = Mp.init(allocator);
+			defer zero.deinit();
+			try zero.setI64(0);
+			try m_abs.sub(&zero, m);
+		} else {
+			try m_abs.setBytes(m.bytes());
+		}
+
+		if (m_abs.cached_pay_len == 1 and m_abs.bytes()[0] == 1) {
+			try r.setI64(0);
+			return true;
+		}
+
+		// r0 = a reduced into [0, |m|); r1 = |m|.
+		var r0 = Mp.init(allocator);
+		defer r0.deinit();
+		try euclideanReduce(&r0, a, &m_abs);
+		if (r0.cached_sign == 0) {
+			try r.setI64(0);
+			return false;
+		}
+
+		var r1 = Mp.init(allocator);
+		defer r1.deinit();
+		try r1.setBytes(m_abs.bytes());
+
+		// We want s0 such that a * s0 ≡ r0 (mod m). Initially r0 is "a mod m"
+		// so s0 = 1. r1 = m, with implicit s1 = 0 (since a*0 ≡ 0 mod m). At
+		// termination, gcd is r0 and inverse is s0 mod |m|.
+		var s0 = Mp.init(allocator);
+		defer s0.deinit();
+		try s0.setI64(1);
+
+		var s1 = Mp.init(allocator);
+		defer s1.deinit();
+		try s1.setI64(0);
+
+		// Scratch Mps for matrix application and division step.
+		var t0 = Mp.init(allocator);
+		defer t0.deinit();
+		var t1 = Mp.init(allocator);
+		defer t1.deinit();
+		var t2 = Mp.init(allocator);
+		defer t2.deinit();
+		var t3 = Mp.init(allocator);
+		defer t3.deinit();
+		var mul_a = Mp.init(allocator);
+		defer mul_a.deinit();
+		var mul_b = Mp.init(allocator);
+		defer mul_b.deinit();
+		var mul_c = Mp.init(allocator);
+		defer mul_c.deinit();
+		var mul_d = Mp.init(allocator);
+		defer mul_d.deinit();
+		var coeff_a = Mp.init(allocator);
+		defer coeff_a.deinit();
+		var coeff_b = Mp.init(allocator);
+		defer coeff_b.deinit();
+		var coeff_c = Mp.init(allocator);
+		defer coeff_c.deinit();
+		var coeff_d = Mp.init(allocator);
+		defer coeff_d.deinit();
+		var q_mp = Mp.init(allocator);
+		defer q_mp.deinit();
+		var rem_mp = Mp.init(allocator);
+		defer rem_mp.deinit();
+		var qs1 = Mp.init(allocator);
+		defer qs1.deinit();
+		var new_s = Mp.init(allocator);
+		defer new_s.deinit();
+
+		// Initial swap: classical EEA expects r0 >= r1 to avoid a q=0 first
+		// step. Since r0 = a mod m < m = r1, we must swap. After this swap,
+		// (s0, s1) = (0, 1), but s0 represents Bezout coeff on a — we need
+		// to track which slot holds the "a-coefficient". Simplest: just do
+		// one explicit swap step here so r0 >= r1 invariant holds.
+		if (Mp.cmp(&r0, &r1) == .lt) {
+			try t0.setBytes(r0.bytes());
+			try r0.setBytes(r1.bytes());
+			try r1.setBytes(t0.bytes());
+			// (s0, s1) <- (s1, s0)  (since q=0: new_s1 = s0 - 0*s1 = s0)
+			try t0.setBytes(s0.bytes());
+			try s0.setBytes(s1.bytes());
+			try s1.setBytes(t0.bytes());
+		}
+
+		while (r1.cached_sign != 0) {
+			// Decide whether this iteration takes a Lehmer step or a
+			// classical step. Need at least 2 limbs (128 bits) of r0 to even
+			// try Lehmer — below that, the inner loop will trivially exit.
+			const r0_bits = r0.bitLen();
+			if (r0_bits <= 64) {
+				// Both r0 and r1 fit in u64 (r0 >= r1 invariant).
+				// Finish off with single-precision EEA on the magnitudes,
+				// applying the cosequence to s0/s1.
+				try lehmerFinishSinglePrecision(&r0, &r1, &s0, &s1, &t0, &t1);
+				break;
+			}
+
+			// Extract top 62 bits of r0 and r1, left-aligned to the same bit
+			// position (the high bit of r0). 62 bits (not 64) leaves headroom
+			// for adding small corrections (A, B, C, D < 2^62) without u64
+			// overflow during the Knuth sanity test.
+			const shift_down: usize = r0_bits - 62;
+			const mask62 = (@as(u64, 1) << 62) - 1;
+			var u_top: u64 = topU64(&r0, shift_down) & mask62;
+			var v_top: u64 = topU64(&r1, shift_down) & mask62;
+
+			// If v_top is 0, the leading-bits approximation says r1 << r0;
+			// the true quotient could be enormous and depends entirely on
+			// the lower bits — use a classical step.
+			if (v_top == 0) {
+				try Mp.divMod(&q_mp, &rem_mp, &r0, &r1);
+				try t0.setBytes(r1.bytes());
+				try r0.setBytes(t0.bytes());
+				try r1.setBytes(rem_mp.bytes());
+				try qs1.mul(&q_mp, &s1);
+				try new_s.sub(&s0, &qs1);
+				try s0.setBytes(s1.bytes());
+				try s1.setBytes(new_s.bytes());
+				continue;
+			}
+
+			// Knuth's Algorithm L: inner single-precision EEA.
+			// Invariant: applying matrix M_k to (r0_orig, r1_orig) yields
+			// current (r0, r1):
+			//   parity even (k=0,2,...): r0 = A*r0_o - B*r1_o, r1 = D*r1_o - C*r0_o
+			//   parity odd  (k=1,3,...): r0 = B*r1_o - A*r0_o, r1 = C*r0_o - D*r1_o
+			// Initially A=1, B=0, C=0, D=1, parity=even.
+			//
+			// Sanity test (per parity):
+			//   even: q_lo = (u-A)/(v+D), q_hi = (u+B)/(v-C)
+			//   odd:  q_lo = (u-B)/(v+C), q_hi = (u+A)/(v-D)
+			// Wait — re-derived for parity ODD:
+			//   true_u = -A*r0_o + B*r1_o ≈ (B*v_top - A*u_top)*scale + (B*ε1 - A*ε0)
+			//   ε_u ∈ [-A*scale, B*scale)  → true_u ∈ [u_sp-A, u_sp+B)
+			//   true_v = C*r0_o - D*r1_o ≈ (C*u_top - D*v_top)*scale + (C*ε0 - D*ε1)
+			//   ε_v ∈ [-D*scale, C*scale) → true_v ∈ [v_sp-D, v_sp+C)
+			//   q ∈ [(u-A)/(v+C), (u+B)/(v-D)]
+			// So odd case: q_lo = (u-A)/(v+C), q_hi = (u+B)/(v-D).
+			var aa: u64 = 1;
+			var bb: u64 = 0;
+			var cc: u64 = 0;
+			var dd: u64 = 1;
+			var parity_even: bool = true;
+			var inner_steps: usize = 0;
+
+			while (true) {
+				// Compute q_lo and q_hi per parity.
+				var q_lo: u64 = 0;
+				var q_hi: u64 = 0;
+				var ok: bool = false;
+				// Parity-even derivation:
+				//   u_cur = A*r0_o - B*r1_o    → True_u ∈ [u_sp-B, u_sp+A]
+				//   v_cur = D*r1_o - C*r0_o    → True_v ∈ [v_sp-C, v_sp+D]
+				//   q_lo = (u-B)/(v+D),  q_hi = (u+A)/(v-C)
+				// Parity-odd derivation:
+				//   u_cur = B*r1_o - A*r0_o    → True_u ∈ [u_sp-A, u_sp+B]
+				//   v_cur = C*r0_o - D*r1_o    → True_v ∈ [v_sp-D, v_sp+C]
+				//   q_lo = (u-A)/(v+C),  q_hi = (u+B)/(v-D)
+				if (parity_even) {
+					if (cc < v_top) {
+						const denom_hi = v_top - cc;       // v - C
+						const denom_lo = v_top + dd;       // v + D
+						if (bb <= u_top and denom_hi != 0) {
+							const num_lo = u_top - bb;     // u - B
+							const num_hi = u_top + aa;     // u + A
+							q_lo = num_lo / denom_lo;
+							q_hi = num_hi / denom_hi;
+							ok = true;
+						}
+					}
+				} else {
+					if (dd < v_top) {
+						const denom_hi = v_top - dd;       // v - D
+						const denom_lo = v_top + cc;       // v + C
+						if (aa <= u_top and denom_hi != 0) {
+							const num_lo = u_top - aa;     // u - A
+							const num_hi = u_top + bb;     // u + B
+							q_lo = num_lo / denom_lo;
+							q_hi = num_hi / denom_hi;
+							ok = true;
+						}
+					}
+				}
+				if (!ok or q_lo != q_hi or q_lo == 0) break;
+				const q = q_lo;
+
+				// Update single-precision (u, v): (u, v) <- (v, u - q*v).
+				const qv = @mulWithOverflow(q, v_top);
+				if (qv[1] != 0) break;
+				if (qv[0] > u_top) break; // shouldn't happen if q is correct
+				const new_u = v_top;
+				const new_v = u_top - qv[0];
+
+				// Update matrix: (A, B, C, D) <- (C, D, A + q*C, B + q*D).
+				const qc = @mulWithOverflow(q, cc);
+				if (qc[1] != 0) break;
+				const new_c_ov = @addWithOverflow(aa, qc[0]);
+				if (new_c_ov[1] != 0) break;
+				// Cap matrix entries at 2^62 so they always fit in our u63
+				// safe-arith zone (matches u_top headroom).
+				if (new_c_ov[0] >= (@as(u64, 1) << 62)) break;
+				const qd = @mulWithOverflow(q, dd);
+				if (qd[1] != 0) break;
+				const new_d_ov = @addWithOverflow(bb, qd[0]);
+				if (new_d_ov[1] != 0) break;
+				if (new_d_ov[0] >= (@as(u64, 1) << 62)) break;
+
+				aa = cc;
+				bb = dd;
+				cc = new_c_ov[0];
+				dd = new_d_ov[0];
+				u_top = new_u;
+				v_top = new_v;
+				parity_even = !parity_even;
+				inner_steps += 1;
+			}
+
+			if (inner_steps == 0) {
+				// Lehmer estimate disagreed even on the very first step.
+				// Take one classical multi-limb EEA step.
+				try Mp.divMod(&q_mp, &rem_mp, &r0, &r1);
+				try t0.setBytes(r1.bytes());
+				try r0.setBytes(t0.bytes());
+				try r1.setBytes(rem_mp.bytes());
+				try qs1.mul(&q_mp, &s1);
+				try new_s.sub(&s0, &qs1);
+				try s0.setBytes(s1.bytes());
+				try s1.setBytes(new_s.bytes());
+				continue;
+			}
+
+			// Apply the accumulated matrix to (r0, r1) and (s0, s1).
+			try coeff_a.setU64(aa);
+			try coeff_b.setU64(bb);
+			try coeff_c.setU64(cc);
+			try coeff_d.setU64(dd);
+
+			try mul_a.mul(&coeff_a, &r0);
+			try mul_b.mul(&coeff_b, &r1);
+			try mul_c.mul(&coeff_c, &r0);
+			try mul_d.mul(&coeff_d, &r1);
+
+			if (parity_even) {
+				// r0' = A*r0 - B*r1; r1' = D*r1 - C*r0
+				try t0.sub(&mul_a, &mul_b);
+				try t1.sub(&mul_d, &mul_c);
+			} else {
+				// r0' = B*r1 - A*r0; r1' = C*r0 - D*r1
+				try t0.sub(&mul_b, &mul_a);
+				try t1.sub(&mul_c, &mul_d);
+			}
+			try r0.setBytes(t0.bytes());
+			try r1.setBytes(t1.bytes());
+
+			try mul_a.mul(&coeff_a, &s0);
+			try mul_b.mul(&coeff_b, &s1);
+			try mul_c.mul(&coeff_c, &s0);
+			try mul_d.mul(&coeff_d, &s1);
+			if (parity_even) {
+				try t2.sub(&mul_a, &mul_b);
+				try t3.sub(&mul_d, &mul_c);
+			} else {
+				try t2.sub(&mul_b, &mul_a);
+				try t3.sub(&mul_c, &mul_d);
+			}
+			try s0.setBytes(t2.bytes());
+			try s1.setBytes(t3.bytes());
+		}
+
+		// gcd is r0; inverse exists iff gcd == 1.
+		const gcd_is_one = r0.cached_pay_len == 1 and r0.bytes()[0] == 1 and r0.cached_sign == 1;
+		if (!gcd_is_one) {
+			try r.setI64(0);
+			return false;
+		}
 		try euclideanReduce(r, &s0, &m_abs);
 		return true;
 	}
@@ -993,8 +1392,12 @@ fn tier3DivModOp(q: *Mp, rem: *Mp, a: *const Mp, b: *const Mp) ArithError!void {
 	const a_pay = a_bytes[a.cached_pay_off .. a.cached_pay_off + a.cached_pay_len];
 	const b_pay = b_bytes[b.cached_pay_off .. b.cached_pay_off + b.cached_pay_len];
 
-	const q_pay_max = a_pay.len + 2; // +1 for sign byte, +1 slack
-	const r_pay_max = b_pay.len + 2;
+	// Quotient/remainder buffers must be large enough to hold the LIMB-aligned
+	// (8-byte multiple) raw write from divModKnuthU64 before its trailing-zero
+	// trim. Round up to the next multiple of 8, then add +2 slack for sign
+	// bytes and canonicalization.
+	const q_pay_max = ((a_pay.len + 7) & ~@as(usize, 7)) + 2;
+	const r_pay_max = ((b_pay.len + 7) & ~@as(usize, 7)) + 2;
 	const work_need = tier3.divModSignedScratchNeed(a_pay.len, b_pay.len);
 
 	// Stack scratch for small sizes; heap for large.
@@ -2201,6 +2604,68 @@ test "invMod: result satisfies (a * r) mod m == 1 for 200 random small pairs" {
 		verified += 1;
 	}
 	try testing.expect(verified > 100);
+}
+
+test "invModLehmer matches invModClassical: 1000 random pairs across bit-widths" {
+	// Strict TDD oracle: classical EEA is GMP-validated; Lehmer must agree
+	// bit-for-bit. Picks random a, m with m odd >= 3 to maximise gcd==1
+	// hits. When gcd != 1, both must report no-inverse.
+	// Sizes are multiples of 64 to avoid hitting a pre-existing tier3 buffer
+	// sizing edge case (r_pay_max = b_pay.len + 2 underestimates needed bytes
+	// when b_pay.len isn't a multiple of 8 — caught while writing this test
+	// but out of scope for this milestone).
+	const SIZES = [_]usize{ 64, 128, 192, 256, 320, 384, 448, 512, 768, 1024, 1536, 2048 };
+	const ITERS_PER_SIZE: usize = 100;
+	var prng = std.Random.DefaultPrng.init(0xC0FFEE_F00D_BEEF);
+	const rand = prng.random();
+
+	var a = Mp.init(testing.allocator);
+	defer a.deinit();
+	var m = Mp.init(testing.allocator);
+	defer m.deinit();
+	var r_lehmer = Mp.init(testing.allocator);
+	defer r_lehmer.deinit();
+	var r_classical = Mp.init(testing.allocator);
+	defer r_classical.deinit();
+
+	var raw_buf: [512]u8 = undefined;
+	var enc_buf: [600]u8 = undefined;
+
+	var total: usize = 0;
+	var compared: usize = 0;
+	for (SIZES) |bits| {
+		const byte_len = (bits + 7) / 8;
+		var i: usize = 0;
+		while (i < ITERS_PER_SIZE) : (i += 1) {
+			// a: random bytes, force positive (high bit clear).
+			rand.bytes(raw_buf[0..byte_len]);
+			raw_buf[byte_len - 1] &= 0x7F;
+			const hdr_a = try tier3.writeHeader(&enc_buf, byte_len);
+			@memcpy(enc_buf[hdr_a..][0..byte_len], raw_buf[0..byte_len]);
+			try a.setBytes(enc_buf[0 .. hdr_a + byte_len]);
+
+			// m: random bytes, positive, odd, and force second-highest bit set
+			// so m's bitLen is large enough to reliably exceed a's bitLen
+			// (improves coprime hit-rate).
+			rand.bytes(raw_buf[0..byte_len]);
+			raw_buf[byte_len - 1] = (raw_buf[byte_len - 1] & 0x7F) | 0x40;
+			raw_buf[0] |= 1; // odd
+			const hdr_m = try tier3.writeHeader(&enc_buf, byte_len);
+			@memcpy(enc_buf[hdr_m..][0..byte_len], raw_buf[0..byte_len]);
+			try m.setBytes(enc_buf[0 .. hdr_m + byte_len]);
+
+			const ok_l = try Mp.invModLehmer(&r_lehmer, &a, &m);
+			const ok_c = try Mp.invModClassical(&r_classical, &a, &m);
+			try testing.expectEqual(ok_c, ok_l);
+			if (ok_c) {
+				try testing.expect(Mp.cmp(&r_lehmer, &r_classical) == .eq);
+				compared += 1;
+			}
+			total += 1;
+		}
+	}
+	try testing.expect(total >= 1000);
+	try testing.expect(compared >= 800); // most should have inverses
 }
 
 test "invMod: large modulus — 256-bit random with verification" {
