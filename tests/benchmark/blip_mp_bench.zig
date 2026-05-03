@@ -428,6 +428,11 @@ fn benchmarkMpDivModLarge(allocator: std.mem.Allocator, lb: LargeBucket) !f64 {
 	defer rem.deinit();
 
 	const iters = divModIters(lb.bits);
+	// Warmup: 1 call to prime icache/branch predictor before measurement.
+	// Critical at low-iteration sizes (8K-bit divMod = 5K iters; cold-cache
+	// first iteration can swing the median by 5-10%).
+	try blip_mp.Mp.divMod(&q, &rem, &dividend_pool[0], &divisor_pool[0]);
+
 	const start_ns = nowNs();
 	var i: usize = 0;
 	while (i < iters) : (i += 1) {
@@ -466,6 +471,11 @@ fn benchmarkMpPowmLarge(allocator: std.mem.Allocator, lb: LargeBucket) !f64 {
 	defer result.deinit();
 
 	const iters = powmIters(lb.bits);
+	// Warmup: 1 powm call before measurement. CRITICAL for powm because
+	// 3072-bit runs only 50 iterations total — cold-cache first iter
+	// would skew the median by ~10-20%.
+	try blip_mp.Mp.powm(&result, &base_pool[0], &exp_pool[0], &mod_pool[0]);
+
 	const start_ns = nowNs();
 	var i: usize = 0;
 	while (i < iters) : (i += 1) {
@@ -501,6 +511,9 @@ fn benchmarkMpInvModLarge(allocator: std.mem.Allocator, lb: LargeBucket) !f64 {
 	defer r.deinit();
 
 	const iters = invModIters(lb.bits);
+	// Warmup: 1 invMod call before measurement.
+	_ = try blip_mp.Mp.invMod(&r, &a_pool[0], &m_pool[0]);
+
 	const start_ns = nowNs();
 	var i: usize = 0;
 	var ok_count: usize = 0;

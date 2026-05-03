@@ -296,6 +296,9 @@ static double benchmark_large_bucket_divmod(const LargeBucket *lb) {
 	mpz_init(q); mpz_init(r);
 
 	const uint64_t iters = divmod_iters(lb->bits);
+	/* Warmup before measurement (matches blip_mp_bench.zig's pattern). */
+	mpz_tdiv_qr(q, r, dividend_pool[0], divisor_pool[0]);
+
 	struct timespec start, end;
 	clock_gettime(CLOCK_MONOTONIC, &start);
 	for (uint64_t i = 0; i < iters; i++) {
@@ -325,6 +328,9 @@ static double benchmark_large_bucket_powm(const LargeBucket *lb) {
 	mpz_init(result);
 
 	const uint64_t iters = powm_iters(lb->bits);
+	/* Warmup before measurement. */
+	mpz_powm(result, base_pool[0], exp_pool[0], mod_pool[0]);
+
 	struct timespec start, end;
 	clock_gettime(CLOCK_MONOTONIC, &start);
 	for (uint64_t i = 0; i < iters; i++) {
@@ -353,6 +359,9 @@ static double benchmark_large_bucket_invmod(const LargeBucket *lb) {
 	mpz_init(r);
 
 	const uint64_t iters = invmod_iters(lb->bits);
+	/* Warmup before measurement. */
+	(void)mpz_invert(r, a_pool[0], m_pool[0]);
+
 	struct timespec start, end;
 	clock_gettime(CLOCK_MONOTONIC, &start);
 	uint64_t ok_count = 0;
