@@ -1258,11 +1258,127 @@ pub fn divModKnuthScratchNeed(u_len: usize, v_len: usize) usize {
 	return u_len + 1 + v_len;
 }
 
+/// Möller-Granlund 2/1 reciprocal: precompute `v = floor((2^128 - 1)/d) - 2^64`
+/// where `d` is a normalized 64-bit divisor (high bit set). Used by the
+/// `div2by1` primitive in Knuth's q_hat estimate to replace a hardware
+/// 128/64 udiv with a multiply-add. Reference: Möller & Granlund 2010,
+/// "Improved division by invariant integers", IEEE Trans. Comput., Alg. 2.
+inline fn invertLimb(d: u64) u64 {
+	std.debug.assert((d >> 63) == 1); // d must be normalized.
+	// numer = 2^128 - 1 - d * 2^64 = ((~d) << 64) | (2^64 - 1)
+	const numer: u128 = (@as(u128, ~d) << 64) | std.math.maxInt(u64);
+	return @truncate(numer / @as(u128, d));
+}
+
+/// Möller-Granlund Algorithm 4: 2-limb / 1-limb division using the
+/// precomputed reciprocal `v_inv = invertLimb(d)`. Returns the exact
+/// quotient (q) and remainder (r) for `(u1 * 2^64 + u0) / d`, with
+/// preconditions: `d` normalized and `u1 < d`. Replaces the hardware
+/// 128/64 udiv with a multiply-add and at most two correction subtracts.
+/// On modern CPUs (esp. aarch64) udiv x is high-latency; mul-mul-cmp wins.
+inline fn div2by1(u_hi: u64, u_lo: u64, d: u64, v_inv: u64) struct { q: u64, r: u64 } {
+	// GMP `udiv_qrnnd_preinv` formulation of Möller-Granlund Algorithm 4.
+	// Pre: d normalized (high bit set), u_hi < d, v_inv = invertLimb(d).
+	// The +1 is folded into the high addend so the 128-bit sum captures
+	// all carries mod 2^128 — a bare `+` in Zig is checked-overflow UB,
+	// so we use `+%` explicitly throughout.
+	//
+	//   (qh, ql) = u_hi * v_inv                         128-bit product
+	//   (qh, ql) += ((u_hi + 1) << 64) | u_lo           128-bit add (mod 2^128)
+	//   r = u_lo - qh * d                               mod 2^64
+	//   if r > ql:  qh -= 1; r += d
+	//   if r >= d:  qh += 1; r -= d                     rare correction
+	const prod: u128 = @as(u128, u_hi) *% @as(u128, v_inv);
+	const addend: u128 = (@as(u128, u_hi +% 1) << 64) | @as(u128, u_lo);
+	const sum: u128 = prod +% addend;
+	var qh: u64 = @truncate(sum >> 64);
+	const ql: u64 = @truncate(sum);
+	var r: u64 = u_lo -% (qh *% d);
+	if (r > ql) {
+		qh -%= 1;
+		r +%= d;
+	}
+	if (r >= d) {
+		qh +%= 1;
+		r -%= d;
+	}
+	return .{ .q = qh, .r = r };
+}
+
+/// Möller-Granlund Algorithm 6: 3/2 reciprocal of a normalized 2-limb divisor.
+/// Given the top 2 normalized divisor limbs `(d1, d0)` (d1 has high bit set),
+/// returns `vinv = floor((B^3 - 1) / (d1*B + d0)) - B`. Used by `div3by2`.
+inline fn invertLimb2(d1: u64, d0: u64) u64 {
+	std.debug.assert((d1 >> 63) == 1);
+	var v: u64 = invertLimb(d1);
+	var p: u64 = d1 *% v;
+	p +%= d0;
+	if (p < d0) {
+		v -%= 1;
+		if (p >= d1) {
+			v -%= 1;
+			p -%= d1;
+		}
+		p -%= d1;
+	}
+	const t: u128 = @as(u128, v) *% @as(u128, d0);
+	const t1: u64 = @truncate(t >> 64);
+	const t0: u64 = @truncate(t);
+	p +%= t1;
+	if (p < t1) {
+		v -%= 1;
+		// Compare (p, t0) >= (d1, d0)?
+		if (p > d1 or (p == d1 and t0 >= d0)) {
+			v -%= 1;
+		}
+	}
+	return v;
+}
+
+/// Möller-Granlund Algorithm 5: 3-limb / 2-limb division using `invertLimb2`.
+/// Returns the exact quotient (≤ B - 1) and 2-limb remainder, given:
+///   * `(u_hi, u_mid, u_lo)` — 3 dividend limbs, with `(u_hi, u_mid) < (d1, d0)`
+///   * `(d1, d0)` — normalized 2-limb divisor (d1 high bit set)
+///   * `vinv` — invertLimb2(d1, d0)
+/// Replaces a hardware 192/128 divide with a multiply-add chain plus at most
+/// one or two corrections. Used in the inner Knuth loop to estimate q_hat
+/// such that q_hat is **at most 1 too high** vs the true quotient digit
+/// against the full multi-limb divisor — eliminating the v_second refinement
+/// loop entirely and leaving D5 to fix the rare +1.
+inline fn div3by2(u_hi: u64, u_mid: u64, u_lo: u64, d1: u64, d0: u64, vinv: u64) struct { q: u64, r1: u64, r0: u64 } {
+	// (q1, q0) = u_hi * vinv
+	const prod: u128 = @as(u128, u_hi) *% @as(u128, vinv);
+	// (q1, q0) += (u_hi, u_mid)
+	const sum: u128 = prod +% ((@as(u128, u_hi) << 64) | @as(u128, u_mid));
+	var q1: u64 = @truncate(sum >> 64);
+	const q0: u64 = @truncate(sum);
+	// r1 = u_mid - q1 * d1   (mod B)
+	var r1: u64 = u_mid -% (q1 *% d1);
+	// (t1, t0) = q1 * d0
+	const t: u128 = @as(u128, q1) *% @as(u128, d0);
+	// r = (r1, u_lo) - t - (d1, d0)
+	const r_init: u128 = (@as(u128, r1) << 64) | @as(u128, u_lo);
+	const d_full: u128 = (@as(u128, d1) << 64) | @as(u128, d0);
+	var r: u128 = r_init -% t -% d_full;
+	r1 = @truncate(r >> 64);
+	q1 +%= 1;
+	if (r1 >= q0) {
+		q1 -%= 1;
+		r +%= d_full;
+	}
+	if (r >= d_full) {
+		q1 +%= 1;
+		r -%= d_full;
+	}
+	return .{ .q = q1, .r1 = @truncate(r >> 64), .r0 = @truncate(r) };
+}
+
 /// Knuth Algorithm D (TAOCP vol 2 §4.3.1) in base b = 2^64. Operates on
 /// little-endian u64-limb arrays. The structural change vs `divModKnuth`
 /// (byte-base): we do roughly 8× fewer iterations of the outer loop and
-/// 8× fewer q_hat refinements per quotient digit, with each inner step
-/// being a single u128/u64 divide that lowers to one aarch64 `udiv x`.
+/// 8× fewer q_hat refinements per quotient digit. The q_hat estimate uses
+/// the Möller-Granlund 2/1 reciprocal trick (precomputed at D1 normalize)
+/// so each inner step is a multiply-add instead of a hardware 128/64 udiv.
 ///
 /// Inputs (all little-endian, limb[0] = lowest 64 bits):
 ///   u: dividend buffer; u[0..u_len] contains the canonical dividend (no
@@ -1373,6 +1489,12 @@ pub fn divModKnuthU64(
 
 	const v_top: u64 = vn[n - 1];
 	const v_second: u64 = vn[n - 2];
+	// Möller-Granlund 3/2 reciprocal: one udiv-based precompute amortized
+	// across all m+1 quotient digits. The resulting q_hat from `div3by2`
+	// is at most 1 too high vs the true digit (vs Knuth's classical 2 too
+	// high), so the v_second refinement loop is unnecessary — the rare
+	// over-by-one is recovered by the D5 add-back below.
+	const v_inv: u64 = invertLimb2(v_top, v_second);
 
 	// Main loop D2..D7 — process quotient limbs from high to low.
 	var j_plus_one: usize = m + 1;
@@ -1380,36 +1502,23 @@ pub fn divModKnuthU64(
 		j_plus_one -= 1;
 		const j = j_plus_one;
 
-		// D3: Estimate q_hat from the top two limbs of u over v_top.
+		// D3: Estimate q_hat using Möller-Granlund 3/2.
+		// Precondition for div3by2: (u_top, u_next) < (v_top, v_second).
+		// When this fails, the true q_hat = 2^64 - 1 (capped). Detect with
+		// a single 128-bit lex compare and fall through.
 		const u_top: u64 = u[j + n];
 		const u_next: u64 = u[j + n - 1];
-		const window: u128 = (@as(u128, u_top) << 64) | @as(u128, u_next);
-		var qhat: u64 = undefined;
-		var rhat: u64 = undefined;
-		if (u_top >= v_top) {
-			// Quotient would be ≥ 2^64. Cap and recompute remainder.
-			qhat = std.math.maxInt(u64);
-			// rhat = window - qhat * v_top  (mod 2^128 is fine — true value fits).
-			// But it's easier to compute rhat = u_next + v_top - (overflow-safe).
-			// Since qhat = 2^64-1 and window < 2*v_top * 2^64 (because qhat capped),
-			// rhat = window - qhat*v_top.
-			const prod: u128 = @as(u128, qhat) * @as(u128, v_top);
-			rhat = @truncate(window - prod);
-		} else {
-			qhat = @intCast(window / @as(u128, v_top));
-			rhat = @intCast(window - @as(u128, qhat) * @as(u128, v_top));
-		}
-
-		// Refine: while qhat * v[n-2] > (rhat << 64) + u[j+n-2]:
 		const u_third: u64 = u[j + n - 2];
-		while (true) {
-			const lhs: u128 = @as(u128, qhat) * @as(u128, v_second);
-			const rhs: u128 = (@as(u128, rhat) << 64) | @as(u128, u_third);
-			if (lhs <= rhs) break;
-			qhat -= 1;
-			const new_rhat = @as(u128, rhat) + @as(u128, v_top);
-			if (new_rhat >> 64 != 0) break; // rhat overflowed past 2^64 → stop refining.
-			rhat = @intCast(new_rhat);
+		var qhat: u64 = undefined;
+		const u_hi128: u128 = (@as(u128, u_top) << 64) | @as(u128, u_next);
+		const v_hi128: u128 = (@as(u128, v_top) << 64) | @as(u128, v_second);
+		if (u_hi128 >= v_hi128) {
+			// Cap at maxInt(u64). The classical Knuth subtract+add-back below
+			// will recover if this is one too high.
+			qhat = std.math.maxInt(u64);
+		} else {
+			const dq = div3by2(u_top, u_next, u_third, v_top, v_second, v_inv);
+			qhat = dq.q;
 		}
 
 		// D4: Multiply and subtract  u[j..j+n+1] -= qhat * vn[0..n].
