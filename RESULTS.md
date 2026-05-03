@@ -244,6 +244,18 @@ GMP uses Schönhage-Strassen Number-Theoretic Transform (NTT) at high thresholds
 
 The remaining 13–15% gap requires alloc-elimination (caller-supplied scratch, ~6–9K ns), wiring Stockham into production with that scratch, and possibly hand-scheduled aarch64 inline asm for the butterfly inner loop. Roadmap detail in PLAN.md M6-4-E.
 
+**CRT-FFT crossover at very large sizes (iter-22 measurement, 2026-05-03):** Investigated whether CRT-FFT becomes competitive at very large operand sizes (where FFT's asymptotic O(n log n log log n) eventually beats Toom-3's O(n^1.46)). Direct measurement at sizes up to the 256K-bit single-operand cap:
+
+| bits | Toom-3 (ns) | CRT-FFT (ns) | ratio |
+|---:|---:|---:|---:|
+| 65536 | 285K | 810K | 2.84× slower |
+| 98304 | 505K | 1862K | 3.69× |
+| 131072 | 864K | 1871K | 2.16× |
+| 196608 | 1517K | 4292K | 2.83× |
+| 262144 | 2618K | 4321K | 1.65× |
+
+CRT-FFT loses across the entire supported range; the asymptotic crossover sits beyond 262K-bit (likely 1M+ bit). CRT doubles the NTT work (two convolutions instead of one), so the constant factor is large. Single-prime FFT (without CRT, capped at 56K-bit operands) is more competitive in its range but still behind Toom-3 there. **Conclusion: FFT-class algorithms in this codebase need either inline-asm-driven constant-factor improvement (M6-4-E.3) or operand sizes far above standard crypto (which itself doesn't go past 8K-bit).**
+
 ### 3. Toom-3 with diminishing returns
 
 Our Toom-3 implementation is correct and dispatched at 16K-bit threshold, providing a small (~3%) win at 32K-bit. Below 16K-bit, Karatsuba's lower constant overhead wins. Above 32K-bit (untested), Toom-3's asymptotic O(n^1.46) would presumably grow vs Karatsuba's O(n^1.58).
