@@ -31,7 +31,7 @@ BLIP integer encoding restricted to **signed two's-complement** reading (per SPE
 - `encodedSizeI64`, `encodeI64Canonical`, `decodeI64`
 - `headerInfoLookup` — 256-entry comptime table: maps a byte's leading bits to (immediate vs length-prefixed, is sentinel, etc.)
 
-### `src/bignum.zig` (3963 lines)
+### `src/bignum.zig` (4516 lines)
 The `Mp` bignum type. **Representation 1a (SBO) + heap reuse + sign-extended inline tail.** 24-byte inline buffer + reuse-aware heap fallback. Tier 0/1 zero-alloc. For length-prefixed inline values, `inline_buf[1..9]` ALWAYS holds the full sign-extended i64 in LE — public `bytes()` returns only the canonical `[0..inline_len]` slice but internal arithmetic reads the i64 in a single u64 load. Struct = 72 bytes (one cache line + 8B).
 
 **Layout**:
@@ -52,6 +52,8 @@ The `Mp` bignum type. **Representation 1a (SBO) + heap reuse + sign-extended inl
 - `Mp.divMod(q, r, a, b)` / `Mp.div` / `Mp.mod` — truncated division (GMP `mpz_tdiv_qr` semantics)
 - `Mp.powm(r, base, exp, mod)` — modular exponentiation; dispatcher routes to `powmMontgomery` for odd modulus ≥ 64 bits, `powmSlidingWindow` (square-and-multiply with 4-/5-/6-bit window) for ≤ 256-bit OR even modulus, `powmSquareAndMultiply` for tiny exponents
 - `Mp.invMod(r, a, m) -> bool` — modular multiplicative inverse via Lehmer-augmented EEA. Returns `true` iff inverse exists. Dispatcher: `invModHGCD` (M10 wider-window u128) for moduli ≥ 256 bits → `invModLehmer` (M9) for 96-256 bits → `invModClassical` for smaller. `euclideanReduce` ensures result in [0, |m|)
+- `Mp.HGCDMatrix` (M11.1, standalone — not yet wired into `invMod`) — 2x2 EEA-reduction matrix with multi-precision Mp coefficients `(a, b, c, d)` and a `parity_even` flag tracking the sign convention. Operations: `init/deinit`, `setIdentity`, `applyToPair(r0, r1)` (in-place reduction), `composeOuter(M_outer)` (matrix product `self <- M_outer · self`). All four parity-of-self × parity-of-outer cases yield the SAME composition formulas (only the parity bit flips) — discovered during derivation.
+- `Mp.hgcd(out_M, a, b, target_bits, allocator)` (M11.1) — half-GCD primitive. Reduces `(a, b)` until `bitLen(a') ≤ target_bits` (canonical use: `target_bits = bitLen(a) / 2`), outputting the accumulated reduction matrix in `out_M`. Iterative Lehmer-style with multi-precision matrix accumulation via `composeOuter`. Standalone — not yet integrated into `Mp.invMod` (M11.2 future work). Validated as bit-for-bit equivalent to classical EEA reduction stepped to the same target threshold across {64..2048}-bit random pairs.
 
 **Internal helpers** (incomplete — see file):
 - `decodeInlineSmall` (single-LDR i64 read), `ensureHeapCapacity`

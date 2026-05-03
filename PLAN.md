@@ -239,9 +239,12 @@ See git history for per-item detail.
 
 - [x] **invModHGCD u128 wider-window** — same Lehmer algorithm at u128 matrix entries. **1.83× over M9 Lehmer at 2048-bit.** Combined cumulative gap: 7.85× → 3.96× at RSA-2048. (NOT true sub-quadratic HGCD — that's M11.)
 
-## Milestone 11 — true recursive half-GCD (PENDING)
+## Milestone 11 — true recursive half-GCD (IN PROGRESS)
 
-- [ ] **Recursive HGCD with multi-precision matrix entries** — true sub-quadratic O(M(n) log n) divide-and-conquer reformulation. Substantial multi-day project. Would close the residual ~4× invMod gap to GMP at 2048-bit and scale dramatically better at 4K+ bit. References: Yap §2.6, GMP `mpn/generic/hgcd*.c`, TAOCP §4.5.3 problem 35. Lehmer remains the recursion base.
+- [x] **M11.1 — Standalone HGCD primitive (NOT wired into invMod)** (2026-05-02 EST) — Shipped `Mp.HGCDMatrix` (multi-precision 2x2 with parity-tracked sign convention) + `Mp.hgcd(out_M, a, b, target_bits, allocator)` iterative Lehmer-style primitive that accumulates the reduction matrix via `composeOuter`. Bit-for-bit oracle test (HGCD-applied-to-(a,b) == classical-EEA-stepped-to-half-bit-threshold) passes across {64,128,256,512,1024,2048}-bit random pairs (12 iters/size). Plus identity + one-step EEA structural tests. Did NOT touch `Mp.invMod` (deferred to M11.2). Notable derivation finding: matrix composition formulas are identical across all four parity-of-self × parity-of-outer cases — only the parity bit flips.
+- [ ] **M11.1.2 — True recursive HGCD with O(M(n) log n)** — Build the divide-and-conquer recursion on top of M11.1's matrix machinery (recurse on top half-bits, compose with EEA correction step, recurse on top quarter-bits, compose). The iterative scaffold + composeOuter make this an additive change rather than a rewrite. Substantial: matrix-by-matrix products at the n-bit level themselves cost O(M(n)) so recursion depth and base-case threshold need careful tuning.
+- [ ] **M11.2 — Integration into Mp.invMod** — Apply the HGCD-produced matrix to `(s0, s1)` Bezout coefficients alongside `(r0, r1)`. Expected gain: 2-4× over M10 wider-window Lehmer at 2048-bit; combined with M10 ~5-10× over M9. Would close residual gap to GMP at RSA-2048 (currently 3.23×).
+- [ ] **Original framing (kept for context)** — true sub-quadratic O(M(n) log n) divide-and-conquer reformulation. References: Yap §2.6, GMP `mpn/generic/hgcd*.c`, TAOCP §4.5.3 problem 35. Lehmer remains the recursion base.
 
 ## Open follow-ups (ranked)
 
