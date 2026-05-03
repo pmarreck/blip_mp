@@ -626,10 +626,16 @@ pub const Mp = struct {
 		// Fast path for sign >= 0 inline values.
 		if (self.cached_sign == 0) return 0;
 		const pay = self.payload();
+		// Fast path: full 8-byte payload → single LDR x via readInt.
+		// Common case in lehmerFinishSinglePrecision where r0/r1 are u64
+		// magnitudes (payload length frequently exactly 8).
+		if (pay.len >= 8) {
+			return std.mem.readInt(u64, pay[0..8], .little);
+		}
+		// Slow path: zero-extend short payloads (1-7 bytes).
 		var out: u64 = 0;
-		const lim = @min(pay.len, 8);
 		var i: usize = 0;
-		while (i < lim) : (i += 1) {
+		while (i < pay.len) : (i += 1) {
 			out |= @as(u64, pay[i]) << @as(u6, @intCast(i * 8));
 		}
 		return out;

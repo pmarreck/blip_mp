@@ -129,14 +129,16 @@ Inner-kernel microbench (limb-only, no Mp wrapper):
 
 The byte-base implementation from M7-3 (`divModKnuth`) was 28.8× behind GMP. Reformulating to u64-base (b = 2^64 instead of b = 256) gave a **36× internal speedup at 2K-bit and flipped the inner-kernel ratio against GMP**. Möller-Granlund 2/1 + 3/2 reciprocal q_hat (iter 14) added another ~7% at the kernel level + larger gains at the integrated Mp.divMod level (next table).
 
-### Modular inverse — `invMod` (M7-5 → M9 Lehmer → M10 wider-window)
+### Modular inverse — `invMod` (M7-5 → M9 Lehmer → M10 wider-window → iter-31 readInt fast paths)
 
-| Bits | byte-classical (ns) | u64-classical (ns) | u64 + Lehmer (ns) | u64 + M10 (ns) | **post-M-G (ns)** | GMP `mpz_invert` (ns) | Mp/GMP final |
-|---:|---:|---:|---:|---:|---:|---:|---:|
-| 256 | — | 19,140 | 6,560 | 5,870 | **6,174** | 1,088 | 5.67× slower |
-| 512 | — | 48,130 | 14,510 | 12,350 | **13,712** | 2,461 | 5.57× slower |
-| 1024 | 187,000 | 128,680 | 33,600 | 28,360 | **30,158** | 5,769 | 5.23× slower |
-| **2048** | 681,000 | 418,550 | 91,100 | 49,900 | **55,977** | 13,956 | **4.01×** slower |
+| Bits | byte-classical (ns) | u64-classical (ns) | u64 + Lehmer (ns) | u64 + M10 (ns) | post-M-G (ns) | **post-iter-31 (ns)** | GMP `mpz_invert` (ns) | Mp/GMP final |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 256 | — | 19,140 | 6,560 | 5,870 | 6,174 | **5,834** | 1,088 | 5.36× slower |
+| 512 | — | 48,130 | 14,510 | 12,350 | 13,712 | **12,174** | 2,461 | 4.95× slower |
+| 1024 | 187,000 | 128,680 | 33,600 | 28,360 | 30,158 | **24,990** | 5,769 | 4.33× slower |
+| **2048** | 681,000 | 418,550 | 91,100 | 49,900 | 55,977 | **45,351** | 13,956 | **3.25×** slower |
+
+The iter-31 column reflects the topU64 / topU128 readInt fast paths — single-LDR-x replacements for per-byte build loops in the Lehmer/HGCD inner-loop window extraction. **19% gain at 2048-bit (55,977 → 45,351 ns); gap to GMP 4.01× → 3.25×.** Plus iter 32 gave the same readInt treatment to mpToU64Mag (lehmerFinishSinglePrecision bottom-out helper) — small additional gain in the marginal compounding.
 
 Three cumulative speedups: (1) u64-base Knuth div from M7-3.u64 (1.4-1.6× downstream) + (2) Lehmer's GCD speedup from M9 (2.9-4.6× over classical EEA) + (3) **M10 wider-window Lehmer** with u128 matrix entries (1.18-1.83× over standard Lehmer; 1.83× at the headline 2048-bit RSA size). Combined: ~14× faster than the original byte-base baseline at 2048-bit; gap to GMP narrowed from 30-60× to 4-6×.
 
