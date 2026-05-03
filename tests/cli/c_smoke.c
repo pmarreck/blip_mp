@@ -87,6 +87,40 @@ static void test_set_get_i64(void) {
 	blip_mp_destroy(m);
 }
 
+static void test_u64_roundtrip(void) {
+	blip_mp_t *m = blip_mp_create();
+	CHECK(m != NULL, "create for u64 roundtrip");
+	if (m == NULL) return;
+
+	const uint64_t u_inputs[] = {
+		0, 1, 127, 128, 0xFFFF, 0xFFFFFFFF, 0xDEADBEEFCAFEULL,
+		(uint64_t)INT64_MAX,
+	};
+	for (size_t i = 0; i < sizeof(u_inputs) / sizeof(u_inputs[0]); i++) {
+		CHECK_OK(blip_mp_set_u64(m, u_inputs[i]));
+		uint64_t got = 0;
+		CHECK_OK(blip_mp_get_u64(m, &got));
+		if (got != u_inputs[i]) {
+			fprintf(stderr,
+				"[FAIL] roundtrip u64 %" PRIu64
+				" -> %" PRIu64 "\n",
+				u_inputs[i], got);
+			failures++;
+		}
+	}
+	// Set a negative value via i64 then verify get_u64 errors.
+	CHECK_OK(blip_mp_set_i64(m, -1));
+	uint64_t neg_out = 0;
+	int err = blip_mp_get_u64(m, &neg_out);
+	CHECK(err != BLIP_MP_OK, "get_u64 should error on negative value");
+
+	// set_u64 with a value > i64.max should error out.
+	int oor = blip_mp_set_u64(m, ((uint64_t)INT64_MAX) + 1ULL);
+	CHECK(oor != BLIP_MP_OK, "set_u64 should error on value > i64.max");
+
+	blip_mp_destroy(m);
+}
+
 static void test_arithmetic(void) {
 	blip_mp_t *a = blip_mp_create();
 	blip_mp_t *b = blip_mp_create();
@@ -254,6 +288,7 @@ static void test_inv_mod(void) {
 int main(void) {
 	test_lifecycle();
 	test_set_get_i64();
+	test_u64_roundtrip();
 	test_arithmetic();
 	test_cmp();
 	test_division_by_zero();

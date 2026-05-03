@@ -67,6 +67,17 @@ export fn blip_mp_get_i64(mp: *const Mp, out: *i64) c_int {
 	return BLIP_MP_OK;
 }
 
+export fn blip_mp_set_u64(mp: *Mp, value: u64) c_int {
+	mp.setU64(value) catch |e| return mapError(e);
+	return BLIP_MP_OK;
+}
+
+export fn blip_mp_get_u64(mp: *const Mp, out: *u64) c_int {
+	const v = mp.getU64() catch |e| return mapError(e);
+	out.* = v;
+	return BLIP_MP_OK;
+}
+
 export fn blip_mp_set_bytes(mp: *Mp, bytes: [*]const u8, len: usize) c_int {
 	const slice = bytes[0..len];
 	mp.setBytes(slice) catch |e| return mapError(e);
@@ -152,6 +163,8 @@ export fn blip_mp_inv_mod(r: *Mp, a: *const Mp, m: *const Mp) c_int {
 // of a library (otherwise ReleaseFast may strip unreferenced exports).
 comptime {
 	_ = blip_mp_create;
+	_ = blip_mp_set_u64;
+	_ = blip_mp_get_u64;
 	_ = blip_mp_destroy;
 	_ = blip_mp_set_i64;
 	_ = blip_mp_get_i64;
