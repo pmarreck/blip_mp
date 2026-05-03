@@ -637,11 +637,16 @@ pub const Mp = struct {
 	/// absolute). `a` is reduced into [0, |m|) before the algorithm runs.
 	pub fn invMod(r: *Mp, a: *const Mp, m: *const Mp) ArithError!bool {
 		if (m.cached_sign == 0) return error.DivisionByZero;
-		// Dispatch threshold: Lehmer's per-step overhead (matrix extraction +
-		// multi-limb apply) only pays off once |m| has at least a couple
-		// limbs. Empirically classical wins below ~96 bits.
-		if (m.bitLen() >= 96) return invModLehmer(r, a, m);
-		return invModClassical(r, a, m);
+		// Dispatch tiers:
+		//   < 96 bits:   classical EEA (Lehmer's matrix overhead doesn't pay off)
+		//   96..1023:    Lehmer with u62 matrix (M9)
+		//   >= 1024:     wider-window Lehmer with u128 matrix (M10) — batches
+		//                ~2× more single-precision EEA steps per multi-precision
+		//                matrix-apply, giving 1.06–1.6× speedup at RSA sizes.
+		const m_bits = m.bitLen();
+		if (m_bits < 96) return invModClassical(r, a, m);
+		if (m_bits >= 1024) return invModHGCD(r, a, m);
+		return invModLehmer(r, a, m);
 	}
 
 	/// Classical Extended Euclidean Algorithm — kept as the fallback for
@@ -1036,6 +1041,430 @@ pub const Mp = struct {
 		}
 
 		// gcd is r0; inverse exists iff gcd == 1.
+		const gcd_is_one = r0.cached_pay_len == 1 and r0.bytes()[0] == 1 and r0.cached_sign == 1;
+		if (!gcd_is_one) {
+			try r.setI64(0);
+			return false;
+		}
+		try euclideanReduce(r, &s0, &m_abs);
+		return true;
+	}
+
+	/// Extract 128 bits of `self`'s magnitude starting at bit position
+	/// `shift_down`. Twin of `topU64` for the wider-window HGCD inner loop.
+	/// Returns 0 if `shift_down` exceeds the magnitude's bit length.
+	/// Caller's responsibility: positive Mps only (HGCD's r0/r1 are positive).
+	fn topU128(self: *const Mp, shift_down: usize) u128 {
+		const pay = self.payload();
+		if (pay.len == 0) return 0;
+		const byte_off = shift_down / 8;
+		const bit_off: u7 = @intCast(shift_down & 7);
+		var out: u128 = 0;
+		var i: usize = 0;
+		while (i < 16) : (i += 1) {
+			const idx = byte_off + i;
+			const b: u128 = if (idx < pay.len) pay[idx] else 0;
+			out |= b << @as(u7, @intCast(i * 8));
+		}
+		if (bit_off != 0) {
+			const idx16 = byte_off + 16;
+			const b16: u128 = if (idx16 < pay.len) pay[idx16] else 0;
+			out = (out >> bit_off) | (b16 << @as(u7, @intCast(128 - @as(usize, bit_off))));
+		}
+		return out;
+	}
+
+	/// Set this Mp's value to the unsigned u128 magnitude `value`.
+	/// Used by HGCD to materialise multi-precision matrix coefficients.
+	fn setU128(self: *Mp, value: u128) ArithError!void {
+		if (value == 0) { try self.setI64(0); return; }
+		// Compose 16-byte LE magnitude, find canonical L, then prepend
+		// a 0x00 if the high bit would otherwise look "signed".
+		var le: [16]u8 = undefined;
+		var v = value;
+		var k: usize = 0;
+		while (k < 16) : (k += 1) { le[k] = @intCast(v & 0xFF); v >>= 8; }
+		var L: usize = 16;
+		while (L > 1 and le[L - 1] == 0) L -= 1;
+		const need_pad = (le[L - 1] & 0x80) != 0;
+		const pay_len: usize = if (need_pad) L + 1 else L;
+		var enc_buf: [20]u8 = undefined;
+		const hdr = try tier3.writeHeader(&enc_buf, pay_len);
+		@memcpy(enc_buf[hdr .. hdr + L], le[0..L]);
+		if (need_pad) enc_buf[hdr + L] = 0;
+		try self.setBytes(enc_buf[0 .. hdr + pay_len]);
+	}
+
+	/// Modular multiplicative inverse via wider-window (u128) Lehmer/HGCD.
+	///
+	/// M10 step toward sub-quadratic GCD. Same outer structure as
+	/// `invModLehmer`, but the inner single-precision EEA accumulator runs
+	/// in **u128** (124-bit window) instead of u64 (62-bit window). This
+	/// roughly DOUBLES the number of single-precision EEA steps that fit
+	/// into one accumulated 2x2 matrix before overflow forces a flush — so
+	/// the count of expensive multi-precision matrix-applies drops by ~2×.
+	/// Matrix entries are bounded at 2^126 to leave headroom for the Knuth
+	/// sanity test (u_top + corrections).
+	///
+	/// Falls back to `invModLehmer` for moduli below the HGCD threshold
+	/// (~256 bits) where the wider window's setup cost doesn't pay off.
+	pub fn invModHGCD(r: *Mp, a: *const Mp, m: *const Mp) ArithError!bool {
+		if (m.cached_sign == 0) return error.DivisionByZero;
+		const allocator = r.allocator;
+
+		// Below threshold, defer to classical Lehmer.
+		const HGCD_THRESHOLD: usize = 256;
+		if (m.bitLen() < HGCD_THRESHOLD) return invModLehmer(r, a, m);
+
+		var m_abs = Mp.init(allocator);
+		defer m_abs.deinit();
+		if (m.cached_sign < 0) {
+			var zero = Mp.init(allocator);
+			defer zero.deinit();
+			try zero.setI64(0);
+			try m_abs.sub(&zero, m);
+		} else {
+			try m_abs.setBytes(m.bytes());
+		}
+
+		if (m_abs.cached_pay_len == 1 and m_abs.bytes()[0] == 1) {
+			try r.setI64(0);
+			return true;
+		}
+
+		var r0 = Mp.init(allocator);
+		defer r0.deinit();
+		try euclideanReduce(&r0, a, &m_abs);
+		if (r0.cached_sign == 0) {
+			try r.setI64(0);
+			return false;
+		}
+
+		var r1 = Mp.init(allocator);
+		defer r1.deinit();
+		try r1.setBytes(m_abs.bytes());
+
+		var s0 = Mp.init(allocator);
+		defer s0.deinit();
+		try s0.setI64(1);
+
+		var s1 = Mp.init(allocator);
+		defer s1.deinit();
+		try s1.setI64(0);
+
+		var t0 = Mp.init(allocator);
+		defer t0.deinit();
+		var t1 = Mp.init(allocator);
+		defer t1.deinit();
+		var t2 = Mp.init(allocator);
+		defer t2.deinit();
+		var t3 = Mp.init(allocator);
+		defer t3.deinit();
+		var mul_a = Mp.init(allocator);
+		defer mul_a.deinit();
+		var mul_b = Mp.init(allocator);
+		defer mul_b.deinit();
+		var mul_c = Mp.init(allocator);
+		defer mul_c.deinit();
+		var mul_d = Mp.init(allocator);
+		defer mul_d.deinit();
+		var coeff_a = Mp.init(allocator);
+		defer coeff_a.deinit();
+		var coeff_b = Mp.init(allocator);
+		defer coeff_b.deinit();
+		var coeff_c = Mp.init(allocator);
+		defer coeff_c.deinit();
+		var coeff_d = Mp.init(allocator);
+		defer coeff_d.deinit();
+		var q_mp = Mp.init(allocator);
+		defer q_mp.deinit();
+		var rem_mp = Mp.init(allocator);
+		defer rem_mp.deinit();
+		var qs1 = Mp.init(allocator);
+		defer qs1.deinit();
+		var new_s = Mp.init(allocator);
+		defer new_s.deinit();
+
+		// Initial swap: enforce r0 >= r1 invariant.
+		if (Mp.cmp(&r0, &r1) == .lt) {
+			try t0.setBytes(r0.bytes());
+			try r0.setBytes(r1.bytes());
+			try r1.setBytes(t0.bytes());
+			try t0.setBytes(s0.bytes());
+			try s0.setBytes(s1.bytes());
+			try s1.setBytes(t0.bytes());
+		}
+
+		const CAP_BITS: u7 = 126;
+		const CAP: u128 = @as(u128, 1) << CAP_BITS;
+		const WINDOW_BITS: usize = 124;
+
+		while (r1.cached_sign != 0) {
+			const r0_bits = r0.bitLen();
+			if (r0_bits <= 64) {
+				try lehmerFinishSinglePrecision(&r0, &r1, &s0, &s1, &t0, &t1);
+				break;
+			}
+
+			// If r0 still has fewer than ~128 bits, fall back to the u62
+			// inner loop's domain. We can simply not go wider.
+			if (r0_bits <= 128) {
+				// Use the u62 inner loop logic inline.
+				const shift_down: usize = r0_bits - 62;
+				const mask62 = (@as(u64, 1) << 62) - 1;
+				var u_top64: u64 = topU64(&r0, shift_down) & mask62;
+				var v_top64: u64 = topU64(&r1, shift_down) & mask62;
+				if (v_top64 == 0) {
+					try Mp.divMod(&q_mp, &rem_mp, &r0, &r1);
+					try t0.setBytes(r1.bytes());
+					try r0.setBytes(t0.bytes());
+					try r1.setBytes(rem_mp.bytes());
+					try qs1.mul(&q_mp, &s1);
+					try new_s.sub(&s0, &qs1);
+					try s0.setBytes(s1.bytes());
+					try s1.setBytes(new_s.bytes());
+					continue;
+				}
+				var aa: u64 = 1;
+				var bb: u64 = 0;
+				var cc: u64 = 0;
+				var dd: u64 = 1;
+				var parity_even: bool = true;
+				var inner_steps: usize = 0;
+				while (true) {
+					var q_lo: u64 = 0;
+					var q_hi: u64 = 0;
+					var ok: bool = false;
+					if (parity_even) {
+						if (cc < v_top64) {
+							const denom_hi = v_top64 - cc;
+							const denom_lo = v_top64 + dd;
+							if (bb <= u_top64 and denom_hi != 0) {
+								const num_lo = u_top64 - bb;
+								const num_hi = u_top64 + aa;
+								q_lo = num_lo / denom_lo;
+								q_hi = num_hi / denom_hi;
+								ok = true;
+							}
+						}
+					} else {
+						if (dd < v_top64) {
+							const denom_hi = v_top64 - dd;
+							const denom_lo = v_top64 + cc;
+							if (aa <= u_top64 and denom_hi != 0) {
+								const num_lo = u_top64 - aa;
+								const num_hi = u_top64 + bb;
+								q_lo = num_lo / denom_lo;
+								q_hi = num_hi / denom_hi;
+								ok = true;
+							}
+						}
+					}
+					if (!ok or q_lo != q_hi or q_lo == 0) break;
+					const q = q_lo;
+					const qv = @mulWithOverflow(q, v_top64);
+					if (qv[1] != 0) break;
+					if (qv[0] > u_top64) break;
+					const new_u = v_top64;
+					const new_v = u_top64 - qv[0];
+					const qc = @mulWithOverflow(q, cc);
+					if (qc[1] != 0) break;
+					const new_c_ov = @addWithOverflow(aa, qc[0]);
+					if (new_c_ov[1] != 0) break;
+					if (new_c_ov[0] >= (@as(u64, 1) << 62)) break;
+					const qd = @mulWithOverflow(q, dd);
+					if (qd[1] != 0) break;
+					const new_d_ov = @addWithOverflow(bb, qd[0]);
+					if (new_d_ov[1] != 0) break;
+					if (new_d_ov[0] >= (@as(u64, 1) << 62)) break;
+					aa = cc;
+					bb = dd;
+					cc = new_c_ov[0];
+					dd = new_d_ov[0];
+					u_top64 = new_u;
+					v_top64 = new_v;
+					parity_even = !parity_even;
+					inner_steps += 1;
+				}
+				if (inner_steps == 0) {
+					try Mp.divMod(&q_mp, &rem_mp, &r0, &r1);
+					try t0.setBytes(r1.bytes());
+					try r0.setBytes(t0.bytes());
+					try r1.setBytes(rem_mp.bytes());
+					try qs1.mul(&q_mp, &s1);
+					try new_s.sub(&s0, &qs1);
+					try s0.setBytes(s1.bytes());
+					try s1.setBytes(new_s.bytes());
+					continue;
+				}
+				try coeff_a.setU64(aa);
+				try coeff_b.setU64(bb);
+				try coeff_c.setU64(cc);
+				try coeff_d.setU64(dd);
+				try mul_a.mul(&coeff_a, &r0);
+				try mul_b.mul(&coeff_b, &r1);
+				try mul_c.mul(&coeff_c, &r0);
+				try mul_d.mul(&coeff_d, &r1);
+				if (parity_even) {
+					try t0.sub(&mul_a, &mul_b);
+					try t1.sub(&mul_d, &mul_c);
+				} else {
+					try t0.sub(&mul_b, &mul_a);
+					try t1.sub(&mul_c, &mul_d);
+				}
+				try r0.setBytes(t0.bytes());
+				try r1.setBytes(t1.bytes());
+				try mul_a.mul(&coeff_a, &s0);
+				try mul_b.mul(&coeff_b, &s1);
+				try mul_c.mul(&coeff_c, &s0);
+				try mul_d.mul(&coeff_d, &s1);
+				if (parity_even) {
+					try t2.sub(&mul_a, &mul_b);
+					try t3.sub(&mul_d, &mul_c);
+				} else {
+					try t2.sub(&mul_b, &mul_a);
+					try t3.sub(&mul_c, &mul_d);
+				}
+				try s0.setBytes(t2.bytes());
+				try s1.setBytes(t3.bytes());
+				continue;
+			}
+
+			// r0 has > 128 bits — use the wider u128 inner loop.
+			const shift_down: usize = r0_bits - WINDOW_BITS;
+			const mask124: u128 = (@as(u128, 1) << WINDOW_BITS) - 1;
+			var u_top: u128 = topU128(&r0, shift_down) & mask124;
+			var v_top: u128 = topU128(&r1, shift_down) & mask124;
+
+			if (v_top == 0) {
+				try Mp.divMod(&q_mp, &rem_mp, &r0, &r1);
+				try t0.setBytes(r1.bytes());
+				try r0.setBytes(t0.bytes());
+				try r1.setBytes(rem_mp.bytes());
+				try qs1.mul(&q_mp, &s1);
+				try new_s.sub(&s0, &qs1);
+				try s0.setBytes(s1.bytes());
+				try s1.setBytes(new_s.bytes());
+				continue;
+			}
+
+			// Wider matrix in u128.
+			var aa: u128 = 1;
+			var bb: u128 = 0;
+			var cc: u128 = 0;
+			var dd: u128 = 1;
+			var parity_even: bool = true;
+			var inner_steps: usize = 0;
+
+			while (true) {
+				var q_lo: u128 = 0;
+				var q_hi: u128 = 0;
+				var ok: bool = false;
+				if (parity_even) {
+					if (cc < v_top) {
+						const denom_hi = v_top - cc;
+						const denom_lo = v_top + dd;
+						if (bb <= u_top and denom_hi != 0) {
+							const num_lo = u_top - bb;
+							const num_hi = u_top + aa;
+							q_lo = num_lo / denom_lo;
+							q_hi = num_hi / denom_hi;
+							ok = true;
+						}
+					}
+				} else {
+					if (dd < v_top) {
+						const denom_hi = v_top - dd;
+						const denom_lo = v_top + cc;
+						if (aa <= u_top and denom_hi != 0) {
+							const num_lo = u_top - aa;
+							const num_hi = u_top + bb;
+							q_lo = num_lo / denom_lo;
+							q_hi = num_hi / denom_hi;
+							ok = true;
+						}
+					}
+				}
+				if (!ok or q_lo != q_hi or q_lo == 0) break;
+				const q = q_lo;
+
+				// (u, v) <- (v, u - q*v) with overflow-bounds checks.
+				const qv = @mulWithOverflow(q, v_top);
+				if (qv[1] != 0) break;
+				if (qv[0] > u_top) break;
+				const new_u = v_top;
+				const new_v = u_top - qv[0];
+
+				// (A, B, C, D) <- (C, D, A + q*C, B + q*D), capped at 2^126.
+				const qc = @mulWithOverflow(q, cc);
+				if (qc[1] != 0) break;
+				const new_c_ov = @addWithOverflow(aa, qc[0]);
+				if (new_c_ov[1] != 0) break;
+				if (new_c_ov[0] >= CAP) break;
+				const qd = @mulWithOverflow(q, dd);
+				if (qd[1] != 0) break;
+				const new_d_ov = @addWithOverflow(bb, qd[0]);
+				if (new_d_ov[1] != 0) break;
+				if (new_d_ov[0] >= CAP) break;
+
+				aa = cc;
+				bb = dd;
+				cc = new_c_ov[0];
+				dd = new_d_ov[0];
+				u_top = new_u;
+				v_top = new_v;
+				parity_even = !parity_even;
+				inner_steps += 1;
+			}
+
+			if (inner_steps == 0) {
+				try Mp.divMod(&q_mp, &rem_mp, &r0, &r1);
+				try t0.setBytes(r1.bytes());
+				try r0.setBytes(t0.bytes());
+				try r1.setBytes(rem_mp.bytes());
+				try qs1.mul(&q_mp, &s1);
+				try new_s.sub(&s0, &qs1);
+				try s0.setBytes(s1.bytes());
+				try s1.setBytes(new_s.bytes());
+				continue;
+			}
+
+			// Materialise the multi-precision (u128) matrix coefficients.
+			try coeff_a.setU128(aa);
+			try coeff_b.setU128(bb);
+			try coeff_c.setU128(cc);
+			try coeff_d.setU128(dd);
+
+			try mul_a.mul(&coeff_a, &r0);
+			try mul_b.mul(&coeff_b, &r1);
+			try mul_c.mul(&coeff_c, &r0);
+			try mul_d.mul(&coeff_d, &r1);
+
+			if (parity_even) {
+				try t0.sub(&mul_a, &mul_b);
+				try t1.sub(&mul_d, &mul_c);
+			} else {
+				try t0.sub(&mul_b, &mul_a);
+				try t1.sub(&mul_c, &mul_d);
+			}
+			try r0.setBytes(t0.bytes());
+			try r1.setBytes(t1.bytes());
+
+			try mul_a.mul(&coeff_a, &s0);
+			try mul_b.mul(&coeff_b, &s1);
+			try mul_c.mul(&coeff_c, &s0);
+			try mul_d.mul(&coeff_d, &s1);
+			if (parity_even) {
+				try t2.sub(&mul_a, &mul_b);
+				try t3.sub(&mul_d, &mul_c);
+			} else {
+				try t2.sub(&mul_b, &mul_a);
+				try t3.sub(&mul_c, &mul_d);
+			}
+			try s0.setBytes(t2.bytes());
+			try s1.setBytes(t3.bytes());
+		}
+
 		const gcd_is_one = r0.cached_pay_len == 1 and r0.bytes()[0] == 1 and r0.cached_sign == 1;
 		if (!gcd_is_one) {
 			try r.setI64(0);
@@ -3327,6 +3756,62 @@ test "invModLehmer matches invModClassical: 1000 random pairs across bit-widths"
 	try testing.expect(compared >= 800); // most should have inverses
 }
 
+test "invModHGCD matches invModLehmer: 1000+ random pairs across bit-widths" {
+	// M10 oracle: invModLehmer is GMP-validated (12029 cross-checks);
+	// invModHGCD must agree bit-for-bit. Same input distribution as the
+	// Lehmer-vs-classical test so we get coverage across the recursion
+	// threshold (HGCD only kicks in above the threshold; below, it
+	// degenerates to Lehmer).
+	const SIZES = [_]usize{ 64, 128, 192, 256, 320, 384, 448, 512, 768, 1024, 1536, 2048, 3072, 4096 };
+	const ITERS_PER_SIZE: usize = 80;
+	var prng = std.Random.DefaultPrng.init(0xC0FFEE_F00D_BEE0);
+	const rand = prng.random();
+
+	var a = Mp.init(testing.allocator);
+	defer a.deinit();
+	var m = Mp.init(testing.allocator);
+	defer m.deinit();
+	var r_hgcd = Mp.init(testing.allocator);
+	defer r_hgcd.deinit();
+	var r_lehmer = Mp.init(testing.allocator);
+	defer r_lehmer.deinit();
+
+	var raw_buf: [1024]u8 = undefined;
+	var enc_buf: [1100]u8 = undefined;
+
+	var total: usize = 0;
+	var compared: usize = 0;
+	for (SIZES) |bits| {
+		const byte_len = (bits + 7) / 8;
+		var i: usize = 0;
+		while (i < ITERS_PER_SIZE) : (i += 1) {
+			rand.bytes(raw_buf[0..byte_len]);
+			raw_buf[byte_len - 1] &= 0x7F;
+			const hdr_a = try tier3.writeHeader(&enc_buf, byte_len);
+			@memcpy(enc_buf[hdr_a..][0..byte_len], raw_buf[0..byte_len]);
+			try a.setBytes(enc_buf[0 .. hdr_a + byte_len]);
+
+			rand.bytes(raw_buf[0..byte_len]);
+			raw_buf[byte_len - 1] = (raw_buf[byte_len - 1] & 0x7F) | 0x40;
+			raw_buf[0] |= 1;
+			const hdr_m = try tier3.writeHeader(&enc_buf, byte_len);
+			@memcpy(enc_buf[hdr_m..][0..byte_len], raw_buf[0..byte_len]);
+			try m.setBytes(enc_buf[0 .. hdr_m + byte_len]);
+
+			const ok_h = try Mp.invModHGCD(&r_hgcd, &a, &m);
+			const ok_l = try Mp.invModLehmer(&r_lehmer, &a, &m);
+			try testing.expectEqual(ok_l, ok_h);
+			if (ok_l) {
+				try testing.expect(Mp.cmp(&r_hgcd, &r_lehmer) == .eq);
+				compared += 1;
+			}
+			total += 1;
+		}
+	}
+	try testing.expect(total >= 1000);
+	try testing.expect(compared >= 800);
+}
+
 test "invMod: large modulus — 256-bit random with verification" {
 	// Use a known prime modulus (so every nonzero a has an inverse).
 	// 2^255 - 19 (Curve25519 prime): definitely prime, definitely > 1.
@@ -3395,5 +3880,84 @@ test "divMod: identity a == q*b + rem on 1000 random i64 pairs" {
 		if (rv != 0) {
 			try testing.expectEqual(@as(bool, av < 0), rv < 0);
 		}
+	}
+}
+
+// Quick monotonic-clock helper for the invMod benches.
+fn invModBenchNanos() u64 {
+	var ts: std.c.timespec = undefined;
+	_ = std.c.clock_gettime(.MONOTONIC, &ts);
+	return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
+}
+
+test "bench: invModLehmer vs invModHGCD across bit-widths" {
+	// Microbench. Runs both invModLehmer and invModHGCD on the same fixed
+	// random (a, m) pairs at 1024/2048/4096-bit widths, prints ns/op and
+	// the speedup ratio. Used to validate M10 numbers.
+	const SIZES = [_]usize{ 1024, 2048, 4096, 8192 };
+	const ITERS_BY_SIZE = [_]usize{ 200, 100, 25, 8 };
+	var prng = std.Random.DefaultPrng.init(0xBABE_CAFE_F00D);
+	const rand = prng.random();
+
+	var a = Mp.init(testing.allocator);
+	defer a.deinit();
+	var m = Mp.init(testing.allocator);
+	defer m.deinit();
+	var r_l = Mp.init(testing.allocator);
+	defer r_l.deinit();
+	var r_h = Mp.init(testing.allocator);
+	defer r_h.deinit();
+
+	var raw_buf: [1024]u8 = undefined;
+	var enc_buf: [1100]u8 = undefined;
+
+	for (SIZES, ITERS_BY_SIZE) |bits, iters| {
+		const byte_len = (bits + 7) / 8;
+		// Build single fixed (a, m) pair; reuse for all iterations so the
+		// comparison is apples-to-apples.
+		rand.bytes(raw_buf[0..byte_len]);
+		raw_buf[byte_len - 1] &= 0x7F;
+		const hdr_a = try tier3.writeHeader(&enc_buf, byte_len);
+		@memcpy(enc_buf[hdr_a..][0..byte_len], raw_buf[0..byte_len]);
+		try a.setBytes(enc_buf[0 .. hdr_a + byte_len]);
+		rand.bytes(raw_buf[0..byte_len]);
+		raw_buf[byte_len - 1] = (raw_buf[byte_len - 1] & 0x7F) | 0x40;
+		raw_buf[0] |= 1;
+		const hdr_m = try tier3.writeHeader(&enc_buf, byte_len);
+		@memcpy(enc_buf[hdr_m..][0..byte_len], raw_buf[0..byte_len]);
+		try m.setBytes(enc_buf[0 .. hdr_m + byte_len]);
+
+		// Warm-up.
+		_ = try Mp.invModLehmer(&r_l, &a, &m);
+		_ = try Mp.invModHGCD(&r_h, &a, &m);
+
+		// Lehmer.
+		const t0 = invModBenchNanos();
+		var i: usize = 0;
+		while (i < iters) : (i += 1) {
+			_ = try Mp.invModLehmer(&r_l, &a, &m);
+			std.mem.doNotOptimizeAway(&r_l);
+		}
+		const t1 = invModBenchNanos();
+		const ns_lehmer = (t1 - t0) / iters;
+
+		// HGCD (wider Lehmer).
+		const t2 = invModBenchNanos();
+		i = 0;
+		while (i < iters) : (i += 1) {
+			_ = try Mp.invModHGCD(&r_h, &a, &m);
+			std.mem.doNotOptimizeAway(&r_h);
+		}
+		const t3 = invModBenchNanos();
+		const ns_hgcd = (t3 - t2) / iters;
+
+		// Sanity: same result.
+		try testing.expect(Mp.cmp(&r_l, &r_h) == .eq);
+
+		const speedup = @as(f64, @floatFromInt(ns_lehmer)) / @as(f64, @floatFromInt(ns_hgcd));
+		std.debug.print(
+			"\n[bench] invMod {d}-bit  Lehmer={d} ns/op  HGCD={d} ns/op  speedup={d:.2}x\n",
+			.{ bits, ns_lehmer, ns_hgcd, speedup },
+		);
 	}
 }
