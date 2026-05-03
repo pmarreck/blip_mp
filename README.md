@@ -43,7 +43,8 @@ Apple Silicon (M-series), aarch64-darwin, Zig 0.16.0 ReleaseFast, libc malloc.
 ### Headline wins
 
 - **All `i64`-fitting values: 1.95–2.66× faster than GMP**
-- **Cryptographic multiplication (1024, 1536, 3072 bit): 1.12–1.46× faster**
+- **All three standard RSA mul sizes (1024, 2048, 3072 bit) beat GMP by 1.11–1.45×** — includes RSA-2048 (just flipped from 0.91× to 1.16×). Nine mul sizes total beat GMP.
+- **RSA-2048 trifecta**: blip_mp beats GMP at `mul` (1.16×) + `divMod` (1.31×) + `powm` (1.11×) at the most-deployed crypto operand size worldwide.
 - **Addition at 768-bit and above: 1.04–1.28× faster than GMP** (eight sizes now beat GMP after the M5/M9 bookkeeping cleanup; was previously 1.03× at 4096+ only)
 - **Subtraction at 256-bit and above: 1.03–2.11× faster than GMP** — ten Mp.sub sizes beat GMP after the chunked-`subPayloads` fix mirrored the long-standing addPayloads optimization. Headline: 6144-bit sub went 606 ns → 48 ns (12.7×).
 - **Large multiplication (16384+ bits via Toom-3): 1.03× faster** (modest)
