@@ -558,7 +558,23 @@ pub const Mp = struct {
 		// (with a possible trailing 0x00 sign-extension byte).
 		const byte_off = shift_down / 8;
 		const bit_off: u6 = @intCast(shift_down & 7);
-		// We need 8 bytes starting at byte_off, plus one more byte if bit_off > 0.
+
+		// Fast path: full 8-byte window (and possibly a 9th byte for bit_off>0)
+		// fit entirely within the payload. Single LDR x on aarch64 instead of
+		// 8x LDR-B + OR-shift chain. This is the common case in invMod's
+		// Lehmer/HGCD inner loops where shift_down ranges over magnitude bits
+		// far below the top.
+		if (bit_off == 0 and byte_off + 8 <= pay.len) {
+			return std.mem.readInt(u64, pay[byte_off..][0..8], .little);
+		}
+		if (bit_off != 0 and byte_off + 9 <= pay.len) {
+			const lo = std.mem.readInt(u64, pay[byte_off..][0..8], .little);
+			const b9: u64 = pay[byte_off + 8];
+			return (lo >> bit_off) | (b9 << @as(u6, @intCast(64 - @as(usize, bit_off))));
+		}
+
+		// Slow path: zero-extend partial trailing bytes (used near the top of
+		// the magnitude where the window walks past payload.len).
 		var out: u64 = 0;
 		var i: usize = 0;
 		while (i < 8) : (i += 1) {
@@ -567,7 +583,6 @@ pub const Mp = struct {
 			out |= b << @as(u6, @intCast(i * 8));
 		}
 		if (bit_off != 0) {
-			// Need bit at position byte_off+8 to fill the high bits.
 			const idx9 = byte_off + 8;
 			const b9: u64 = if (idx9 < pay.len) pay[idx9] else 0;
 			out = (out >> bit_off) | (b9 << @as(u6, @intCast(64 - @as(usize, bit_off))));
@@ -1065,6 +1080,24 @@ pub const Mp = struct {
 		if (pay.len == 0) return 0;
 		const byte_off = shift_down / 8;
 		const bit_off: u7 = @intCast(shift_down & 7);
+
+		// Fast path: 16-byte window (plus 17th byte when bit_off>0) fits in
+		// payload. Two LDR x reads instead of 16 LDR-B + OR-shift chain.
+		// Common case in invModHGCD's wider-window Lehmer inner loop.
+		if (bit_off == 0 and byte_off + 16 <= pay.len) {
+			const lo: u128 = std.mem.readInt(u64, pay[byte_off..][0..8], .little);
+			const hi: u128 = std.mem.readInt(u64, pay[byte_off + 8 ..][0..8], .little);
+			return lo | (hi << 64);
+		}
+		if (bit_off != 0 and byte_off + 17 <= pay.len) {
+			const lo: u128 = std.mem.readInt(u64, pay[byte_off..][0..8], .little);
+			const hi: u128 = std.mem.readInt(u64, pay[byte_off + 8 ..][0..8], .little);
+			const b16: u128 = pay[byte_off + 16];
+			const win = lo | (hi << 64);
+			return (win >> bit_off) | (b16 << @as(u7, @intCast(128 - @as(usize, bit_off))));
+		}
+
+		// Slow path: zero-extend partial trailing bytes.
 		var out: u128 = 0;
 		var i: usize = 0;
 		while (i < 16) : (i += 1) {
