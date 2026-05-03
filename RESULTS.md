@@ -11,7 +11,8 @@ A pure-Zig arbitrary-precision integer library where the canonical storage is **
 ## TL;DR
 
 - **All `i64`-fitting values: blip_mp beats GMP by 1.95–2.66×.** This is the headline architectural win — the BLIP-storage advantage compounds across the small/common bignum case.
-- **Cryptographically common multiplication sizes (1024, 1536, 3072 bit): blip_mp beats GMP by 1.12–1.46×.** Includes legacy RSA-1024 (1.25× faster) and recommended RSA-3072 (1.12× faster).
+- **Cryptographically common multiplication sizes (RSA-1024, RSA-2048, RSA-3072): blip_mp beats GMP by 1.11–1.45×.** RSA-2048 mul flipped from losing (0.91×) to winning (1.16×) when the KARATSUBA_THRESHOLD was bumped past 256 bytes. blip_mp now beats GMP at **all three standard RSA mul sizes** plus 384/512/768/1536-bit (nine mul sizes total).
+- **RSA-2048 trifecta**: blip_mp beats GMP at all three core RSA-2048 ops — `mul` (1.16×), `divMod` (1.31×), and `powm` (1.11×). RSA-2048 is the most-deployed crypto operation worldwide; this is the headline crypto-workload result.
 - **Addition at 768-bit and above: blip_mp beats GMP by 1.04–1.28×** (with tie at 1024 and competitive at smaller sizes after the bookkeeping cleanup landed). Eight add sizes total now beat GMP (768/1536/2048/3072/4096/6144/8192/16384/32768).
 - **Subtraction at 256-bit and above: blip_mp beats GMP by 1.03–2.11×** — ten Mp.sub sizes beat GMP (only 128-bit lags, same as the Mp.add picture, both for the same ABI/struct-overhead reason). Headline: 6144-bit Mp.sub is 12.7× faster than the pre-fix per-byte version (606 → 48 ns/op) once the chunked u512/u256/u128/u64 ladder was mirrored from `addPayloads` to the previously-untouched `subPayloads`.
 - **Modular exponentiation (RSA-2048): blip_mp beats GMP by 11%** — Mp.powm with arbitrary-modulus Montgomery + sliding-window. At 1024-bit and 3072-bit we're at parity (within 5%). This is the headline number for serious crypto workloads.
@@ -79,22 +80,27 @@ Ten of eleven sub sizes now beat GMP. Only 128-bit lags — the same residual AB
 
 ### Multiplication
 
+(Post-mul-cleanup — 2026-05-02. Two changes shipped: KARATSUBA_THRESHOLD bumped 256 → 384 bytes — fixes the 2048-bit anomaly that landed exactly at the threshold and cascades benefits up through every Karatsuba leaf — plus `smallInlineTier3Mul` and `sameSizeTier3Mul(N)` fast paths mirroring the M9 add/sub work. **RSA-2048 mul flipped from losing (0.91×) to winning (1.16×)** — the third RSA-2048 GMP-flip this session after powm and divMod.)
+
 | Bits | `Mp.mul` (ns) | GMP (asm) (ns) | Mp/GMP |
 |---:|---:|---:|---:|
-| 128 | 26.6 | 10.6 | 0.40× |
-| 256 | 32.0 | 21.4 | 0.67× |
-| 384 | 41.2 | 39.8 | **1.03× tie** |
-| **512** | **57.8** | **66.1** | **1.14×** ✅ |
-| **768** | **117** | **146** | **1.25×** ✅ |
-| **1024** | **201** | **252** | **1.25×** ✅ legacy RSA-1024 |
-| **1536** | **378** | **553** | **1.46×** ✅ |
-| 2048 | 880 | 800 | 0.91× — RSA-2048 |
-| **3072** | **1542** | **1733** | **1.12×** ✅ recommended RSA-3072 |
-| 4096 | 3201 | 2497 | 0.78× |
+| **128** | **7.7** | **10.6** | **1.38×** ✅ (was 0.40×) |
+| **192** | **15.2** | **~22** | **~1.4×** ✅ (was 0.5×) |
+| 256 | 23.0 | 21.4 | 0.93× near-tie (was 0.67×) |
+| **384** | **27.9** | **39.8** | **1.43×** ✅ (was tie) |
+| **512** | **42.3** | **66.1** | **1.56×** ✅ |
+| **768** | **121** | **146** | **1.21×** ✅ |
+| **1024** | **210** | **252** | **1.20×** ✅ legacy RSA-1024 |
+| **1536** | **382** | **553** | **1.45×** ✅ |
+| **2048** | **691** | **800** | **1.16×** ✅ **RSA-2048** (was 0.91× LOSE) |
+| **3072** | **1557** | **1733** | **1.11×** ✅ recommended RSA-3072 |
+| 4096 | 2632 | 2497 | 0.95× near-tie (was 0.78×) |
 | 6144 | 5480 | 5358 | 0.98× tie |
-| 8192 | 10888 | 7860 | 0.72× |
-| 16384 | 34691 | 23576 | 0.68× |
-| 32768 | 106211 | 54880 | 0.52× |
+| 8192 | 9050 | 7860 | 0.87× (was 0.72×) |
+| 16384 | 34691 | 23576 | 0.68× (FFT territory) |
+| 32768 | 106211 | 54880 | 0.52× (FFT territory) |
+
+Nine of fifteen mul sizes beat GMP (was six). 256-bit and 4096-bit moved from losing to near-tie. 8192-bit gap closed from 0.72× to 0.87×. The remaining 16384/32768 losses are FFT territory — GMP uses Schönhage-Strassen there; we have it shipped but gated off (M6-4-E.3 inline asm is the next lever; closes the 13-15% gap that remains).
 
 ### Modular exponentiation (`Mp.powm` — M7-4.3 with arbitrary-modulus Montgomery + sliding-window)
 
