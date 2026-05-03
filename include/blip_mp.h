@@ -54,6 +54,16 @@ int blip_mp_set_u64(blip_mp_t *mp, uint64_t value);
 // is negative (callers wanting negative values should use blip_mp_get_i64).
 int blip_mp_get_u64(const blip_mp_t *mp, uint64_t *out);
 
+// Returns the i-th bit of the magnitude (0 or 1). i indexes from the LSB.
+// Out-of-range positions read as 0. Sign is ignored (operates on |mp|).
+// Useful for downstream consumers implementing custom scalar-mul / sliding-
+// window algorithms.
+int blip_mp_bit_at(const blip_mp_t *mp, size_t i);
+
+// Returns the bit length of the magnitude: 1 + position of the highest set
+// bit, or 0 for value zero. Sign is ignored.
+size_t blip_mp_bit_len(const blip_mp_t *mp);
+
 // Replace `mp`'s value with the BLIP-encoded byte slice [bytes, bytes+len).
 // Returns 0 on success, BLIP_MP_ERR_INVALID_INPUT if the encoding is malformed.
 int blip_mp_set_bytes(blip_mp_t *mp, const uint8_t *bytes, size_t len);

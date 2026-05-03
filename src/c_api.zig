@@ -78,6 +78,23 @@ export fn blip_mp_get_u64(mp: *const Mp, out: *u64) c_int {
 	return BLIP_MP_OK;
 }
 
+// --- Bit access ---------------------------------------------------------
+
+// Returns the i-th bit of the magnitude (0 or 1). i indexes from the LSB.
+// Out-of-range bit positions read as 0 (the magnitude implicitly extends with
+// leading zeros). Sign is ignored (operates on the absolute magnitude).
+// Used by downstream consumers implementing custom scalar-mul / sliding-window
+// algorithms over the BLIP-encoded value.
+export fn blip_mp_bit_at(mp: *const Mp, i: usize) c_int {
+	return @intCast(mp.bitAt(i));
+}
+
+// Returns the bit length of the magnitude (1 + position of the highest set
+// bit). Returns 0 for value 0. Sign is ignored.
+export fn blip_mp_bit_len(mp: *const Mp) usize {
+	return mp.bitLen();
+}
+
 export fn blip_mp_set_bytes(mp: *Mp, bytes: [*]const u8, len: usize) c_int {
 	const slice = bytes[0..len];
 	mp.setBytes(slice) catch |e| return mapError(e);
@@ -165,6 +182,8 @@ comptime {
 	_ = blip_mp_create;
 	_ = blip_mp_set_u64;
 	_ = blip_mp_get_u64;
+	_ = blip_mp_bit_at;
+	_ = blip_mp_bit_len;
 	_ = blip_mp_destroy;
 	_ = blip_mp_set_i64;
 	_ = blip_mp_get_i64;

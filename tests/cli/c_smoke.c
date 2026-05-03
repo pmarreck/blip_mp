@@ -121,6 +121,48 @@ static void test_u64_roundtrip(void) {
 	blip_mp_destroy(m);
 }
 
+static void test_bit_access(void) {
+	blip_mp_t *m = blip_mp_create();
+	CHECK(m != NULL, "create for bit access");
+	if (m == NULL) return;
+
+	// 0 has bit_len 0; bit_at any position is 0.
+	CHECK_OK(blip_mp_set_i64(m, 0));
+	CHECK(blip_mp_bit_len(m) == 0, "bit_len(0) == 0");
+	CHECK(blip_mp_bit_at(m, 0) == 0, "bit_at(0, 0) == 0");
+	CHECK(blip_mp_bit_at(m, 100) == 0, "bit_at(0, 100) == 0");
+
+	// 1 has bit_len 1, bit_at(0) == 1, all else 0.
+	CHECK_OK(blip_mp_set_i64(m, 1));
+	CHECK(blip_mp_bit_len(m) == 1, "bit_len(1) == 1");
+	CHECK(blip_mp_bit_at(m, 0) == 1, "bit_at(1, 0) == 1");
+	CHECK(blip_mp_bit_at(m, 1) == 0, "bit_at(1, 1) == 0");
+
+	// 0xFF: bit_len 8, bits 0..7 all set.
+	CHECK_OK(blip_mp_set_i64(m, 0xFF));
+	CHECK(blip_mp_bit_len(m) == 8, "bit_len(0xFF) == 8");
+	for (size_t i = 0; i < 8; i++) {
+		CHECK(blip_mp_bit_at(m, i) == 1, "bit_at(0xFF, i) == 1 for i in 0..8");
+	}
+	CHECK(blip_mp_bit_at(m, 8) == 0, "bit_at(0xFF, 8) == 0");
+
+	// 0x100: bit_len 9, only bit 8 set.
+	CHECK_OK(blip_mp_set_i64(m, 0x100));
+	CHECK(blip_mp_bit_len(m) == 9, "bit_len(0x100) == 9");
+	for (size_t i = 0; i < 8; i++) {
+		CHECK(blip_mp_bit_at(m, i) == 0, "bit_at(0x100, i) == 0 for i in 0..8");
+	}
+	CHECK(blip_mp_bit_at(m, 8) == 1, "bit_at(0x100, 8) == 1");
+	CHECK(blip_mp_bit_at(m, 9) == 0, "bit_at(0x100, 9) == 0");
+
+	// Sign is ignored — magnitude bits.
+	CHECK_OK(blip_mp_set_i64(m, -0x100));
+	CHECK(blip_mp_bit_len(m) == 9, "bit_len(-0x100) == 9 (sign ignored)");
+	CHECK(blip_mp_bit_at(m, 8) == 1, "bit_at(-0x100, 8) == 1");
+
+	blip_mp_destroy(m);
+}
+
 static void test_arithmetic(void) {
 	blip_mp_t *a = blip_mp_create();
 	blip_mp_t *b = blip_mp_create();
@@ -289,6 +331,7 @@ int main(void) {
 	test_lifecycle();
 	test_set_get_i64();
 	test_u64_roundtrip();
+	test_bit_access();
 	test_arithmetic();
 	test_cmp();
 	test_division_by_zero();
