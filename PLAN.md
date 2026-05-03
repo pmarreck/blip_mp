@@ -216,36 +216,37 @@ Total expected: comparable scope to M3 (tier-3 add/sub/mul), maybe larger becaus
 
 The "Toom-4 first" plan in M6-2 is now lower priority. Toom-3 is solidly the best of the schoolbook-class algorithms in our range. Until FFT-class can beat Toom-3 (M6-4), Toom-4's modest 15-30% gain isn't worth the implementation work. Leave M6-2 helpers in (divExactBy5, mulSmallSignedConst) as future-work building blocks.
 
-## Milestone 4 — Optional follow-ups (ranked by ROI)
+## Milestone 5 — done (2026-04-30 → 2026-05-01)
 
-- [x] **Heap buffer reuse** in `Mp.setBytes`/`setI64` (2026-04-30 22:55 EST) — Run 5: tier-3 256-bit gap halved 6.4× → 3.85×.
-- [x] **Sign-extended inline tail** in `Mp` (2026-04-30 23:15 EST) — store the full i64 in `inline_buf[1..9]` regardless of canonical L; `decodeInlineSmall` reads via single u64 load. **HYPOTHESIS #1 FULLY VALIDATED:** Mp.add now beats GMP by 1.7-2.4× across the ENTIRE i64 universe (L=0 through L=4). L=2..L=4 went from 0.5× (losing) to 1.7-1.8× (winning). Run 6 in BENCHMARK_RESULTS.md.
-- [x] **Tier 3 mul** (2026-04-30 23:35 EST) — byte-direct schoolbook with sign-magnitude dispatch. `Mp.mul` no longer returns `error.TierOverflow`; routes to tier-3 path automatically.
-- [x] **Tier 3 wide-int chunking** (2026-04-30 23:50 EST) — added u128 → u256 → u512 chunked add inner loops (cascade with u64 fallback). Halves iterations at each step. **4096-bit Mp.add: 96 → 41 ns (2.34× faster), now only 1.32× slower than GMP**; 1024-bit: 29 → 18 ns (1.62×), 2.13× slower than GMP. 256-bit unchanged at ~17 ns due to constant per-op overhead (header parse + 2 memcpys); the inline-tail fast path doesn't extend to tier 3 yet.
-- [x] **Comprehensive perf sweep** (2026-05-01 00:10 EST) — 15 buckets from 128 to 32768 bits. Discovered: (a) 8192-bit had a malloc cliff because STACK_BYTES was 1024 (fixed → bumped to 8192); (b) 512-bit is faster than 384-bit because it's exactly one u512 chunk with no cascade overhead; (c) **convergence with GMP as size grows** — within 30% at 4096-bit, within 12% at 8192-bit, within 6% at 32768-bit. Run 8 in BENCHMARK_RESULTS.md.
-- [x] **Karatsuba multiplication + chunked schoolbook** (2026-05-01 00:30 EST) — chunked u64*u64=u128 schoolbook + Karatsuba with carry-bit trick (preserves 8-byte alignment in recursive mults) + chunked u64 helpers. **We BEAT GMP at 384, 512, 768, 1024, 1536, 3072, 6144 bit mul** — including legacy RSA-1024 (1.24×) and recommended RSA-3072 (1.15×). Tied at 2048 (RSA-2048) and 6144. Lose at 8K+ where GMP uses FFT mul. Run 9 in BENCHMARK_RESULTS.md.
-- [x] **Direct-write tier-3 add via heap_offset** (2026-05-01 00:55 EST) — added heap_offset:u8 to Mp (fits in existing padding, struct still 72 bytes). tier3Op now writes the result payload directly into r.heap_buf at offset HDR_RESERVE, then writes the header at HDR_RESERVE - hdr_len. Eliminates the scratch+memcpy chain that previously dominated. **We now BEAT GMP at add for 6144-32768 bits** (1.13-1.28×); tied at 4096; 1.02-1.36× speedup at 128-2048 bits but still slower than GMP there (overhead-dominated). Run 10 in BENCHMARK_RESULTS.md.
-- [x] **Cross-validation against GMP** (2026-05-01 01:15 EST) — `tests/integration/cross_check.zig` runs randomized add/sub/mul comparisons (8240 total checks across 18 bit-widths × 3 ops). Every blip_mp result must encode the same value as GMP's mpz_*. Wired into `./test`. **All 8240 checks pass on the first clean run.** First run found 43 "failures" that turned out to be a faulty test fixture (my random input construction was trimming high zero bytes, exposing high bits that BLIP read as signed-negative but GMP imported as unsigned-positive). Fix: use full byte_count without trimming.
-- [ ] **Statistical bench harness** — `hyperfine` integration + N-run aggregation; current numbers are 3-run medians by hand.
-- [ ] Bench bucket label cleanup (L=1 was actually L=2; legacy from Run 1).
-- [ ] C FFI header (`include/blip_mp.h`) for downstream C consumers.
-- [ ] BLIP wire interop: a separate "unsigned BLIP" mode for round-tripping with strict-spec BLIP producers.
-- [ ] Cross-platform validation — current numbers are aarch64-darwin; verify x86_64 Linux/Windows.
+The bookkeeping/perf-polish iterations after the M3 baseline. All shipped.
+- M5-1: cache (payload_offset, payload_len, sign) on Mp struct
+- M5-2: small-N fast paths in tier3Op
+- M5-3: Toom-Cook 3-way mul for 4K-8K bit
+- M5-5: GMP-without-asm controlled experiment ("asm gives ~0% on M-series")
+- Heap buffer reuse, sign-extended inline tail (i64 universe 1.95-2.66× over GMP), wide-int chunking (u512→u256→u128→u64 cascade), direct-write via heap_offset, Karatsuba + chunked schoolbook, 8240-check GMP cross-validation harness
 
-## Optional pre-M3 micro-optimization (close the Mp.add → raw gap)
+See git history for per-item detail.
 
-- [ ] Comptime-specialize `setI64` fast path for value ∈ [0,127]: single byte store, skip encode loop. Should land Mp.add ≈ raw for immediate bucket and lift L=1..L=2 above GMP.
-- [ ] Cache decoded i64 in the struct (`cached_i64: ?i64`)? Only if profiling justifies it — adds 16 bytes to struct size and complicates invariants.
+## Milestone 8 — C FFI header (DONE 2026-05-02)
 
-## Milestone 3 — Tier 3 (only if Milestone 2 succeeds)
+- [x] `include/blip_mp.h` (110 lines) + `src/c_api.zig` (172 lines) + `tests/cli/c_smoke.c` (270 lines). Full FFI surface: lifecycle, setters/getters, predicates (cmp/sign/is_zero), arithmetic (add/sub/mul/div/mod/divMod), modular (powm/inv_mod). Wired into `./test` as the third group alongside Zig units + GMP cross-checks.
 
-Out of scope for first proof. Sketch only — flesh out after the small-value win is demonstrated.
+## Milestone 9 — Lehmer's GCD speedup for invMod (DONE 2026-05-02)
 
-- [ ] Decide: link libgmp's mpn layer, or reimplement?
-- [ ] Unpack/repack between BLIP payload and aligned `mp_limb_t[]` buffer
-- [ ] Tier 3 add/sub/mul, validated against GMP for correctness
-- [ ] Cross-tier promotion paths (tier 1 overflow → tier 3 alloc)
+- [x] **Mp.invMod via Knuth Algorithm L** — single-precision EEA on top u62 of (r0, r1) with 2x2 unsigned matrix accumulation; matrix applied to multi-limb (r0, r1, s0, s1) per Lehmer step. **2.9-4.6× over classical EEA.** Plus latent tier3DivModOp buffer-sizing bug fix.
 
-## Done items
+## Milestone 10 — wider-window Lehmer (intermediate; DONE 2026-05-02)
 
-(none yet — project just initialized 2026-04-30)
+- [x] **invModHGCD u128 wider-window** — same Lehmer algorithm at u128 matrix entries. **1.83× over M9 Lehmer at 2048-bit.** Combined cumulative gap: 7.85× → 3.96× at RSA-2048. (NOT true sub-quadratic HGCD — that's M11.)
+
+## Milestone 11 — true recursive half-GCD (PENDING)
+
+- [ ] **Recursive HGCD with multi-precision matrix entries** — true sub-quadratic O(M(n) log n) divide-and-conquer reformulation. Substantial multi-day project. Would close the residual ~4× invMod gap to GMP at 2048-bit and scale dramatically better at 4K+ bit. References: Yap §2.6, GMP `mpn/generic/hgcd*.c`, TAOCP §4.5.3 problem 35. Lehmer remains the recursion base.
+
+## Open follow-ups (ranked)
+
+- [ ] **M6-4-E.3** — hand-scheduled aarch64 inline asm for the FFT butterfly inner loop. Would close the residual 13-15% FFT-vs-Toom-3 gap on M-series and finally enable FFT_THRESHOLD < 99999 in production. Fragile (M-series-specific); deferred until x86_64 picture lands so we know whether to pursue it at all.
+- [ ] **x86_64 cross-platform validation** — Linux + Windows. Two M-series-specific findings need verification on x86_64: (a) M5-5 'GMP asm gives ~0% on M-series, AVX-512 may shift it'; (b) M6-4-A.6 'pure-NEON Montgomery loses to scalar-inside-vector because of M4 dual scalar mul pipes' — different scheduler may flip this. Peter to set up Linux laptop env.
+- [ ] **Statistical bench harness** — `hyperfine` integration + N-run aggregation; current numbers are 3-5-run hand medians.
+- [ ] **Lehmer-style q_hat refinement in divModKnuthU64** — closes the ~180 ns inner-kernel gap to GMP's `mpn_tdiv_qr` (~290 ns vs our ~470 ns at 2K-bit). Would push full Mp.divMod from 1.51× lose to ~1.05× tie at 2048-bit.
+- [ ] **BLIP wire interop**: a separate "unsigned BLIP" mode for round-tripping with strict-spec BLIP producers.
