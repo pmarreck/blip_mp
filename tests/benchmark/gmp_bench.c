@@ -125,6 +125,44 @@ static double benchmark_large_bucket(const LargeBucket *lb) {
 	return elapsed_ns / (double)ITERATIONS_LARGE;
 }
 
+static double benchmark_large_bucket_sub(const LargeBucket *lb) {
+	mpz_t pool[POOL_SIZE];
+	const int byte_count = lb->bits / 8;
+	unsigned char *payload = (unsigned char *)malloc((size_t)byte_count);
+	if (!payload) { perror("malloc"); exit(1); }
+	for (int i = 0; i < POOL_SIZE; i++) {
+		mpz_init(pool[i]);
+		uint64_t s = 0xCAFEBEEFULL + (uint64_t)i;
+		for (int k = 0; k < byte_count; k++) {
+			s ^= s << 13; s ^= s >> 7; s ^= s << 17;
+			payload[k] = (unsigned char)(s & 0xFF);
+		}
+		payload[byte_count - 1] &= 0x7F; /* positive */
+		mpz_import(pool[i], (size_t)byte_count, -1, 1, 0, 0, payload);
+	}
+	free(payload);
+
+	mpz_t result;
+	mpz_init(result);
+
+	struct timespec start, end;
+	clock_gettime(CLOCK_MONOTONIC, &start);
+	for (uint64_t i = 0; i < ITERATIONS_LARGE; i++) {
+		mpz_sub(result, pool[i & (POOL_SIZE - 1)], pool[(i + 1) & (POOL_SIZE - 1)]);
+	}
+	clock_gettime(CLOCK_MONOTONIC, &end);
+
+	double elapsed_ns = (end.tv_sec - start.tv_sec) * 1e9 + (end.tv_nsec - start.tv_nsec);
+
+	volatile mp_limb_t guard = mpz_size(result) > 0 ? mpz_getlimbn(result, 0) : 0;
+	(void)guard;
+
+	for (int i = 0; i < POOL_SIZE; i++) mpz_clear(pool[i]);
+	mpz_clear(result);
+
+	return elapsed_ns / (double)ITERATIONS_LARGE;
+}
+
 static uint64_t mul_iters(int bits) {
 	if (bits <= 256) return 500000ULL;
 	if (bits <= 1024) return 100000ULL;
@@ -185,6 +223,12 @@ int main(void) {
 	for (size_t i = 0; i < m; i++) {
 		double ns_per_op = benchmark_large_bucket(&LARGE_BUCKETS[i]);
 		printf("RESULT bucket=%s ns_per_op=%.2f\n", LARGE_BUCKETS[i].name, ns_per_op);
+	}
+
+	printf("\n--- subtraction ---\n");
+	for (size_t i = 0; i < m; i++) {
+		double ns_per_op = benchmark_large_bucket_sub(&LARGE_BUCKETS[i]);
+		printf("RESULT mpz_sub bucket=%s ns_per_op=%.2f\n", LARGE_BUCKETS[i].name, ns_per_op);
 	}
 
 	printf("\n--- multiplication ---\n");

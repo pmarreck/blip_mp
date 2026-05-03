@@ -337,8 +337,11 @@ inline fn readPayloadChunk(payload: []const u8, i: usize, sign_word: u64) u64 {
 	return std.mem.readInt(u64, &bytes, .little);
 }
 
-/// Subtract: r = a - b. Same approach as addPayloads but with borrow.
-/// Two's-complement-direct, no sign-magnitude.
+/// Subtract: r = a - b. Same chunked-ladder approach as addPayloads, but with
+/// borrow propagation via @subWithOverflow. Two's-complement-direct, no sign-
+/// magnitude. Mirrors the u512/u256/u128/u64 chunking that lets LLVM emit
+/// optimal SBC chains on aarch64 (closing the >4096-bit sub gap to GMP and
+/// erasing what was a ~10-100x regression vs. addPayloads).
 pub fn subPayloads(
 	a: []const u8,
 	b: []const u8,
@@ -348,13 +351,67 @@ pub fn subPayloads(
 	std.debug.assert(out.len >= n + 1);
 	const sa = signExtByte(a);
 	const sb = signExtByte(b);
+	const sa_word: u64 = if (sa == 0xFF) ~@as(u64, 0) else 0;
+	const sb_word: u64 = if (sb == 0xFF) ~@as(u64, 0) else 0;
 
-	var borrow: i32 = 0;
+	var borrow: u64 = 0;
 	var i: usize = 0;
+	// Chunked u512 path: 64 bytes per iter when operands are large enough
+	// (4096-bit and up). Each u512 sub compiles to 8 SBCS instructions on
+	// aarch64. Mirrors the addPayloads chunking ladder.
+	const both_end = chunkEndForLen(@min(a.len, b.len), n);
+	const both_end_64 = both_end - (both_end % 64);
+	while (i + 64 <= both_end_64) : (i += 64) {
+		const av: u512 = std.mem.readInt(u512, a[i..][0..64], .little);
+		const bv: u512 = std.mem.readInt(u512, b[i..][0..64], .little);
+		const d1 = @subWithOverflow(av, bv);
+		const d2 = @subWithOverflow(d1[0], borrow);
+		std.mem.writeInt(u512, out[i..][0..64], d2[0], .little);
+		borrow = @as(u64, d1[1]) + @as(u64, d2[1]);
+	}
+	// u256 chunks for the next size band.
+	const both_end_32 = both_end - (both_end % 32);
+	while (i + 32 <= both_end_32) : (i += 32) {
+		const av: u256 = std.mem.readInt(u256, a[i..][0..32], .little);
+		const bv: u256 = std.mem.readInt(u256, b[i..][0..32], .little);
+		const d1 = @subWithOverflow(av, bv);
+		const d2 = @subWithOverflow(d1[0], borrow);
+		std.mem.writeInt(u256, out[i..][0..32], d2[0], .little);
+		borrow = @as(u64, d1[1]) + @as(u64, d2[1]);
+	}
+	// u128 chunks for the remaining 16-byte slots.
+	while (i + 16 <= both_end) : (i += 16) {
+		const av: u128 = std.mem.readInt(u128, a[i..][0..16], .little);
+		const bv: u128 = std.mem.readInt(u128, b[i..][0..16], .little);
+		const d1 = @subWithOverflow(av, bv);
+		const d2 = @subWithOverflow(d1[0], borrow);
+		std.mem.writeInt(u128, out[i..][0..16], d2[0], .little);
+		borrow = @as(u64, d1[1]) + @as(u64, d2[1]);
+	}
+	// u64 chunks within the both-have-real-bytes region.
+	while (i + 8 <= both_end) : (i += 8) {
+		const av: u64 = std.mem.readInt(u64, a[i..][0..8], .little);
+		const bv: u64 = std.mem.readInt(u64, b[i..][0..8], .little);
+		const d1 = @subWithOverflow(av, bv);
+		const d2 = @subWithOverflow(d1[0], borrow);
+		std.mem.writeInt(u64, out[i..][0..8], d2[0], .little);
+		borrow = @as(u64, d1[1]) + @as(u64, d2[1]);
+	}
+	// u64 chunks past one operand's real-bytes boundary — at least one side
+	// reads from sign-extension fill words.
+	while (i + 8 <= n) : (i += 8) {
+		const av: u64 = readPayloadChunk(a, i, sa_word);
+		const bv: u64 = readPayloadChunk(b, i, sb_word);
+		const d1 = @subWithOverflow(av, bv);
+		const d2 = @subWithOverflow(d1[0], borrow);
+		std.mem.writeInt(u64, out[i..][0..8], d2[0], .little);
+		borrow = @as(u64, d1[1]) + @as(u64, d2[1]);
+	}
+	// Per-byte tail (last < 8 bytes).
 	while (i < n) : (i += 1) {
 		const av: i32 = payloadByteAt(a, i, sa);
 		const bv: i32 = payloadByteAt(b, i, sb);
-		const diff = av - bv - borrow;
+		const diff = av - bv - @as(i32, @intCast(borrow));
 		out[i] = @truncate(@as(u32, @bitCast(diff)) & 0xFF);
 		borrow = if (diff < 0) 1 else 0;
 	}
