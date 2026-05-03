@@ -1561,14 +1561,32 @@ const TierOp = enum { add, sub };
 const HDR_RESERVE: usize = 10; // max BLIP header (continuation up to L≈2^77)
 
 fn tier3Op(r: *Mp, a: *const Mp, b: *const Mp, comptime op: TierOp) ArithError!void {
-	const a_bytes = a.bytes();
-	const b_bytes = b.bytes();
 	const a_pay_off: usize = a.cached_pay_off;
 	const b_pay_off: usize = b.cached_pay_off;
 	const a_pay_len: usize = a.cached_pay_len;
 	const b_pay_len: usize = b.cached_pay_len;
-	const a_sign: i8 = a.cached_sign;
-	const b_sign: i8 = b.cached_sign;
+
+	// SMALL TIER-3 FAST PATH (closes the 128-bit add gap to GMP).
+	// When both inputs are inline AND payloads fit in u128 (≤16 bytes), the
+	// entire op can be done as a single u128 add/sub against direct loads
+	// from inline_buf, with the canonical result written straight back to
+	// r.inline_buf. Skips: bytes() dispatch, alias/realloc check,
+	// ensureHeapCapacity, the chunked-add loop ladder (4 size buckets),
+	// scratch→heap→inline memcpy chain, separate canonicalLen +
+	// signFromPayload scans, and writeHeader's conditionals (header is
+	// always 1 byte for L<32).
+	//
+	// For the 128-bit bench bucket this collapses ~7-8 branches and
+	// ~30 bytes of memory traffic down to one u128 ADCS + a small canonical
+	// trim. Still correct for sub (different overflow semantics handled
+	// per-op via @subWithOverflow + sign-flip detection).
+	if (a.inline_len != SENTINEL_HEAP and b.inline_len != SENTINEL_HEAP and a_pay_len <= 16 and b_pay_len <= 16) {
+		smallInlineTier3Add(r, a, b, op) catch |e| return e;
+		return;
+	}
+
+	const a_bytes = a.bytes();
+	const b_bytes = b.bytes();
 
 	const max_payload = @max(a_pay_len, b_pay_len);
 	const out_need = HDR_RESERVE + max_payload + 1;
@@ -1580,12 +1598,325 @@ fn tier3Op(r: *Mp, a: *const Mp, b: *const Mp, comptime op: TierOp) ArithError!v
 		return;
 	}
 
+	// SAME-SIZE FAST PATH: both payloads identical size and ≤ 64 bytes
+	// (≤ 512-bit). No sign-extension needed. Direct uN read → uN add →
+	// canonical write. Skips chunked-loop ladder branches and the
+	// canonicalLen+signFromPayload double scan.
+	if (a_pay_len == b_pay_len) {
+		switch (a_pay_len) {
+			24 => {
+				try sameSizeTier3Add(24, r, a_bytes, b_bytes, a_pay_off, b_pay_off, a.cached_sign, b.cached_sign, op);
+				return;
+			},
+			32 => {
+				try sameSizeTier3Add(32, r, a_bytes, b_bytes, a_pay_off, b_pay_off, a.cached_sign, b.cached_sign, op);
+				return;
+			},
+			48 => {
+				try sameSizeTier3Add(48, r, a_bytes, b_bytes, a_pay_off, b_pay_off, a.cached_sign, b.cached_sign, op);
+				return;
+			},
+			64 => {
+				try sameSizeTier3Add(64, r, a_bytes, b_bytes, a_pay_off, b_pay_off, a.cached_sign, b.cached_sign, op);
+				return;
+			},
+			96 => {
+				try sameSizeTier3Add(96, r, a_bytes, b_bytes, a_pay_off, b_pay_off, a.cached_sign, b.cached_sign, op);
+				return;
+			},
+			128 => {
+				try sameSizeTier3Add(128, r, a_bytes, b_bytes, a_pay_off, b_pay_off, a.cached_sign, b.cached_sign, op);
+				return;
+			},
+			192 => {
+				try sameSizeTier3Add(192, r, a_bytes, b_bytes, a_pay_off, b_pay_off, a.cached_sign, b.cached_sign, op);
+				return;
+			},
+			256 => {
+				try sameSizeTier3Add(256, r, a_bytes, b_bytes, a_pay_off, b_pay_off, a.cached_sign, b.cached_sign, op);
+				return;
+			},
+			384 => {
+				try sameSizeTier3Add(384, r, a_bytes, b_bytes, a_pay_off, b_pay_off, a.cached_sign, b.cached_sign, op);
+				return;
+			},
+			512 => {
+				try sameSizeTier3Add(512, r, a_bytes, b_bytes, a_pay_off, b_pay_off, a.cached_sign, b.cached_sign, op);
+				return;
+			},
+			else => {},
+		}
+	}
+
 	// Hot path: inlined applyTier3Op via the `inline fn` keyword.
-	_ = a_sign;
-	_ = b_sign;
 	const a_pay = a_bytes[a_pay_off .. a_pay_off + a_pay_len];
 	const b_pay = b_bytes[b_pay_off .. b_pay_off + b_pay_len];
 	try applyTier3Op(r, a_pay, b_pay, op);
+}
+
+/// Same-size fast path: both payloads exactly N bytes (N ∈ {32, 64}).
+/// Single uN add/sub. Writes result to r.heap_buf at the pre-reserved
+/// offset (caller guaranteed r.heap_buf.len ≥ HDR_RESERVE + N + 1).
+/// Result is N or N+1 bytes; canonical trim + heap-mode field updates.
+inline fn sameSizeTier3Add(
+	comptime N: comptime_int,
+	r: *Mp,
+	a_bytes: []const u8, b_bytes: []const u8,
+	a_pay_off: usize, b_pay_off: usize,
+	a_sign: i8, b_sign: i8,
+	comptime op: TierOp,
+) ArithError!void {
+	const T = std.meta.Int(.unsigned, N * 8);
+	const av: T = std.mem.readInt(T, a_bytes[a_pay_off..][0..N], .little);
+	const bv: T = std.mem.readInt(T, b_bytes[b_pay_off..][0..N], .little);
+	const result: T = switch (op) {
+		.add => av +% bv,
+		.sub => av -% bv,
+	};
+
+	// Write straight into heap_buf at the canonical-payload offset. The
+	// header is 1 byte for N=32, 2 bytes for N=64. We compute hdr_start
+	// after the canonical trim.
+	std.mem.writeInt(T, r.heap_buf[HDR_RESERVE..][0..N], result, .little);
+
+	// Same-sign overflow detection.
+	const result_high_bit = (r.heap_buf[HDR_RESERVE + N - 1] & 0x80) != 0;
+	const a_neg = a_sign < 0;
+	const b_neg_eff = if (op == .sub) (b_sign > 0) else (b_sign < 0);
+	var pay_len: usize = N;
+	if (a_neg == b_neg_eff and a_neg != result_high_bit) {
+		r.heap_buf[HDR_RESERVE + N] = if (a_neg) 0xFF else 0x00;
+		pay_len = N + 1;
+	}
+
+	// Canonical trim — single pass that ALSO computes the resulting sign,
+	// avoiding the separate signFromPayload scan.
+	const pay_slice = r.heap_buf[HDR_RESERVE .. HDR_RESERVE + pay_len];
+	const canon = canonicalLenSmall(pay_slice);
+
+	// Immediate path (canon=1, value < 0x80).
+	if (canon == 1 and pay_slice[0] < 0x80) {
+		r.inline_buf[0] = pay_slice[0];
+		r.inline_len = 1;
+		r.heap_offset = 0;
+		r.cached_pay_off = 0;
+		r.cached_pay_len = 1;
+		r.cached_sign = if (pay_slice[0] == 0) 0 else 1;
+		return;
+	}
+
+	// Compute hdr_len from canon. canon ∈ [1..N+1]; for N=32 that's [1..33];
+	// for N=64 that's [1..65]. Header is 1 byte for canon < 32, 2 bytes for
+	// canon ∈ [32..32*128). Both ranges are well-bounded.
+	const hdr_len: usize = if (canon < 32) 1 else 2;
+	const total = canon + hdr_len;
+
+	// Inline result possible only if total ≤ INLINE_CAP=24. canon ≥ 1 and
+	// for our N=32/64 paths canon ≥ 1, but typically ≥ N. Inline path is
+	// taken only when significant cancellation occurs (sub of near-equal
+	// operands). We still handle it correctly.
+	if (total <= INLINE_CAP) {
+		// Reuse the writeMpFromPayload-style path inline.
+		const hdr_byte: u8 = if (canon < 32) 0x80 | @as(u8, @intCast(canon)) else (0x80 | 0x20 | @as(u8, @intCast(canon & 0x1F)));
+		// For canon ∈ [32..63] hdr_len=2 with continuation byte; total≥33+2=35>24,
+		// so inline is unreachable. canon < 32 here.
+		std.debug.assert(hdr_len == 1);
+		r.inline_buf[0] = hdr_byte;
+		var snapshot: [INLINE_CAP]u8 = undefined;
+		@memcpy(snapshot[0..canon], pay_slice[0..canon]);
+		@memcpy(r.inline_buf[1 .. 1 + canon], snapshot[0..canon]);
+		// Maintain inline-tail invariant.
+		if (total >= 2 and total <= 9) {
+			const L = total - 1;
+			const high_byte = r.inline_buf[1 + L - 1];
+			const sign_fill: u8 = if ((high_byte & 0x80) != 0) 0xFF else 0;
+			var i: usize = L;
+			while (i < 8) : (i += 1) r.inline_buf[1 + i] = sign_fill;
+		}
+		r.inline_len = @intCast(total);
+		r.heap_offset = 0;
+		r.cached_pay_off = 1;
+		r.cached_pay_len = @intCast(canon);
+		const high = snapshot[canon - 1];
+		if ((high & 0x80) != 0) {
+			r.cached_sign = -1;
+		} else if (high != 0) {
+			r.cached_sign = 1;
+		} else {
+			var any_nonzero: bool = false;
+			for (snapshot[0..canon]) |bb| if (bb != 0) { any_nonzero = true; break; };
+			r.cached_sign = if (any_nonzero) 1 else 0;
+		}
+		return;
+	}
+
+	// Heap path (the common case for N=32/64). Header lives at
+	// HDR_RESERVE - hdr_len, payload starts at HDR_RESERVE.
+	const hdr_start = HDR_RESERVE - hdr_len;
+	if (hdr_len == 1) {
+		r.heap_buf[hdr_start] = 0x80 | @as(u8, @intCast(canon));
+	} else {
+		// hdr_len == 2: byte 0 has low 5 bits + continuation flag, byte 1 is the
+		// remaining bits with no continuation.
+		r.heap_buf[hdr_start] = 0x80 | 0x20 | @as(u8, @intCast(canon & 0x1F));
+		r.heap_buf[hdr_start + 1] = @as(u8, @intCast(canon >> 5));
+	}
+	r.heap_offset = @intCast(hdr_start);
+	r.heap_used = hdr_len + canon;
+	r.inline_len = SENTINEL_HEAP;
+	r.cached_pay_off = @intCast(hdr_len);
+	r.cached_pay_len = @intCast(canon);
+	const high = pay_slice[canon - 1];
+	if ((high & 0x80) != 0) {
+		r.cached_sign = -1;
+	} else if (high != 0) {
+		r.cached_sign = 1;
+	} else {
+		var any_nonzero: bool = false;
+		for (pay_slice[0..canon]) |bb| if (bb != 0) { any_nonzero = true; break; };
+		r.cached_sign = if (any_nonzero) 1 else 0;
+	}
+}
+
+/// Read up to 16 bytes of payload from `inline_buf[pay_off..pay_off+pay_len]`,
+/// sign-extending to 16 bytes, and return as u128. `pay_len` ≤ 16. The high
+/// bit of the high actual payload byte determines the sign-extension fill.
+inline fn loadPayloadU128(buf: *const [INLINE_CAP]u8, pay_off: usize, pay_len: usize) u128 {
+	if (pay_len == 16) {
+		// Hot case for 128-bit operands: direct unaligned u128 load.
+		return std.mem.readInt(u128, buf[pay_off..][0..16], .little);
+	}
+	// Build via two u64 loads with sign-extension. The inline-tail invariant
+	// (setI64 / setBytes maintain inline_buf[1..9] sign-extended for L≤8)
+	// means for pay_len ∈ [1..8] starting at pay_off=1, a direct u64 read
+	// at [1..9] already gives the sign-extended value. For other layouts
+	// we build it byte-wise.
+	if (pay_off == 1 and pay_len <= 8) {
+		// Inline-tail invariant: buf[1..9] is sign-extended to u64.
+		const lo: u64 = std.mem.readInt(u64, buf[1..9], .little);
+		const sign_word: u64 = if ((lo >> 63) != 0) ~@as(u64, 0) else 0;
+		return @as(u128, lo) | (@as(u128, sign_word) << 64);
+	}
+	// Generic path: copy bytes into a 16-byte stack buffer with sign fill.
+	var tmp: [16]u8 = undefined;
+	@memcpy(tmp[0..pay_len], buf[pay_off..][0..pay_len]);
+	const high = buf[pay_off + pay_len - 1];
+	const fill: u8 = if ((high & 0x80) != 0) 0xFF else 0x00;
+	@memset(tmp[pay_len..16], fill);
+	return std.mem.readInt(u128, &tmp, .little);
+}
+
+/// Fast path for tier-3 add/sub when both operands are inline AND each
+/// payload is ≤16 bytes. Performs the arithmetic as a single u128 op,
+/// trims to canonical length, and writes the result back to r.inline_buf
+/// when it fits there (almost always — max output is 17 bytes payload + 1
+/// header = 18 bytes, well under INLINE_CAP=24). Falls back to the heap
+/// applyTier3Op path on the rare case where the result needs heap storage.
+inline fn smallInlineTier3Add(r: *Mp, a: *const Mp, b: *const Mp, comptime op: TierOp) ArithError!void {
+	const a_pay_off: usize = a.cached_pay_off;
+	const b_pay_off: usize = b.cached_pay_off;
+	const a_pay_len: usize = a.cached_pay_len;
+	const b_pay_len: usize = b.cached_pay_len;
+
+	const av = loadPayloadU128(&a.inline_buf, a_pay_off, a_pay_len);
+	const bv = loadPayloadU128(&b.inline_buf, b_pay_off, b_pay_len);
+
+	// Two's-complement add/sub via the unsigned u128 op.
+	// Sign-overflow (one extra byte needed) is detected by comparing the
+	// signs of the inputs to the sign of the result — same as addPayloads.
+	const a_neg = a.cached_sign < 0;
+	const b_neg_input = b.cached_sign < 0;
+	const result_u128: u128 = switch (op) {
+		.add => av +% bv,
+		.sub => av -% bv,
+	};
+
+	// For sub: the "effective" b sign is flipped (a - b == a + (-b)).
+	const b_neg_eff = if (op == .sub) !b_neg_input and (b.cached_sign != 0) else b_neg_input;
+	const result_high_bit = (result_u128 >> 127) != 0;
+	// For zero b in sub, b_neg_eff is false (positive zero); for nonzero
+	// negative b in sub, b_neg_eff is true (we negated a negative).
+	const same_effective_sign = a_neg == b_neg_eff;
+	const overflowed = same_effective_sign and (a_neg != result_high_bit);
+
+	// Layout the 17-byte canonical buffer: 16 bytes of u128 + optional
+	// 17th sign-extension byte.
+	var pay_buf: [17]u8 = undefined;
+	std.mem.writeInt(u128, pay_buf[0..16], result_u128, .little);
+	var pay_len: usize = 16;
+	if (overflowed) {
+		pay_buf[16] = if (a_neg) 0xFF else 0x00;
+		pay_len = 17;
+	}
+
+	// Canonical trim: drop redundant high sign-extension bytes.
+	const canon = canonicalLenSmall(pay_buf[0..pay_len]);
+
+	// Immediate path: single byte 0..127.
+	if (canon == 1 and pay_buf[0] < 0x80) {
+		r.inline_buf[0] = pay_buf[0];
+		r.inline_len = 1;
+		r.heap_offset = 0;
+		r.cached_pay_off = 0;
+		r.cached_pay_len = 1;
+		r.cached_sign = if (pay_buf[0] == 0) 0 else 1;
+		return;
+	}
+
+	// Length-prefixed inline path. Header is always 1 byte for L<32 (so
+	// for canon ≤ 17 ≤ 31). Total = canon + 1 ≤ 18 ≤ INLINE_CAP=24.
+	const hdr_len: usize = 1;
+	r.inline_buf[0] = 0x80 | @as(u8, @intCast(canon));
+	@memcpy(r.inline_buf[1 .. 1 + canon], pay_buf[0..canon]);
+
+	// Maintain the inline-tail invariant for total ∈ [2..9].
+	const total = canon + hdr_len;
+	if (total >= 2 and total <= 9) {
+		const L = total - 1;
+		const high_byte = r.inline_buf[1 + L - 1];
+		const sign_fill: u8 = if ((high_byte & 0x80) != 0) 0xFF else 0;
+		var i: usize = L;
+		while (i < 8) : (i += 1) r.inline_buf[1 + i] = sign_fill;
+	}
+
+	r.inline_len = @intCast(total);
+	r.heap_offset = 0;
+	r.cached_pay_off = 1;
+	r.cached_pay_len = @intCast(canon);
+	// Sign: high bit of high payload byte. Zero (canon==1, byte<0x80) was
+	// handled by the immediate branch above.
+	const high = pay_buf[canon - 1];
+	if ((high & 0x80) != 0) {
+		r.cached_sign = -1;
+	} else if (high != 0) {
+		r.cached_sign = 1;
+	} else {
+		var any_nonzero: bool = false;
+		for (pay_buf[0..canon]) |bb| if (bb != 0) { any_nonzero = true; break; };
+		r.cached_sign = if (any_nonzero) 1 else 0;
+	}
+}
+
+/// Specialized canonical-length trim for ≤17 byte payloads. Same semantics
+/// as tier3.canonicalLen but unrolled for the small case.
+inline fn canonicalLenSmall(payload: []const u8) usize {
+	if (payload.len <= 1) return @max(payload.len, 1);
+	const high = payload[payload.len - 1];
+	if (high != 0x00 and high != 0xFF) return payload.len; // common case
+	const sign_byte: u8 = high; // 0x00 or 0xFF
+	const sign_is_negative = sign_byte == 0xFF;
+	var n = payload.len;
+	while (n > 1) {
+		const h = payload[n - 1];
+		const next = payload[n - 2];
+		const next_high_bit_set = (next & 0x80) != 0;
+		if (h == sign_byte and next_high_bit_set == sign_is_negative) {
+			n -= 1;
+			continue;
+		}
+		break;
+	}
+	return n;
 }
 
 /// Cold path: ensureHeapCapacity may realloc r.heap_buf, OR r aliases an
