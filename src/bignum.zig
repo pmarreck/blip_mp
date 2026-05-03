@@ -3187,14 +3187,10 @@ inline fn smallInlineTier3Mul(r: *Mp, a: *const Mp, b: *const Mp) ArithError!voi
 	// Convert magnitude → two's-complement payload.
 	var pay_len: usize = mag_len;
 	if (result_neg) {
-		// Negate in place (two's complement).
-		var carry: u16 = 1;
-		var i: usize = 0;
-		while (i < mag_len) : (i += 1) {
-			const v: u16 = @as(u16, ~pay_buf[i]) + carry;
-			pay_buf[i] = @truncate(v);
-			carry = v >> 8;
-		}
+		// Two's-complement negate in place. Delegates to tier3.negateInPlace
+		// which uses chunked u64/u128 (~8× faster than per-byte for ≥ 8-byte
+		// magnitudes; falls back to per-byte for shorter ones).
+		tier3.negateInPlace(pay_buf[0..mag_len]);
 		// If high bit isn't set after negation (the very rare case where
 		// magnitude was exactly 2^(8*mag_len-1)+0 — actually impossible for
 		// positive magnitudes — but treat defensively), extend by 0xFF.
@@ -3324,16 +3320,12 @@ inline fn sameSizeTier3Mul(comptime N: comptime_int, r: *Mp, a: *const Mp, b: *c
 	while (mag_len > 1 and prod_buf[mag_len - 1] == 0) mag_len -= 1;
 
 	// Convert magnitude → two's-complement payload (sign-extension byte if
-	// the high bit conflicts with the desired sign).
+	// the high bit conflicts with the desired sign). Delegates to chunked
+	// tier3.negateInPlace (~8× faster than per-byte for the large-N cases
+	// here — N=64 means we negate 128 bytes = 16 chunks).
 	var pay_len: usize = mag_len;
 	if (result_neg) {
-		var carry: u16 = 1;
-		var i: usize = 0;
-		while (i < mag_len) : (i += 1) {
-			const v: u16 = @as(u16, ~prod_buf[i]) + carry;
-			prod_buf[i] = @truncate(v);
-			carry = v >> 8;
-		}
+		tier3.negateInPlace(prod_buf[0..mag_len]);
 		if ((prod_buf[mag_len - 1] & 0x80) == 0) {
 			prod_buf[mag_len] = 0xFF;
 			pay_len = mag_len + 1;
