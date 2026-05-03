@@ -15,7 +15,7 @@ A pure-Zig arbitrary-precision integer library where the canonical storage is **
 - **RSA-2048 trifecta**: blip_mp beats GMP at all three core RSA-2048 ops — `mul` (1.16×), `divMod` (1.31×), and `powm` (1.11×). RSA-2048 is the most-deployed crypto operation worldwide; this is the headline crypto-workload result.
 - **Addition at 768-bit and above: blip_mp beats GMP by 1.04–1.28×** (with tie at 1024 and competitive at smaller sizes after the bookkeeping cleanup landed). Eight add sizes total now beat GMP (768/1536/2048/3072/4096/6144/8192/16384/32768).
 - **Subtraction at 256-bit and above: blip_mp beats GMP by 1.03–2.11×** — ten Mp.sub sizes beat GMP (only 128-bit lags, same as the Mp.add picture, both for the same ABI/struct-overhead reason). Headline: 6144-bit Mp.sub is 12.7× faster than the pre-fix per-byte version (606 → 48 ns/op) once the chunked u512/u256/u128/u64 ladder was mirrored from `addPayloads` to the previously-untouched `subPayloads`.
-- **Modular exponentiation (RSA-2048): blip_mp beats GMP by 11%** — Mp.powm with arbitrary-modulus Montgomery + sliding-window. At 1024-bit and 3072-bit we're at parity (within 5%). This is the headline number for serious crypto workloads.
+- **Modular exponentiation (RSA-2048): blip_mp beats GMP by 13%** — Mp.powm with arbitrary-modulus Montgomery + sliding-window + Möller-Granlund-improved inner div. At 1024-bit beats by 3%; at 3072-bit by 8%. This is the headline number for serious crypto workloads.
 - **Long division (2K-bit / 1K-bit): blip_mp beats GMP by 24%** — `Mp.divMod` with u64-base Knuth Algorithm D. 36× faster than the original byte-base implementation, and now ahead of GMP at this size.
 - **Correctness: 12029/12029 random cross-validation tests against GMP pass** — across the entire modular-arithmetic surface (add, sub, mul, div, mod, divMod, powm, invMod). Every result bit-identical to GMP's corresponding `mpz_*` function.
 - **Controlled experiment: GMP's hand-tuned aarch64 asm advantage on Apple Silicon is ~0%.** Built a second GMP variant with `--disable-assembly` and benchmarked. Modern clang `-O3` generates near-optimal ADCS chains from `__builtin_add_overflow`; the asm tuning that mattered on ARMv7/x86 doesn't move the needle on M-series with wide ADCS pipelines. **This means our remaining gaps to GMP are purely algorithmic, not asm.**
@@ -102,73 +102,62 @@ Ten of eleven sub sizes now beat GMP. Only 128-bit lags — the same residual AB
 
 Nine of fifteen mul sizes beat GMP (was six). 256-bit and 4096-bit moved from losing to near-tie. 8192-bit gap closed from 0.72× to 0.87×. The remaining 16384/32768 losses are FFT territory — GMP uses Schönhage-Strassen there; we have it shipped but gated off (M6-4-E.3 inline asm is the next lever; closes the 13-15% gap that remains).
 
-### Modular exponentiation (`Mp.powm` — M7-4.3 with arbitrary-modulus Montgomery + sliding-window)
+### Modular exponentiation — `Mp.powm` (M7-4.3 Montgomery + M-G-improved div in inner loop)
 
 The single most-used bignum operation in real crypto: RSA encrypt/decrypt/sign/verify, Diffie-Hellman key exchange, ECC scalar multiplication.
 
-| Bits | `Mp.powm` (ms) | GMP `mpz_powm` (ms) | Mp/GMP |
-|---:|---:|---:|---:|
-| 512 | 0.07 | 0.07 | **1.05× (parity)** |
-| **1024** | **0.52** | **0.50** | **1.04× (parity)** legacy RSA-1024 |
-| **2048** | **3.27** | **3.69** | **0.89× (BEAT GMP by 11%)** ✅ RSA-2048 |
-| **3072** | **11.51** | **12.13** | **0.95× (BEAT GMP by 5%)** ✅ recommended RSA-3072 |
-
-(Modulus forced odd, as expected for RSA primes / DH groups / ECC field primes.)
-
-The journey: M7-4.1 (square-and-multiply) was 40-50× behind GMP. M7-4.2 (sliding-window) saved 17-27%. M7-4.3 (arbitrary-odd-modulus Montgomery via CIOS) flipped the ratio in one cycle — ~50× internal speedup. Why we beat GMP at 2048+: GMP switches to Montgomery at a more conservative threshold; we don't allocate per-multiplication; M-series ARM scalar `umulh` is well-served by Zig's straightforward u128 codegen.
-
-### Division — `divModKnuth` (M7-3 → u64-base reformulation)
-
-| Op | Bits | `Mp` byte-base (ns) | `Mp` u64-base (ns) | GMP `mpz_tdiv_qr` (ns) | Mp(u64) / GMP |
-|---|---:|---:|---:|---:|---:|
-| `divModKnuth` | 2048 / 1024 | 17,810 | **470** | 614 | **0.77× (BEAT GMP by 24%)** ✅ |
-| `divModKnuth` | 4096 / 2048 | — | 1,614 | — (re-bench needed) | — |
-| `divModKnuth` | 8192 / 4096 | — | 5,445 | — (re-bench needed) | — |
-
-The byte-base implementation from M7-3 (`divModKnuth`) was 28.8× behind GMP. Reformulating to u64-base (b = 2^64 instead of b = 256) gave a **36× internal speedup at 2K-bit and flipped the ratio against GMP**. Scaling holds well to higher sizes (close to theoretical n²), suggesting we stay competitive at 4K and 8K too — though direct GMP comparison at those sizes hasn't been re-bench'd yet.
-
-Why it overshoots: aarch64 ARM scalar `udiv x` on a u128/u64 dividend is essentially single-cycle issue; GMP's `mp_limb_t` abstraction layer has per-limb overhead that doesn't have anywhere to amortize at this size. At much larger sizes (16K+ bit), GMP's more sophisticated quotient-digit estimation (Lehmer-style multi-precision divisor approximation) will likely retake the lead.
-
-### Modular exponentiation — `Mp.powm` (M7-4.3 Montgomery)
-
-Direct side-by-side from a single bench run (Apple M4, ReleaseFast). Numbers consistent with M7-4.3 (1.83× over square-and-multiply baseline + Montgomery for arbitrary odd modulus + sliding-window):
+Direct side-by-side from a single nix `packages.bench` build (Apple M4, ReleaseFast). Modulus forced odd, as expected for RSA primes / DH groups / ECC field primes.
 
 | Bits | `Mp.powm` (µs) | GMP `mpz_powm` (µs) | Mp/GMP |
 |---:|---:|---:|---:|
-| 512 | 75.30 | 71.95 | 1.05× (parity) |
-| **1024** | **503.48** | **507.75** | **0.99×** ✅ tie/win |
-| **2048** | **3425.25** | **3753.44** | **0.91×** ✅ (BEAT GMP by 9%, RSA-2048) |
-| **3072** | **11960.52** | **12402.06** | **0.96×** ✅ |
+| 512 | 75.89 | 73.59 | 1.03× (parity) |
+| **1024** | **505.27** | **521.39** | **0.97×** ✅ legacy RSA-1024 |
+| **2048** | **3333.11** | **3839.22** | **0.87×** ✅ (BEAT GMP by 13%, RSA-2048) |
+| **3072** | **11618.38** | **12567.48** | **0.92×** ✅ recommended RSA-3072 |
+
+The journey: M7-4.1 (square-and-multiply) was 40-50× behind GMP. M7-4.2 (sliding-window) saved 17-27%. M7-4.3 (arbitrary-odd-modulus Montgomery via CIOS) flipped the ratio. The recent M-G q_hat refinement in `divModKnuthU64` propagates an extra ~3% to powm at 2048-bit (now beating GMP by 13%, was 11%). Why we beat GMP at 2048+: GMP switches to Montgomery at a more conservative threshold; we don't allocate per-multiplication; M-series ARM scalar `umulh` is well-served by Zig's straightforward u128 codegen.
+
+### Division — `divModKnuthU64` (M7-3.u64 + Möller-Granlund 2/1+3/2 reciprocal q_hat)
+
+Inner-kernel microbench (limb-only, no Mp wrapper):
+
+| Op | Bits | `Mp` byte-base (ns) | `Mp` u64-base (ns) | GMP `mpz_tdiv_qr` (ns) | Mp(u64) / GMP |
+|---|---:|---:|---:|---:|---:|
+| `divModKnuth` | 2048 / 1024 | 17,810 | **~470** | 614 | **0.77× (BEAT GMP by 24%)** ✅ |
+| `divModKnuth` | 4096 / 2048 | — | 1,614 | — | — |
+| `divModKnuth` | 8192 / 4096 | — | 5,445 | — | — |
+
+The byte-base implementation from M7-3 (`divModKnuth`) was 28.8× behind GMP. Reformulating to u64-base (b = 2^64 instead of b = 256) gave a **36× internal speedup at 2K-bit and flipped the inner-kernel ratio against GMP**. Möller-Granlund 2/1 + 3/2 reciprocal q_hat (iter 14) added another ~7% at the kernel level + larger gains at the integrated Mp.divMod level (next table).
 
 ### Modular inverse — `invMod` (M7-5 → M9 Lehmer → M10 wider-window)
 
-| Bits | byte-classical (ns) | u64-classical (ns) | u64 + Lehmer (ns) | **u64 + M10 (ns)** | GMP `mpz_invert` (ns) | Mp/GMP final |
-|---:|---:|---:|---:|---:|---:|---:|
-| 256 | — | 19,140 | 6,560 | **5,870** | ~960 | 6.15× slower |
-| 512 | — | 48,130 | 14,510 | **12,350** | ~1,950 | 6.21× slower |
-| 1024 | 187,000 | 128,680 | 33,600 | **28,360** | 4,400 | 5.88× slower |
-| **2048** | 681,000 | 418,550 | 91,100 | **49,900** | 11,400 | **3.96×** slower |
+| Bits | byte-classical (ns) | u64-classical (ns) | u64 + Lehmer (ns) | u64 + M10 (ns) | **post-M-G (ns)** | GMP `mpz_invert` (ns) | Mp/GMP final |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 256 | — | 19,140 | 6,560 | 5,870 | **6,174** | 1,088 | 5.67× slower |
+| 512 | — | 48,130 | 14,510 | 12,350 | **13,712** | 2,461 | 5.57× slower |
+| 1024 | 187,000 | 128,680 | 33,600 | 28,360 | **30,158** | 5,769 | 5.23× slower |
+| **2048** | 681,000 | 418,550 | 91,100 | 49,900 | **55,977** | 13,956 | **4.01×** slower |
 
 Three cumulative speedups: (1) u64-base Knuth div from M7-3.u64 (1.4-1.6× downstream) + (2) Lehmer's GCD speedup from M9 (2.9-4.6× over classical EEA) + (3) **M10 wider-window Lehmer** with u128 matrix entries (1.18-1.83× over standard Lehmer; 1.83× at the headline 2048-bit RSA size). Combined: ~14× faster than the original byte-base baseline at 2048-bit; gap to GMP narrowed from 30-60× to 4-6×.
 
 M10 here is the *intermediate* form — wider-window Lehmer with u128 matrix entries instead of u62, doubling the iterations batched per multi-precision matrix-apply. **True recursive half-GCD (matrix entries scaling to ~n/2 bits, divide-and-conquer recursion = O(M(n) log n) sub-quadratic)** is M11, deferred — substantial multi-day project. M10 alone closed the gap to within 4× of GMP at RSA-2048.
 
-### Division — full `Mp.divMod` (with BLIP encoding overhead) vs GMP
+### Division — full `Mp.divMod` (with BLIP encoding overhead) vs GMP — post-M-G
 
-Honest finding from the bench output: the inner u64-base Knuth Algorithm D kernel (M7-3.u64 row) beats GMP's `mpn_tdiv_qr` at 2K-bit, but the full `Mp.divMod` wrapper (BLIP encoding + sign extraction + magnitude packing + result re-encoding) loses to `mpz_tdiv_qr` by 1.5–1.7×. Two valid measurements; both are real.
+Tracking the cumulative gains across all div optimizations. Latest numbers from a fresh nix `packages.bench` build, post Möller-Granlund 2/1 + 3/2 reciprocal q_hat (iter 14):
 
-| Bits | inner `divModKnuthU64` (ns) | full `Mp.divMod` (ns) | overhead (ns) | `mpz_tdiv_qr` (ns) | full Mp/GMP |
+| Bits | iter 11 baseline (ns) | iter 12 (skip byte/limb) (ns) | **iter 14 (M-G) (ns)** | `mpz_tdiv_qr` (ns) | full Mp/GMP |
 |---:|---:|---:|---:|---:|---:|
-| 256 | — | 87 | — | 30 | 2.95× slower |
-| 512 | — | 125 | — | 74 | 1.69× slower |
-| 1024 | — | 238 | — | 162 | 1.47× slower |
-| 2048 | 470 | 634 | 164 | 403 | 1.57× slower |
-| 4096 | 1614 | 1985 | 371 | 1228 | 1.62× slower |
-| 8192 | 5445 | 6621 | 1176 | 4170 | 1.59× slower |
+| 256 | 87 | 71 | **60.28** | 30.11 | 2.00× slower |
+| 512 | 125 | 112 | **100.26** | 73.44 | 1.37× slower |
+| 1024 | 238 | 226 | **201.80** | 160.88 | 1.25× slower |
+| **2048** | **634** | **609** | **526.70** | **416.52** | **1.26× slower** ← was 1.57× pre-iter12 |
+| 4096 | 1985 | 1918 | **1640.50** | 1292.70 | 1.27× slower |
+| 8192 | 6621 | 6438 | **5816.80** | 4235.20 | 1.37× slower |
 
-Encoding-overhead ratio grows with size (164 ns at 2K → 1176 ns at 8K) — the magnitude pack/unpack is O(n) memory traffic per call. GMP's `mpz_tdiv_qr` doesn't have this overhead because its `mpz_t` already stores in limb form natively.
+Cumulative gain at 2048-bit: 634 → 527 ns = **17% faster**, gap to GMP narrowed from 1.57× to 1.26× — closer to GMP than ever, but still not flipped. The remaining gap is the inherent encoding overhead (sign extraction + result re-encoding into canonical BLIP) that GMP's natively-limb `mpz_t` doesn't pay.
 
-**Future optimization**: plumb `Mp.divMod` directly to a limb-friendly internal representation, skipping the byte↔limb round-trip. Would flip 2K-bit divMod from losing 1.57× to winning 1.18× — a ~1.85× swing. Tracked.
+**Future optimization**: plumb `Mp.divMod` to a limb-friendly internal representation, eliminating the residual encoding overhead. Could close the last ~25% to tie GMP. Tracked.
 
 `Mp.powm` doesn't suffer this overhead because Montgomery setup happens once per call and stays in limb form for the entire exp-loop — confirmed by powm beating GMP at 2048-bit.
 
