@@ -83,6 +83,30 @@ const LARGE_BUCKETS = [_]LargeBucket{
 
 const LARGEST_BYTES: usize = 32768 / 8; // 4096 bytes
 
+// divMod / powm / invMod sweeps. Smaller per-bench since each op is more
+// expensive; cover the crypto-relevant sizes (RSA-1024/2048/3072/4096 +
+// some smaller for context).
+const DIVMOD_BUCKETS = [_]LargeBucket{
+	.{ .name = "256-bit",   .bits = 256 },
+	.{ .name = "512-bit",   .bits = 512 },
+	.{ .name = "1024-bit",  .bits = 1024 },
+	.{ .name = "2048-bit",  .bits = 2048 },
+	.{ .name = "4096-bit",  .bits = 4096 },
+	.{ .name = "8192-bit",  .bits = 8192 },
+};
+const POWM_BUCKETS = [_]LargeBucket{
+	.{ .name = "512-bit",   .bits = 512 },
+	.{ .name = "1024-bit",  .bits = 1024 },
+	.{ .name = "2048-bit",  .bits = 2048 },
+	.{ .name = "3072-bit",  .bits = 3072 },
+};
+const INVMOD_BUCKETS = [_]LargeBucket{
+	.{ .name = "256-bit",   .bits = 256 },
+	.{ .name = "512-bit",   .bits = 512 },
+	.{ .name = "1024-bit",  .bits = 1024 },
+	.{ .name = "2048-bit",  .bits = 2048 },
+};
+
 pub fn main() !void {
 	if (comptime @import("builtin").mode == .Debug) {
 		std.debug.print("\x1b[33mDEBUG BUILD\x1b[0m\n", .{});
@@ -122,6 +146,29 @@ pub fn main() !void {
 	for (LARGE_BUCKETS) |lb| {
 		const ns = try benchmarkMpMulLarge(allocator, lb);
 		std.debug.print("RESULT impl=Mp.mul bucket={s} ns_per_op={d:.2}\n", .{ lb.name, ns });
+	}
+
+	// Division sweep (Mp.divMod) — N-bit dividend ÷ ~N/2-bit divisor.
+	// Exercises u64-base Knuth Algorithm D from M7-3.u64.
+	std.debug.print("\n--- division (Mp.divMod, N-bit / ~N/2-bit) ---\n", .{});
+	for (DIVMOD_BUCKETS) |lb| {
+		const ns = try benchmarkMpDivModLarge(allocator, lb);
+		std.debug.print("RESULT impl=Mp.divMod bucket={s} ns_per_op={d:.2}\n", .{ lb.name, ns });
+	}
+
+	// Modular exponentiation (Mp.powm). Exercises Montgomery from M7-4.3.
+	// Iterations scale way down — powm at 2K-bit is ~3 µs; at 4K-bit ~12 µs.
+	std.debug.print("\n--- modular exponentiation (Mp.powm, base^exp mod n at N-bit) ---\n", .{});
+	for (POWM_BUCKETS) |lb| {
+		const ns = try benchmarkMpPowmLarge(allocator, lb);
+		std.debug.print("RESULT impl=Mp.powm bucket={s} ns_per_op={d:.2}\n", .{ lb.name, ns });
+	}
+
+	// Modular inverse (Mp.invMod). Exercises M9 Lehmer + M10 wider-window.
+	std.debug.print("\n--- modular inverse (Mp.invMod, a^-1 mod m at N-bit) ---\n", .{});
+	for (INVMOD_BUCKETS) |lb| {
+		const ns = try benchmarkMpInvModLarge(allocator, lb);
+		std.debug.print("RESULT impl=Mp.invMod bucket={s} ns_per_op={d:.2}\n", .{ lb.name, ns });
 	}
 }
 
@@ -317,5 +364,155 @@ fn benchmarkMpMulLarge(allocator: std.mem.Allocator, lb: LargeBucket) !f64 {
 	const elapsed_ns = nowNs() - start_ns;
 
 	std.mem.doNotOptimizeAway(result.bytes().ptr);
+	return @as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(iters));
+}
+
+// Helper: build a positive Mp of given byte length with random payload.
+fn buildRandomPositiveMp(allocator: std.mem.Allocator, byte_count: usize, seed: u64) !blip_mp.Mp {
+	var mp = blip_mp.Mp.init(allocator);
+	const payload = try allocator.alloc(u8, byte_count);
+	defer allocator.free(payload);
+	var rng = std.Random.DefaultPrng.init(seed);
+	const r = rng.random();
+	for (payload) |*p| p.* = r.int(u8);
+	payload[byte_count - 1] &= 0x7F;
+	if (payload[byte_count - 1] == 0) payload[byte_count - 1] = 0x40; // ensure nonzero high
+	const blip_buf = try allocator.alloc(u8, byte_count + 16);
+	defer allocator.free(blip_buf);
+	const hdr_len = try blip_mp.tier3.writeHeader(blip_buf, byte_count);
+	@memcpy(blip_buf[hdr_len .. hdr_len + byte_count], payload);
+	try mp.setBytes(blip_buf[0 .. hdr_len + byte_count]);
+	return mp;
+}
+
+// Same as buildRandomPositiveMp but forces the low bit set (odd modulus).
+fn buildRandomPositiveOddMp(allocator: std.mem.Allocator, byte_count: usize, seed: u64) !blip_mp.Mp {
+	var mp = blip_mp.Mp.init(allocator);
+	const payload = try allocator.alloc(u8, byte_count);
+	defer allocator.free(payload);
+	var rng = std.Random.DefaultPrng.init(seed);
+	const r = rng.random();
+	for (payload) |*p| p.* = r.int(u8);
+	payload[byte_count - 1] &= 0x7F;
+	if (payload[byte_count - 1] == 0) payload[byte_count - 1] = 0x40;
+	payload[0] |= 1; // odd
+	const blip_buf = try allocator.alloc(u8, byte_count + 16);
+	defer allocator.free(blip_buf);
+	const hdr_len = try blip_mp.tier3.writeHeader(blip_buf, byte_count);
+	@memcpy(blip_buf[hdr_len .. hdr_len + byte_count], payload);
+	try mp.setBytes(blip_buf[0 .. hdr_len + byte_count]);
+	return mp;
+}
+
+fn divModIters(bits: usize) usize {
+	if (bits <= 512) return 200_000;
+	if (bits <= 2048) return 50_000;
+	if (bits <= 4096) return 20_000;
+	return 5_000;
+}
+
+fn benchmarkMpDivModLarge(allocator: std.mem.Allocator, lb: LargeBucket) !f64 {
+	// Dividend is N-bit, divisor is ~N/2-bit (typical Knuth Algorithm D shape).
+	const dividend_bytes = lb.bits / 8;
+	const divisor_bytes = @max(1, dividend_bytes / 2);
+	var dividend_pool: [POOL_SIZE]blip_mp.Mp = undefined;
+	var divisor_pool: [POOL_SIZE]blip_mp.Mp = undefined;
+	for (&dividend_pool, 0..) |*slot, i| slot.* = try buildRandomPositiveMp(allocator, dividend_bytes, 0xD1D + i);
+	for (&divisor_pool, 0..) |*slot, i| slot.* = try buildRandomPositiveMp(allocator, divisor_bytes, 0xDD + i);
+	defer for (&dividend_pool) |*slot| slot.deinit();
+	defer for (&divisor_pool) |*slot| slot.deinit();
+
+	var q = blip_mp.Mp.init(allocator);
+	defer q.deinit();
+	var rem = blip_mp.Mp.init(allocator);
+	defer rem.deinit();
+
+	const iters = divModIters(lb.bits);
+	const start_ns = nowNs();
+	var i: usize = 0;
+	while (i < iters) : (i += 1) {
+		const a = &dividend_pool[i & (POOL_SIZE - 1)];
+		const b = &divisor_pool[i & (POOL_SIZE - 1)];
+		try blip_mp.Mp.divMod(&q, &rem, a, b);
+	}
+	const elapsed_ns = nowNs() - start_ns;
+
+	std.mem.doNotOptimizeAway(q.bytes().ptr);
+	std.mem.doNotOptimizeAway(rem.bytes().ptr);
+	return @as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(iters));
+}
+
+fn powmIters(bits: usize) usize {
+	if (bits <= 512) return 5_000;
+	if (bits <= 1024) return 1_000;
+	if (bits <= 2048) return 200;
+	return 50; // 3072 and up
+}
+
+fn benchmarkMpPowmLarge(allocator: std.mem.Allocator, lb: LargeBucket) !f64 {
+	// Standard RSA-style powm: base, exp, mod all N-bit; mod odd.
+	const byte_count = lb.bits / 8;
+	var base_pool: [POOL_SIZE]blip_mp.Mp = undefined;
+	var exp_pool: [POOL_SIZE]blip_mp.Mp = undefined;
+	var mod_pool: [POOL_SIZE]blip_mp.Mp = undefined;
+	for (&base_pool, 0..) |*slot, i| slot.* = try buildRandomPositiveMp(allocator, byte_count, 0xBA5E + i);
+	for (&exp_pool, 0..) |*slot, i| slot.* = try buildRandomPositiveMp(allocator, byte_count, 0x77 + i);
+	for (&mod_pool, 0..) |*slot, i| slot.* = try buildRandomPositiveOddMp(allocator, byte_count, 0x70D + i);
+	defer for (&base_pool) |*slot| slot.deinit();
+	defer for (&exp_pool) |*slot| slot.deinit();
+	defer for (&mod_pool) |*slot| slot.deinit();
+
+	var result = blip_mp.Mp.init(allocator);
+	defer result.deinit();
+
+	const iters = powmIters(lb.bits);
+	const start_ns = nowNs();
+	var i: usize = 0;
+	while (i < iters) : (i += 1) {
+		const base = &base_pool[i & (POOL_SIZE - 1)];
+		const exp = &exp_pool[i & (POOL_SIZE - 1)];
+		const mod = &mod_pool[i & (POOL_SIZE - 1)];
+		try blip_mp.Mp.powm(&result, base, exp, mod);
+	}
+	const elapsed_ns = nowNs() - start_ns;
+
+	std.mem.doNotOptimizeAway(result.bytes().ptr);
+	return @as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(iters));
+}
+
+fn invModIters(bits: usize) usize {
+	if (bits <= 256) return 100_000;
+	if (bits <= 512) return 50_000;
+	if (bits <= 1024) return 10_000;
+	return 2_000; // 2048
+}
+
+fn benchmarkMpInvModLarge(allocator: std.mem.Allocator, lb: LargeBucket) !f64 {
+	// invMod with odd modulus to maximize the rate of successful inversions.
+	const byte_count = lb.bits / 8;
+	var a_pool: [POOL_SIZE]blip_mp.Mp = undefined;
+	var m_pool: [POOL_SIZE]blip_mp.Mp = undefined;
+	for (&a_pool, 0..) |*slot, i| slot.* = try buildRandomPositiveMp(allocator, byte_count, 0xA1A + i);
+	for (&m_pool, 0..) |*slot, i| slot.* = try buildRandomPositiveOddMp(allocator, byte_count, 0x6D + i);
+	defer for (&a_pool) |*slot| slot.deinit();
+	defer for (&m_pool) |*slot| slot.deinit();
+
+	var r = blip_mp.Mp.init(allocator);
+	defer r.deinit();
+
+	const iters = invModIters(lb.bits);
+	const start_ns = nowNs();
+	var i: usize = 0;
+	var ok_count: usize = 0;
+	while (i < iters) : (i += 1) {
+		const a = &a_pool[i & (POOL_SIZE - 1)];
+		const m = &m_pool[i & (POOL_SIZE - 1)];
+		const ok = try blip_mp.Mp.invMod(&r, a, m);
+		if (ok) ok_count += 1;
+	}
+	const elapsed_ns = nowNs() - start_ns;
+
+	std.mem.doNotOptimizeAway(r.bytes().ptr);
+	std.mem.doNotOptimizeAway(&ok_count);
 	return @as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(iters));
 }
