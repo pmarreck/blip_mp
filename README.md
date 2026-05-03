@@ -45,6 +45,7 @@ Apple Silicon (M-series), aarch64-darwin, Zig 0.16.0 ReleaseFast, libc malloc.
 - **All `i64`-fitting values: 1.95–2.66× faster than GMP**
 - **Cryptographic multiplication (1024, 1536, 3072 bit): 1.12–1.46× faster**
 - **Addition at 768-bit and above: 1.04–1.28× faster than GMP** (eight sizes now beat GMP after the M5/M9 bookkeeping cleanup; was previously 1.03× at 4096+ only)
+- **Subtraction at 256-bit and above: 1.03–2.11× faster than GMP** — ten Mp.sub sizes beat GMP after the chunked-`subPayloads` fix mirrored the long-standing addPayloads optimization. Headline: 6144-bit sub went 606 ns → 48 ns (12.7×).
 - **Large multiplication (16384+ bits via Toom-3): 1.03× faster** (modest)
 - **Modular exponentiation (RSA-2048): 11% faster than GMP** (Mp.powm with Montgomery, M7-4.3) — at 1024 and 3072 bit we're at parity. This is the headliner for any serious crypto workload (RSA encrypt/decrypt/sign, DH key exchange, ECC scalar mul).
 - **Long division (2048-bit / 1024-bit): 24% faster than GMP** (Mp.divMod with u64-base Knuth Algorithm D) — 36× faster than the byte-base implementation that originally lagged by 28.8×.
@@ -53,7 +54,7 @@ Apple Silicon (M-series), aarch64-darwin, Zig 0.16.0 ReleaseFast, libc malloc.
 ### The honest losses
 
 We're slower than GMP at:
-- **128–512 bit addition** (0.56–0.88× of GMP, was 0.36–0.79× before the cleanup). Remaining gap at the smallest sizes is the load+store ABI cost difference from blip_mp's heavier struct (one cache line + 8B vs GMP's 24-byte header) — fundamental, not algorithmic.
+- **128-bit addition and subtraction** (~0.56–0.65× of GMP). The remaining gap at the smallest size is the load+store ABI cost difference from blip_mp's heavier struct (one cache line + 8B vs GMP's 24-byte mpz_t) — fundamental, not algorithmic. Other small sizes (192-512 bit) are now within 70-90% of GMP after the cleanup landed.
 - **128–256 bit multiplication** (0.40–0.67×). Same per-op overhead.
 - **8192+ bit multiplication** (0.52–0.72×). GMP uses Schönhage-Strassen FFT mul. We have a full pure-Zig FFT stack (single-prime NTT + two-prime CRT + NEON-SIMD butterflies) but it's currently gated off in production — even with the 1.40× speedup from vectorization (32K-bit FFT path: 191K → 135K ns), Toom-3 still wins at 117K ns. 13–15% gap remaining; M6-4-E ladder in PLAN.md targets the alloc-elimination + Stockham + inline-asm levers needed to flip it.
 

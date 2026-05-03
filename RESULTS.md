@@ -13,6 +13,7 @@ A pure-Zig arbitrary-precision integer library where the canonical storage is **
 - **All `i64`-fitting values: blip_mp beats GMP by 1.95–2.66×.** This is the headline architectural win — the BLIP-storage advantage compounds across the small/common bignum case.
 - **Cryptographically common multiplication sizes (1024, 1536, 3072 bit): blip_mp beats GMP by 1.12–1.46×.** Includes legacy RSA-1024 (1.25× faster) and recommended RSA-3072 (1.12× faster).
 - **Addition at 768-bit and above: blip_mp beats GMP by 1.04–1.28×** (with tie at 1024 and competitive at smaller sizes after the bookkeeping cleanup landed). Eight add sizes total now beat GMP (768/1536/2048/3072/4096/6144/8192/16384/32768).
+- **Subtraction at 256-bit and above: blip_mp beats GMP by 1.03–2.11×** — ten Mp.sub sizes beat GMP (only 128-bit lags, same as the Mp.add picture, both for the same ABI/struct-overhead reason). Headline: 6144-bit Mp.sub is 12.7× faster than the pre-fix per-byte version (606 → 48 ns/op) once the chunked u512/u256/u128/u64 ladder was mirrored from `addPayloads` to the previously-untouched `subPayloads`.
 - **Modular exponentiation (RSA-2048): blip_mp beats GMP by 11%** — Mp.powm with arbitrary-modulus Montgomery + sliding-window. At 1024-bit and 3072-bit we're at parity (within 5%). This is the headline number for serious crypto workloads.
 - **Long division (2K-bit / 1K-bit): blip_mp beats GMP by 24%** — `Mp.divMod` with u64-base Knuth Algorithm D. 36× faster than the original byte-base implementation, and now ahead of GMP at this size.
 - **Correctness: 12029/12029 random cross-validation tests against GMP pass** — across the entire modular-arithmetic surface (add, sub, mul, div, mod, divMod, powm, invMod). Every result bit-identical to GMP's corresponding `mpz_*` function.
@@ -49,6 +50,32 @@ ADC chains, plus an inline-fits stack path for ≤16-byte payloads.)
 | **8192** | **55.4** | **69.04** | 68.63 | **1.25×** ✅ |
 | **16384** | **104.4** | **133.30** | 132.04 | **1.28×** ✅ |
 | **32768** | **208.0** | **254.77** | 260.59 | **1.22×** ✅ |
+
+### Subtraction
+
+(Post-`subPayloads` chunked-loop upgrade — 2026-05-02. The previously-shipped
+`smallInlineTier3Add` and `sameSizeTier3Add(N)` fast paths are op-polymorphic
+via `comptime op: TierOp` and were already serving Mp.sub for size-matched
+small/medium sizes. The recent fix upgraded `subPayloads` — the chunked-loop
+fallback for unmatched sizes — from per-byte to u512/u256/u128/u64 chunks,
+mirroring `addPayloads`. This unlocked sub at >512-bit, which had been
+falling off a cliff to per-byte arithmetic.)
+
+| Bits | `Mp.sub` (ns) | GMP `mpz_sub` (ns) | Mp/GMP |
+|---:|---:|---:|---:|
+| 128 | 6.58 | 4.26 | 0.65× |
+| **256** | **4.13** | **5.49** | **1.33×** ✅ |
+| **512** | **4.38** | **5.87** | **1.34×** ✅ |
+| **768** | **4.38** | **9.23** | **2.11×** ✅ (headline ratio for sub) |
+| **1024** | **5.92** | **9.26** | **1.56×** ✅ |
+| **1536** | **6.22** | **12.23** | **1.97×** ✅ |
+| **2048** | **10.63** | **17.54** | **1.65×** ✅ |
+| **3072** | **16.09** | **24.26** | **1.51×** ✅ |
+| **4096** | **24.09** | **32.39** | **1.34×** ✅ |
+| **6144** | **47.77** | **49.27** | **1.03×** ✅ (was 606 → 48 ns post-fix) |
+| **8192** | **59.71** | **73.64** | **1.23×** ✅ |
+
+Ten of eleven sub sizes now beat GMP. Only 128-bit lags — the same residual ABI/struct-overhead picture as Mp.add at 128-bit.
 
 ### Multiplication
 
