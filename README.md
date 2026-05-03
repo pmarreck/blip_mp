@@ -48,7 +48,7 @@ Apple Silicon (M-series), aarch64-darwin, Zig 0.16.0 ReleaseFast, libc malloc.
 - **Addition at 768-bit and above: 1.04–1.28× faster than GMP** (eight sizes now beat GMP after the M5/M9 bookkeeping cleanup; was previously 1.03× at 4096+ only)
 - **Subtraction at 256-bit and above: 1.03–2.11× faster than GMP** — ten Mp.sub sizes beat GMP after the chunked-`subPayloads` fix mirrored the long-standing addPayloads optimization. Headline: 6144-bit sub went 606 ns → 48 ns (12.7×).
 - **Large multiplication (16384+ bits via Toom-3): 1.03× faster** (modest)
-- **Modular exponentiation (RSA-2048): 11% faster than GMP** (Mp.powm with Montgomery, M7-4.3) — at 1024 and 3072 bit we're at parity. This is the headliner for any serious crypto workload (RSA encrypt/decrypt/sign, DH key exchange, ECC scalar mul).
+- **Modular exponentiation (RSA-2048): 13% faster than GMP** (Mp.powm with Montgomery, M7-4.3 + Möller-Granlund-improved inner div). At 1024 we beat by 3%; at 3072 by 8%. This is the headliner for any serious crypto workload (RSA encrypt/decrypt/sign, DH key exchange, ECC scalar mul).
 - **Long division (2048-bit / 1024-bit): 24% faster than GMP** (Mp.divMod with u64-base Knuth Algorithm D) — 36× faster than the byte-base implementation that originally lagged by 28.8×.
 - **Correctness: 12029/12029 random GMP cross-validation tests pass** across add, sub, mul, div, mod, divMod, powm, invMod — the complete modular-arithmetic API.
 
