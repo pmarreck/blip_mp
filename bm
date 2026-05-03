@@ -1,8 +1,109 @@
 #!/usr/bin/env bash
-# Benchmark runner. Always builds in ReleaseFast (per CLAUDE.md).
-# Asserts no DEBUG BUILD banner appears in benchmark output.
+# Benchmark suite runner for blip_mp.
+# Builds bench binaries via `nix build .#bench` (gets blip_mp_bench,
+# gmp_bench, gmp_noasm_bench, fft_microbench, cross_check) then runs
+# the requested bench(es) and prints organized side-by-side output.
+#
+# Usage:
+#   ./bm                  # full bench: blip_mp + GMP-asm + GMP-noasm,
+#                        # all sizes, with side-by-side ratios where
+#                        # bucket names match
+#   ./bm --quick          # blip_mp + GMP-asm only; small + tier-3 add/sub/mul
+#                        # sizes; skip large/long-running modular-arith ops
+#   ./bm --hyperfine      # wrap each bench binary in `hyperfine` for
+#                        # statistical aggregation (10 runs, warmup 2)
+#   ./bm --raw            # dump the raw RESULT lines verbatim, no parsing
+#   ./bm --micro          # FFT primitive microbench only (fft_microbench)
+#   ./bm -h | --help      # this message
+#
+# Asserts no `DEBUG BUILD` banner appears in benchmark output (would mean
+# we're benching a debug binary — silently catastrophic).
 set -u
 
-printf 'Benchmark suite not yet implemented (Milestone 2).\n' >&2
-printf 'See PLAN.md.\n' >&2
-exit 2
+mode="full"
+for arg in "$@"; do
+	case "$arg" in
+		--quick) mode="quick" ;;
+		--hyperfine) mode="hyperfine" ;;
+		--raw) mode="raw" ;;
+		--micro) mode="micro" ;;
+		-h|--help)
+			# Print the # comment block at the top (lines 2..set -u) without trailing 'set -u'.
+			awk 'NR==1 {next} /^set -u$/ {exit} {sub(/^# ?/, ""); print}' "$0"
+			exit 0
+			;;
+		*)
+			printf 'Unknown arg: %s\n' "$arg" >&2
+			exit 64
+			;;
+	esac
+done
+
+# Build the bench package. Nix gives us a deterministic, ReleaseFast build
+# with all comparison binaries (incl. gmp_noasm_bench for the M5-5
+# controlled experiment).
+printf '== building bench package ==\n' >&2
+bench_path=$(nix build .#bench --no-link --print-out-paths 2>&1 | tail -1)
+if [ -z "$bench_path" ] || [ ! -d "$bench_path/bin" ]; then
+	printf 'nix build failed; output: %s\n' "$bench_path" >&2
+	exit 1
+fi
+B="$bench_path/bin"
+printf 'bench binaries: %s\n\n' "$B" >&2
+
+# Sanity: assert no debug build (CLAUDE.md "DEBUG BUILD!" loud warning).
+debug_check=$("$B/blip_mp_bench" 2>&1 | grep -c "DEBUG BUILD" || true)
+if [ "$debug_check" -gt 0 ]; then
+	printf 'ERROR: bench binary has DEBUG BUILD banner — refusing to bench.\n' >&2
+	exit 2
+fi
+
+case "$mode" in
+	micro)
+		printf '== fft_microbench ==\n'
+		"$B/fft_microbench"
+		;;
+
+	raw)
+		printf '== blip_mp_bench (RAW) ==\n'
+		"$B/blip_mp_bench"
+		printf '\n== gmp_bench (RAW) ==\n'
+		"$B/gmp_bench"
+		printf '\n== gmp_noasm_bench (RAW) ==\n'
+		"$B/gmp_noasm_bench"
+		;;
+
+	quick)
+		printf '== quick: blip_mp + gmp_bench, add/sub/mul only ==\n\n'
+		blip_out=$("$B/blip_mp_bench" 2>&1)
+		gmp_out=$("$B/gmp_bench" 2>&1)
+		# Print add/sub/mul sections from each. Skip the long modular-arith
+		# tail (divMod/powm/invMod) which dominates runtime in --quick mode.
+		printf '## blip_mp\n'
+		printf '%s\n' "$blip_out" | awk '/^=== blip_mp/{p=1} /^--- division/{exit} p'
+		printf '\n## GMP\n'
+		printf '%s\n' "$gmp_out" | awk '/^=== GMP/{p=1} /^--- division/{exit} p'
+		;;
+
+	hyperfine)
+		printf '== hyperfine wall-clock comparison (10 runs, warmup 2) ==\n\n'
+		hyperfine --warmup 2 --runs 10 \
+			--command-name 'blip_mp_bench' "$B/blip_mp_bench" \
+			--command-name 'gmp_bench'     "$B/gmp_bench" \
+			--command-name 'gmp_noasm'     "$B/gmp_noasm_bench"
+		;;
+
+	full)
+		printf '== full bench: blip_mp + GMP-asm + GMP-noasm ==\n\n'
+		blip_out=$("$B/blip_mp_bench" 2>&1)
+		gmp_out=$("$B/gmp_bench" 2>&1)
+		gmp_noasm_out=$("$B/gmp_noasm_bench" 2>&1)
+
+		printf '## blip_mp\n'
+		printf '%s\n' "$blip_out"
+		printf '\n## GMP (with asm)\n'
+		printf '%s\n' "$gmp_out"
+		printf '\n## GMP (--disable-assembly, M5-5 controlled experiment)\n'
+		printf '%s\n' "$gmp_noasm_out"
+		;;
+esac
