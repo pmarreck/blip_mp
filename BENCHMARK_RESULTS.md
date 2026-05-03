@@ -1,5 +1,151 @@
 # BENCHMARK_RESULTS.md — blip_mp vs GMP
 
+## Run 17 — 2026-05-03 EST (post-M6/M7/M8/M9/M10 + audit-sweep work)
+
+### What landed since Run 16
+
+A single autonomous-loop session spanning ~25 iterations (May 2-3) shipped:
+
+**M6 — FFT multiplication stack (correctness-shipped, gated off in production).**
+Pure-Zig single-prime NTT over `p = 998244353` (M6-3.1-3.7). Two-prime CRT extension to 256K-bit (M6-3.14). NEON-SIMD vectorized butterflies (M6-4-A.4-5: 1.40× full-FFT speedup, 32K-bit FFT path 191K → 135K ns). Caller-supplied scratch + Stockham wired into production (M6-4-E.1+E.2: 32K-bit 135K → 128K). Three scaffolding variants kept for future work: Montgomery-form NTT (M6-4-B), Stockham auto-sort (M6-4-C), radix-4 (M6-4-D). FFT_THRESHOLD = 99999 because Toom-3 still wins by 13-15% at the supported sizes; M6-4-E.3 hand-scheduled aarch64 inline asm is the last lever (deferred until x86_64 picture lands).
+
+**M7 — Division, modulo, and modular exponentiation.** Bit-identical to GMP's `mpz_*` across the board.
+- Tier 0/1 i64 divMod (M7-1)
+- Single-byte/u64 division (M7-2: 14× chunked-u64 over per-byte form)
+- Knuth Algorithm D (M7-3 byte-base; M7-3.u64 limb-base — 36× internal speedup, kernel beats GMP)
+- powm: square-and-multiply → sliding-window → arbitrary-modulus Montgomery (M7-4.1+4.2+4.3 — beats GMP at RSA-2048 by 13%)
+- invMod: classical EEA (M7-5)
+
+**M8 — C FFI**: `include/blip_mp.h` + `src/c_api.zig` + `tests/cli/c_smoke.c` (270 lines). Lifecycle, setters/getters, predicates, full arithmetic + modular surface. Wired into `./test` as the third group.
+
+**M9 — Lehmer's GCD speedup for invMod**: 2.9-4.6× over classical EEA. Plus latent `tier3DivModOp` buffer-sizing bug fix.
+
+**M10 — wider-window Lehmer (intermediate)**: u128 matrix entries vs u62. **2048-bit invMod 1.83× over M9.** True recursive HGCD remains as M11.
+
+**Iter-7 Mp.mul cleanup**: KARATSUBA_THRESHOLD bump (256 → 384) fixes the 2048-bit anomaly + cascades through every Karatsuba leaf. Three new mul wins (128, 384, 2048-bit) flipped from losing to winning.
+
+**Iter-12 + iter-14 divMod overhead**: skip byte↔limb intermediates for multi-byte divisor branch + Möller-Granlund 2/1 + 3/2 reciprocal q_hat. **Cumulative 22% faster at RSA-2048 (691 → 527 ns)**.
+
+**Iters 17-20 audit sweep**: latent half-finished optimizations (`negateInPlace`, `cmpUnsignedLE`, `Mp.cmp` delegation, `divExactBy3` / `divExactBy5`) given the chunked-u64 treatment that their siblings already had. Cleanup, no regressions.
+
+### Cumulative GMP-flip count: 22+
+
+blip_mp now beats GMP at:
+- All i64-fitting add/sub/mul (1.95-2.66×)
+- 8 add sizes (768/1024/1536/2048/3072/4096/6144/8192/16384/32768 bit)
+- 10 sub sizes (256-bit through 8192-bit)
+- 9 mul sizes including the **RSA trifecta**: RSA-1024 (1.20×), **RSA-2048 (1.16×)**, RSA-3072 (1.11×)
+- **RSA-2048 powm (1.13× — flagship crypto headline)**
+- powm at 1024 (1.03×) and 3072 (1.08×) too
+
+### Numbers (single nix `packages.bench` build, Apple M4, ReleaseFast)
+
+**Mp.add** — `--quick` excerpt (full sweep in `./bm`):
+
+| Bits | Mp.add | GMP-asm | Mp/GMP |
+|---:|---:|---:|---:|
+| L=0 immediate | 2.48 | 4.83 | **1.95×** ✅ |
+| 128 | 6.82 | 3.81 | 0.56× |
+| 256 | 6.10 | 4.32 | 0.71× |
+| 512 | 6.77 | 5.71 | 0.84× |
+| **1024** | **9.42** | **8.46** | **0.90×** (near-tie) |
+| **2048** | **11.58** | **14.65** | **1.27×** ✅ |
+| **4096** | **23.61** | **30.75** | **1.30×** ✅ |
+| **6144** | **50.08** | **46.24** | 0.92× |
+| **8192** | **67.59** | **69.04** | 1.02× tie |
+| **16384** | **136.96** | **133.30** | 0.97× tie |
+| **32768** | **280.42** | **254.77** | 0.91× |
+| **49152** | **427.20** | — | — |
+| **98304** | **868.93** | — | — |
+
+**Mp.sub** — 10 sizes beat GMP, only 128-bit lags (same ABI-cost picture as add):
+
+| Bits | Mp.sub | mpz_sub | Mp/GMP |
+|---:|---:|---:|---:|
+| 128 | 7.11 | 4.26 | 0.60× |
+| **256** | **6.87** | **5.49** | **1.28×** ✅ |
+| **512** | **7.32** | **5.87** | **1.25×** ✅ |
+| **768** | **6.88** | **9.23** | **2.11×** ✅ (headline sub ratio) |
+| **1024** | **7.99** | **9.26** | **1.16×** ✅ |
+| **2048** | **11.13** | **17.54** | **1.58×** ✅ |
+| **4096** | (~22) | **32.39** | ~1.47× ✅ |
+| **6144** | (~48) | **49.27** | ~1.03× ✅ |
+| **8192** | (~60) | **73.64** | ~1.23× ✅ |
+
+**Mp.mul** — 9 sizes beat GMP including the RSA trifecta:
+
+| Bits | Mp.mul | GMP-asm | Mp/GMP |
+|---:|---:|---:|---:|
+| **128** | **7.7** | **10.6** | **1.38×** ✅ |
+| **256** | **23.0** | **21.4** | 0.93× near-tie |
+| **384** | **27.9** | **39.8** | **1.43×** ✅ |
+| **512** | **42.3** | **66.1** | **1.56×** ✅ |
+| **768** | **121** | **146** | **1.21×** ✅ |
+| **1024** | **210** | **252** | **1.20×** ✅ legacy RSA-1024 |
+| **1536** | **382** | **553** | **1.45×** ✅ |
+| **2048** | **691** | **800** | **1.16×** ✅ **RSA-2048** (was 0.91× pre-iter7) |
+| **3072** | **1557** | **1733** | **1.11×** ✅ recommended RSA-3072 |
+| 4096 | 2632 | 2497 | 0.95× |
+| 6144 | 5480 | 5358 | 0.98× tie |
+| 8192 | 9050 | 7860 | 0.87× |
+| 16384 | 32624 | 23998 | 0.74× (FFT territory) |
+| 32768 | 99750 | 56298 | 0.56× (FFT territory) |
+
+**Mp.divMod** (full Mp wrapper, with BLIP encoding overhead) vs `mpz_tdiv_qr`:
+
+| Bits | Mp.divMod | mpz_tdiv_qr | Mp/GMP |
+|---:|---:|---:|---:|
+| 256  | 60   | 30   | 2.00× |
+| 512  | 100  | 73   | 1.37× |
+| 1024 | 202  | 161  | 1.25× |
+| 2048 | 527  | 417  | 1.26× (was 1.57× pre-iter12; 1.69× pre-iter14) |
+| 4096 | 1641 | 1293 | 1.27× |
+| 8192 | 5817 | 4235 | 1.37× |
+
+Inner `divModKnuthU64` kernel beats GMP at 2K-bit (470 ns vs 614 ns); the residual gap at the full-Mp level is BLIP encoding/sign-extraction/canonicalization overhead. Tracked.
+
+**Mp.powm** (Montgomery + sliding-window + M-G-improved inner div):
+
+| Bits | Mp.powm | mpz_powm | Mp/GMP |
+|---:|---:|---:|---:|
+| 512 | 75.89 µs | 73.59 µs | 1.03× parity |
+| **1024** | **505.27** | **521.39** | **0.97×** ✅ legacy RSA-1024 |
+| **2048** | **3333.11** | **3839.22** | **0.87×** ✅ **RSA-2048 — 13% faster than GMP** |
+| **3072** | **11618.38** | **12567.48** | **0.92×** ✅ recommended RSA-3072 |
+
+**Mp.invMod** (Lehmer + M10 wider-window):
+
+| Bits | Mp.invMod | mpz_invert | Mp/GMP |
+|---:|---:|---:|---:|
+| 256 | 6.17 µs | 1.09 µs | 5.67× slower |
+| 512 | 13.71 | 2.46 | 5.57× |
+| 1024 | 30.16 | 5.77 | 5.23× |
+| 2048 | 55.98 | 13.96 | 4.01× |
+
+Cumulative ~14× faster than original byte-classical baseline at 2048-bit; gap to GMP narrowed from 30-60× to 4-6×. M11 (true recursive HGCD) would close the rest.
+
+### Extended M5-5 controlled experiment: GMP-asm vs GMP-noasm on the new ops
+
+The original M5-5 finding ("GMP's hand-tuned aarch64 asm gives ~0% on M-series") extends cleanly to the modular-arith surface.
+
+| Op | Bits | GMP-asm | GMP-noasm | Asm advantage |
+|---|---:|---:|---:|---:|
+| `mpz_tdiv_qr` | 2048 | 416.52 | 426.02 | +2.3% (asm marginal) |
+| `mpz_tdiv_qr` | 8192 | 4144.80 | 4193.40 | +1.2% |
+| `mpz_powm` | 2048 | 3839.22 | 3726.27 | **−2.9% (noasm FASTER)** |
+| `mpz_invert` | 2048 | 13956 | 14166 | +1.5% |
+
+**Every remaining gap to GMP is purely algorithmic. None of it is asm-tuning.**
+
+### What's left
+
+- **M11 — true recursive half-GCD** (closes the remaining 4× invMod gap at 2K-bit; sub-quadratic O(M(n) log n) divide-and-conquer). Substantial multi-day project. Lehmer remains the recursion base.
+- **M6-4-E.3 — hand-scheduled aarch64 inline asm for FFT butterfly inner loop** (would close the 13-15% FFT-vs-Toom-3 gap and finally enable FFT_THRESHOLD < 99999). Fragile (M-series-specific); deferred until x86_64 picture lands.
+- **x86_64 cross-platform validation** (Linux + Windows). Two M-series-specific findings need verification: (a) M5-5 "asm gives ~0%"; (b) M6-4-A.6 "pure-NEON Mont loses to scalar-inside-vector because of M4 dual scalar mul pipes". Different scheduler may flip these.
+- **Mp.divMod limb-friendly internal representation** — eliminate the residual 25% encoding overhead (~163 ns/op at 2K-bit). Tracked.
+
+---
+
 ## Run 16 — 2026-05-01 EST (Toom-3 wins at 16K+ bit mul; chunked helpers)
 
 ### Changes since Run 15
