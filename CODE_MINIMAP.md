@@ -65,7 +65,9 @@ The `Mp` bignum type. **Representation 1a (SBO) + heap reuse + sign-extended inl
 - `tier3MulOp` / `smallInlineTier3Mul` / `sameSizeTier3Mul(comptime N)` — fast paths for mul
 - `tier3DivModOp` — wraps `tier3.divModSigned` with stack/heap scratch and `writeMpFromPayload`
 - `writeMpFromPayload(dst, pay)` — encode canonical signed payload into Mp (inline vs heap routing)
-- `topU128(self)` / `setU128(self, v)` — top-128-bit window helpers used by invModHGCD
+- `topU64(self, shift_down)` / `topU128(self, shift_down)` — top-N-bit window extractors used by invModLehmer / invModHGCD inner loops. Iter-31: fast path via `std.mem.readInt(u64, ...)` for the common in-payload case (single LDR x instead of per-byte build chain). Slow path retained for partial-trailing-bytes near the magnitude top.
+- `setU128(self, v)` / `setFromShiftedRight(out, src, shift_down)` — magnitude materialization (HGCD top-window extraction)
+- `mpToU64Mag(self)` — Lehmer single-precision bottom-out helper. Iter-32: same readInt fast-path treatment as topU64.
 - `lehmerFinishSinglePrecision` — u62 inner loop bottoming out invModHGCD recursion
 - `montMul` / `montSquare` / `montReduce` — Montgomery primitives for arbitrary odd modulus, used by powmMontgomery (NOT the FFT-prime Mont — that's separate in fft.zig)
 - `Error sets`: `SetError`, `GetError`, `ArithError` (incl. `DivisionByZero`, `NotImplementedTier3`, `NegativeExponentNotSupported`)
@@ -83,7 +85,10 @@ Large-number arithmetic operating directly on BLIP payload bytes — no auxiliar
 - `addPayloads(a, b, n, out)` — two's-complement byte-direct add. Cascading inner loop: u512 → u256 → u128 → u64 → per-byte tail. Each chunk size compiles to ADCS sequences on aarch64.
 - `subPayloads(a, b, n, out)` — same shape with borrow propagation (chunked u512/u256/u128/u64 — added in iteration 6 to mirror addPayloads which had the optimization since M3)
 - `addUnsignedLE(a, a_len, b, b_len, out)` / `subUnsignedLE` — unsigned magnitude variants
-- `cmpUnsignedLE(a, a_len, b, b_len) -> i8` — unsigned magnitude compare
+- `addUnsignedFixedLen(a, b, out) -> u8` / `addUnsignedInPlace` / `subUnsignedInPlace` — Karatsuba-internal helpers. `addUnsignedFixedLen` chunked u64 in iter 33 (was per-byte) — produced 3 new mul GMP-flips at 4096/6144/8192-bit (16-21% Karatsuba leaf speedup).
+- `cmpUnsignedLE(a, a_len, b, b_len) -> i8` — unsigned magnitude compare. Chunked u64 high-to-low (iter 18); LE u64 unsigned-compare correctly orders LE bytes.
+- `negateInPlace(payload)` — two's-complement negate. Chunked u64/u128 (iter 17, was per-byte). Mp-side smallInlineTier3Mul + sameSizeTier3Mul delegate to it (iter 30) for negative-result encoding.
+- `divExactBy3` / `divExactBy5` — chunked u64 Hensel division (iter 20). Constants 0xAB / 0xCD generalized to 0xAAAA_AAAA_AAAA_AAAB / 0xCCCC_CCCC_CCCC_CCCD (3⁻¹ / 5⁻¹ mod 2^64). Used by Toom-3 interpolation.
 
 **Tier-3 mul**:
 - `mulMagnitudes(a, a_len, b, b_len, r)` — schoolbook unsigned multiply
