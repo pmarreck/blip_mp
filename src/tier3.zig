@@ -731,15 +731,37 @@ fn addUnsignedFixedLen(a: []const u8, b: []const u8, out: []u8) u8 {
 	std.debug.assert(out.len >= a.len and out.len >= b.len);
 	const longer = if (a.len >= b.len) a else b;
 	const shorter = if (a.len >= b.len) b else a;
-	var carry: u16 = 0;
+	var carry: u64 = 0;
 	var i: usize = 0;
+	// Chunked u64 path for the both-have-real-bytes prefix. Karatsuba's
+	// caller passes operands of equal length t = ⌈n/2⌉ bytes, where t is
+	// usually a multiple of 8 (the carry-bit trick keeps recursive calls
+	// 8-byte-aligned). So this fast path covers ~all of the input.
+	const both_aligned = shorter.len - (shorter.len % 8);
+	while (i < both_aligned) : (i += 8) {
+		const av = std.mem.readInt(u64, longer[i..][0..8], .little);
+		const bv = std.mem.readInt(u64, shorter[i..][0..8], .little);
+		const s1 = @addWithOverflow(av, bv);
+		const s2 = @addWithOverflow(s1[0], carry);
+		std.mem.writeInt(u64, out[i..][0..8], s2[0], .little);
+		carry = @as(u64, s1[1]) + @as(u64, s2[1]);
+	}
+	// Per-byte tail of shorter (< 8 bytes).
 	while (i < shorter.len) : (i += 1) {
-		const sum: u16 = @as(u16, longer[i]) + @as(u16, shorter[i]) + carry;
+		const sum: u16 = @as(u16, longer[i]) + @as(u16, shorter[i]) + @as(u16, @intCast(carry));
 		out[i] = @truncate(sum);
 		carry = sum >> 8;
 	}
+	// Chunked propagation through longer-only region, then per-byte tail.
+	const longer_aligned = longer.len - ((longer.len - i) % 8);
+	while (i + 8 <= longer_aligned) : (i += 8) {
+		const av = std.mem.readInt(u64, longer[i..][0..8], .little);
+		const s = @addWithOverflow(av, carry);
+		std.mem.writeInt(u64, out[i..][0..8], s[0], .little);
+		carry = s[1];
+	}
 	while (i < longer.len) : (i += 1) {
-		const sum: u16 = @as(u16, longer[i]) + carry;
+		const sum: u16 = @as(u16, longer[i]) + @as(u16, @intCast(carry));
 		out[i] = @truncate(sum);
 		carry = sum >> 8;
 	}
