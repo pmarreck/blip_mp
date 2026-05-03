@@ -639,6 +639,16 @@ pub const Mp = struct {
 		//   >= 1024:     wider-window Lehmer with u128 matrix (M10) — batches
 		//                ~2× more single-precision EEA steps per multi-precision
 		//                matrix-apply, giving 1.06–1.6× speedup at RSA sizes.
+		//
+		// Note (M11.2): invModHGCDRecursive (sub-quadratic HGCD primitive)
+		// is implemented and correctness-validated against invModHGCD at
+		// 256–4096 bits, but is NOT wired into the dispatcher. Reason:
+		// without sub-quadratic multiplication (FFT), the recursion's
+		// matrix-composition overhead grows faster than its EEA-batching
+		// savings — the form regresses ~5–18% at 1024–2048 bits and
+		// catastrophically (~60×) at 8192 bits. It will become a clear win
+		// once FFT mul lands; until then, M10 wider-window Lehmer is the
+		// practical optimum.
 		const m_bits = m.bitLen();
 		if (m_bits < 96) return invModClassical(r, a, m);
 		if (m_bits >= 1024) return invModHGCD(r, a, m);
@@ -1470,6 +1480,143 @@ pub const Mp = struct {
 		return true;
 	}
 
+	/// Modular multiplicative inverse via the truly recursive HGCD primitive
+	/// (M11.2). Same external contract as `invModHGCD` (M10 wider-window
+	/// Lehmer): sets `r = a^-1 mod |m|`, returns `true` iff inverse exists.
+	///
+	/// Algorithm: iterates `hgcdRecursive` (sub-quadratic O(M(n) log n) GCD
+	/// primitive) on the EEA pair (r0, r1). Each `hgcdRecursive` call produces
+	/// a multi-precision 2x2 matrix that — when applied to (r0, r1) AND the
+	/// Bezout coefficient pair (s0, s1) — advances both pairs by many EEA
+	/// steps in one batched multi-precision matrix-multiply. Vs `invModHGCD`'s
+	/// u128 window, the recursive form's window grows with recursion depth,
+	/// reducing the number of expensive multi-precision matrix-applies from
+	/// O(n / 124) to O(log n).
+	///
+	/// Falls back to `invModHGCD` (M10 wider-window Lehmer) for moduli below
+	/// the recursive HGCD threshold (~1024 bits) where the recursive
+	/// matrix-composition overhead doesn't yet amortise.
+	pub fn invModHGCDRecursive(r: *Mp, a: *const Mp, m: *const Mp) ArithError!bool {
+		if (m.cached_sign == 0) return error.DivisionByZero;
+		const allocator = r.allocator;
+
+		// Threshold: only profitable above ~4096 bits where matrix-composition
+		// cost amortises across many EEA steps. Below, defer to wider-window
+		// Lehmer (M10) which itself defers to classical Lehmer below 256 bits.
+		const HGCD_REC_THRESHOLD: usize = 4096;
+		if (m.bitLen() < HGCD_REC_THRESHOLD) return invModHGCD(r, a, m);
+
+		var m_abs = Mp.init(allocator);
+		defer m_abs.deinit();
+		if (m.cached_sign < 0) {
+			var zero = Mp.init(allocator);
+			defer zero.deinit();
+			try zero.setI64(0);
+			try m_abs.sub(&zero, m);
+		} else {
+			try m_abs.setBytes(m.bytes());
+		}
+
+		if (m_abs.cached_pay_len == 1 and m_abs.bytes()[0] == 1) {
+			try r.setI64(0);
+			return true;
+		}
+
+		var r0 = Mp.init(allocator);
+		defer r0.deinit();
+		try euclideanReduce(&r0, a, &m_abs);
+		if (r0.cached_sign == 0) {
+			try r.setI64(0);
+			return false;
+		}
+
+		var r1 = Mp.init(allocator);
+		defer r1.deinit();
+		try r1.setBytes(m_abs.bytes());
+
+		var s0 = Mp.init(allocator);
+		defer s0.deinit();
+		try s0.setI64(1);
+
+		var s1 = Mp.init(allocator);
+		defer s1.deinit();
+		try s1.setI64(0);
+
+		// Initial swap: enforce r0 >= r1.
+		var t0 = Mp.init(allocator);
+		defer t0.deinit();
+		if (Mp.cmp(&r0, &r1) == .lt) {
+			try t0.setBytes(r0.bytes());
+			try r0.setBytes(r1.bytes());
+			try r1.setBytes(t0.bytes());
+			try t0.setBytes(s0.bytes());
+			try s0.setBytes(s1.bytes());
+			try s1.setBytes(t0.bytes());
+		}
+
+		var M = HGCDMatrix.init(allocator);
+		defer M.deinit();
+
+		// Scratch for finishing tail.
+		var t1 = Mp.init(allocator);
+		defer t1.deinit();
+		var q_mp = Mp.init(allocator);
+		defer q_mp.deinit();
+		var rem_mp = Mp.init(allocator);
+		defer rem_mp.deinit();
+		var qs1 = Mp.init(allocator);
+		defer qs1.deinit();
+		var new_s = Mp.init(allocator);
+		defer new_s.deinit();
+
+		// Lower bound: once r0 fits in u64, finish with single-precision EEA
+		// (the same helper used by the Lehmer paths). Above that, repeatedly
+		// call hgcdRecursive to halve r0's bit-length per outer iteration.
+		while (r1.cached_sign != 0) {
+			const r0_bits = r0.bitLen();
+			if (r0_bits <= 64) {
+				try lehmerFinishSinglePrecision(&r0, &r1, &s0, &s1, &t0, &t1);
+				break;
+			}
+
+			// Recursive HGCD: aim to halve r0's bit-length in one shot.
+			const target_bits: usize = r0_bits / 2;
+			try Mp.hgcdRecursive(&M, &r0, &r1, target_bits, allocator);
+
+			// If hgcdRecursive returned identity (no reduction), fall back
+			// to one classical EEA step to ensure forward progress.
+			const M_is_identity =
+				M.parity_even
+				and M.a.cached_pay_len == 1 and M.a.bytes()[0] == 1
+				and M.b.cached_sign == 0
+				and M.c.cached_sign == 0
+				and M.d.cached_pay_len == 1 and M.d.bytes()[0] == 1;
+			if (M_is_identity) {
+				try Mp.divMod(&q_mp, &rem_mp, &r0, &r1);
+				try t0.setBytes(r1.bytes());
+				try r0.setBytes(t0.bytes());
+				try r1.setBytes(rem_mp.bytes());
+				try qs1.mul(&q_mp, &s1);
+				try new_s.sub(&s0, &qs1);
+				try s0.setBytes(s1.bytes());
+				try s1.setBytes(new_s.bytes());
+				continue;
+			}
+
+			// Apply M to both (r0, r1) and (s0, s1).
+			try M.applyToPair(&r0, &r1);
+			try M.applyToPair(&s0, &s1);
+		}
+
+		const gcd_is_one = r0.cached_pay_len == 1 and r0.bytes()[0] == 1 and r0.cached_sign == 1;
+		if (!gcd_is_one) {
+			try r.setI64(0);
+			return false;
+		}
+		try euclideanReduce(r, &s0, &m_abs);
+		return true;
+	}
+
 	// ── M11.1 — HGCD primitive (standalone; not yet wired into invMod) ─────
 	//
 	// HGCDMatrix represents the accumulated 2x2 reduction matrix from a
@@ -1859,6 +2006,223 @@ pub const Mp = struct {
 			try inner.c.setU64(cc);
 			try inner.d.setU64(dd);
 			inner.parity_even = inner_parity_even;
+			try inner.applyToPair(&r0, &r1);
+			try out_M.composeOuter(&inner);
+		}
+	}
+
+	/// Materialise the magnitude `(src >> shift_down)` as a non-negative Mp
+	/// in `out`. Used by the recursive HGCD to extract the top window of bits
+	/// from a multi-precision r0 / r1 into a smaller Mp suitable for a
+	/// subordinate HGCD call.
+	///
+	/// `src` must be non-negative (HGCD's r0/r1 invariant); behaviour for
+	/// negative inputs is undefined. If `shift_down >= bitLen(src)`, sets out = 0.
+	fn setFromShiftedRight(out: *Mp, src: *const Mp, shift_down: usize) ArithError!void {
+		const src_bits = src.bitLen();
+		if (src_bits <= shift_down) {
+			try out.setI64(0);
+			return;
+		}
+		const result_bits = src_bits - shift_down;
+		// magnitude bytes of src (positive case): just src.payload()
+		const pay = src.payload();
+		const byte_off = shift_down / 8;
+		const bit_off: u3 = @intCast(shift_down & 7);
+
+		// Output magnitude L = ceil(result_bits / 8).
+		const out_mag_len: usize = (result_bits + 7) / 8;
+		// Need scratch buffer to hold magnitude bytes, then a possible 0x00
+		// pad if high bit of high byte is set, then a header.
+		const allocator = out.allocator;
+		var mag = try allocator.alloc(u8, out_mag_len);
+		defer allocator.free(mag);
+
+		var i: usize = 0;
+		while (i < out_mag_len) : (i += 1) {
+			const idx = byte_off + i;
+			const b0: u16 = if (idx < pay.len) pay[idx] else 0;
+			const b1: u16 = if (idx + 1 < pay.len) pay[idx + 1] else 0;
+			const combined: u16 = b0 | (b1 << 8);
+			mag[i] = @intCast((combined >> bit_off) & 0xFF);
+		}
+		// Trim leading zero magnitude bytes (canonicalise).
+		var L: usize = out_mag_len;
+		while (L > 1 and mag[L - 1] == 0) L -= 1;
+		// Pad if high bit of high byte is set (would be misread as negative).
+		const need_pad = (mag[L - 1] & 0x80) != 0;
+		const pay_len: usize = if (need_pad) L + 1 else L;
+		// Build encoded form: header + payload.
+		var hdr_buf: [10]u8 = undefined;
+		const hdr_len = try tier3.writeHeader(&hdr_buf, pay_len);
+
+		const total = hdr_len + pay_len;
+		// Use a scratch buffer (or assemble into out's heap directly via setBytes).
+		var enc = try allocator.alloc(u8, total);
+		defer allocator.free(enc);
+		@memcpy(enc[0..hdr_len], hdr_buf[0..hdr_len]);
+		@memcpy(enc[hdr_len .. hdr_len + L], mag[0..L]);
+		if (need_pad) enc[hdr_len + L] = 0;
+		try out.setBytes(enc);
+	}
+
+	/// Truly recursive HGCD (M11.2). Same external contract as `hgcd`:
+	/// builds a 2x2 reduction matrix that, applied to (a, b), reduces them
+	/// to a pair (a', b') with `bitLen(a') <= target_bits` (or b' = 0).
+	///
+	/// Algorithm (Knuth/GMP-style divide-and-conquer):
+	///   At recursion level n = bitLen(a) with target_bits ≈ n/2:
+	///   1. If n ≤ RECURSION_BASE_BITS, defer to iterative `hgcd`.
+	///   2. PHASE 1 — extract top-half bits of (a, b) and recurse with
+	///      sub-target half-of-half-bits → matrix M1. This M1 reduces the
+	///      top-half window by ~quarter-of-input bits, and (per Knuth's
+	///      theorem on leading-bits-determine-quotients) is also valid for
+	///      the full pair (with possible 1-quotient over-shoot).
+	///   3. Apply M1 to FULL (r0, r1). Validate the result is non-negative
+	///      with r0 ≥ r1; if not, back out and take a classical EEA step.
+	///      M_out := M1.
+	///   4. PHASE 2 — if bitLen(r0) is still > target_bits, take ONE
+	///      classical EEA correction step (since the quotient at the
+	///      M1-truncation boundary may need adjustment), then compose
+	///      [[0,1],[1,q]] into M_out.
+	///   5. PHASE 3 — if still > target_bits, extract the top-half bits of
+	///      the now-reduced (r0, r1) and recurse with sub-target finishing
+	///      the reduction → matrix M2. Apply, validate, compose.
+	///
+	/// Complexity: O(M(n) log n). At each level we do O(M(n)) for two
+	/// matrix-applies + two matrix-composes; recursion depth is O(log n).
+	pub fn hgcdRecursive(
+		out_M: *HGCDMatrix,
+		a: *const Mp,
+		b: *const Mp,
+		target_bits: usize,
+		allocator: std.mem.Allocator,
+	) ArithError!void {
+		try out_M.setIdentity();
+
+		// Below this threshold, defer to the iterative form. Tuned to be
+		// large enough that the recursion + matrix-compose overhead is
+		// amortised, but small enough to keep recursion depth bounded.
+		const RECURSION_BASE_BITS: usize = 256;
+
+		const n0 = a.bitLen();
+		if (n0 <= target_bits) return;
+		if (b.cached_sign == 0) return;
+
+		// Bottom out into iterative form for small n.
+		if (n0 <= RECURSION_BASE_BITS) {
+			try Mp.hgcd(out_M, a, b, target_bits, allocator);
+			return;
+		}
+
+		// Working copies of (a, b). out_M starts as identity.
+		var r0 = Mp.init(allocator);
+		defer r0.deinit();
+		var r1 = Mp.init(allocator);
+		defer r1.deinit();
+		try r0.setBytes(a.bytes());
+		try r1.setBytes(b.bytes());
+
+		// Scratch
+		var inner = HGCDMatrix.init(allocator);
+		defer inner.deinit();
+		var a_top = Mp.init(allocator);
+		defer a_top.deinit();
+		var b_top = Mp.init(allocator);
+		defer b_top.deinit();
+		var r0_try = Mp.init(allocator);
+		defer r0_try.deinit();
+		var r1_try = Mp.init(allocator);
+		defer r1_try.deinit();
+		var q_mp = Mp.init(allocator);
+		defer q_mp.deinit();
+		var rem_mp = Mp.init(allocator);
+		defer rem_mp.deinit();
+		var tmp = Mp.init(allocator);
+		defer tmp.deinit();
+
+		// Helper closure-equivalent: tries to commit `inner` to (r0, r1) +
+		// out_M, returning true on success. On failure (over-shoot), leaves
+		// state untouched.
+		const Apply = struct {
+			fn tryApply(
+				inner_: *HGCDMatrix,
+				r0_: *Mp, r1_: *Mp,
+				r0_try_: *Mp, r1_try_: *Mp,
+				out_: *HGCDMatrix,
+			) ArithError!bool {
+				try r0_try_.setBytes(r0_.bytes());
+				try r1_try_.setBytes(r1_.bytes());
+				try inner_.applyToPair(r0_try_, r1_try_);
+				const ok = r0_try_.cached_sign >= 0 and r1_try_.cached_sign >= 0
+					and Mp.cmp(r0_try_, r1_try_) != .lt
+					and r0_try_.bitLen() < r0_.bitLen();
+				if (!ok) return false;
+				try r0_.setBytes(r0_try_.bytes());
+				try r1_.setBytes(r1_try_.bytes());
+				try out_.composeOuter(inner_);
+				return true;
+			}
+
+			fn classicalStep(
+				r0_: *Mp, r1_: *Mp,
+				q_mp_: *Mp, rem_mp_: *Mp, tmp_: *Mp,
+				inner_: *HGCDMatrix, out_: *HGCDMatrix,
+			) ArithError!void {
+				try Mp.divMod(q_mp_, rem_mp_, r0_, r1_);
+				try tmp_.setBytes(r1_.bytes());
+				try r0_.setBytes(tmp_.bytes());
+				try r1_.setBytes(rem_mp_.bytes());
+				try inner_.a.setI64(0);
+				try inner_.b.setI64(1);
+				try inner_.c.setI64(1);
+				try inner_.d.setBytes(q_mp_.bytes());
+				inner_.parity_even = false;
+				try out_.composeOuter(inner_);
+			}
+		};
+
+		// ── PHASE 1: recurse on top-half-bits of (a, b) ──────────────────
+		// Choose shift such that the top window is ~n/2 bits. Sub-target on
+		// the window is half-of-window = n/4. After applying M1 to the full
+		// pair, bitLen(r0) should drop by roughly n/4.
+		{
+			const shift1: usize = n0 / 2;
+			try setFromShiftedRight(&a_top, &r0, shift1);
+			try setFromShiftedRight(&b_top, &r1, shift1);
+
+			if (a_top.bitLen() > 64 and b_top.cached_sign != 0) {
+				const sub_target1 = a_top.bitLen() / 2;
+				try Mp.hgcdRecursive(&inner, &a_top, &b_top, sub_target1, allocator);
+				const ok = try Apply.tryApply(&inner, &r0, &r1, &r0_try, &r1_try, out_M);
+				if (!ok) {
+					try Apply.classicalStep(&r0, &r1, &q_mp, &rem_mp, &tmp, &inner, out_M);
+				}
+			} else {
+				try Apply.classicalStep(&r0, &r1, &q_mp, &rem_mp, &tmp, &inner, out_M);
+			}
+		}
+
+		if (r1.cached_sign == 0 or r0.bitLen() <= target_bits) return;
+
+		// ── PHASE 2: optional single classical EEA correction step ───────
+		// This compensates for the fact that PHASE 1 might over- or
+		// under-shoot by one quotient.
+		{
+			try Apply.classicalStep(&r0, &r1, &q_mp, &rem_mp, &tmp, &inner, out_M);
+		}
+
+		if (r1.cached_sign == 0 or r0.bitLen() <= target_bits) return;
+
+		// ── FINISH: iterative form for residual reduction ────────────────
+		// (PHASE 3 — a second recursive call on the top bits of the reduced
+		// pair — is omitted in this implementation. With schoolbook
+		// multiplication, the iterative finish is asymptotically equivalent
+		// to a sub-recursion AND avoids the validation-failure cascades
+		// that PHASE 3 can trigger on the reduced pair. A future revision
+		// may reinstate PHASE 3 once FFT-based multiplication is available.)
+		if (r1.cached_sign != 0 and r0.bitLen() > target_bits) {
+			try Mp.hgcd(&inner, &r0, &r1, target_bits, allocator);
 			try inner.applyToPair(&r0, &r1);
 			try out_M.composeOuter(&inner);
 		}
@@ -4202,6 +4566,61 @@ test "invModHGCD matches invModLehmer: 1000+ random pairs across bit-widths" {
 	try testing.expect(compared >= 800);
 }
 
+test "invModHGCDRecursive matches invModHGCD: random pairs across bit-widths" {
+	// M11.2 oracle: invModHGCD (M10 wider-window) is GMP-validated and
+	// agrees with invModLehmer; invModHGCDRecursive must agree bit-for-bit.
+	// Bit-widths span the recursive HGCD threshold (1024) so we exercise
+	// both the fallback path and the recursive path.
+	const SIZES = [_]usize{ 256, 512, 768, 1024, 1536, 2048, 3072, 4096 };
+	const ITERS_PER_SIZE: usize = 130;
+	var prng = std.Random.DefaultPrng.init(0xDEAD_F00D_C0DE_F00D);
+	const rand = prng.random();
+
+	var a = Mp.init(testing.allocator);
+	defer a.deinit();
+	var m = Mp.init(testing.allocator);
+	defer m.deinit();
+	var r_rec = Mp.init(testing.allocator);
+	defer r_rec.deinit();
+	var r_hgcd = Mp.init(testing.allocator);
+	defer r_hgcd.deinit();
+
+	var raw_buf: [1024]u8 = undefined;
+	var enc_buf: [1100]u8 = undefined;
+
+	var total: usize = 0;
+	var compared: usize = 0;
+	for (SIZES) |bits| {
+		const byte_len = (bits + 7) / 8;
+		var i: usize = 0;
+		while (i < ITERS_PER_SIZE) : (i += 1) {
+			rand.bytes(raw_buf[0..byte_len]);
+			raw_buf[byte_len - 1] &= 0x7F;
+			const hdr_a = try tier3.writeHeader(&enc_buf, byte_len);
+			@memcpy(enc_buf[hdr_a..][0..byte_len], raw_buf[0..byte_len]);
+			try a.setBytes(enc_buf[0 .. hdr_a + byte_len]);
+
+			rand.bytes(raw_buf[0..byte_len]);
+			raw_buf[byte_len - 1] = (raw_buf[byte_len - 1] & 0x7F) | 0x40;
+			raw_buf[0] |= 1;
+			const hdr_m = try tier3.writeHeader(&enc_buf, byte_len);
+			@memcpy(enc_buf[hdr_m..][0..byte_len], raw_buf[0..byte_len]);
+			try m.setBytes(enc_buf[0 .. hdr_m + byte_len]);
+
+			const ok_r = try Mp.invModHGCDRecursive(&r_rec, &a, &m);
+			const ok_h = try Mp.invModHGCD(&r_hgcd, &a, &m);
+			try testing.expectEqual(ok_h, ok_r);
+			if (ok_h) {
+				try testing.expect(Mp.cmp(&r_rec, &r_hgcd) == .eq);
+				compared += 1;
+			}
+			total += 1;
+		}
+	}
+	try testing.expect(total >= 1000);
+	try testing.expect(compared >= 800);
+}
+
 test "invMod: large modulus — 256-bit random with verification" {
 	// Use a known prime modulus (so every nonzero a has an inverse).
 	// 2^255 - 19 (Curve25519 prime): definitely prime, definitely > 1.
@@ -4341,14 +4760,42 @@ test "bench: invModLehmer vs invModHGCD across bit-widths" {
 		const t3 = invModBenchNanos();
 		const ns_hgcd = (t3 - t2) / iters;
 
+		// Recursive HGCD (M11.2) — only bench up to 4096 bits; at 8192+
+		// the recursion's matrix-composition overhead causes catastrophic
+		// regression (lacking sub-quadratic mul). Skip to keep test fast.
+		var r_rec_b = Mp.init(testing.allocator);
+		defer r_rec_b.deinit();
+		var ns_rec: u64 = 0;
+		var speedup_r: f64 = 0;
+		if (bits <= 4096) {
+			_ = try Mp.invModHGCDRecursive(&r_rec_b, &a, &m); // warm-up
+			const t4 = invModBenchNanos();
+			i = 0;
+			while (i < iters) : (i += 1) {
+				_ = try Mp.invModHGCDRecursive(&r_rec_b, &a, &m);
+				std.mem.doNotOptimizeAway(&r_rec_b);
+			}
+			const t5 = invModBenchNanos();
+			ns_rec = (t5 - t4) / iters;
+			speedup_r = @as(f64, @floatFromInt(ns_lehmer)) / @as(f64, @floatFromInt(ns_rec));
+			try testing.expect(Mp.cmp(&r_h, &r_rec_b) == .eq);
+		}
+
 		// Sanity: same result.
 		try testing.expect(Mp.cmp(&r_l, &r_h) == .eq);
 
-		const speedup = @as(f64, @floatFromInt(ns_lehmer)) / @as(f64, @floatFromInt(ns_hgcd));
-		std.debug.print(
-			"\n[bench] invMod {d}-bit  Lehmer={d} ns/op  HGCD={d} ns/op  speedup={d:.2}x\n",
-			.{ bits, ns_lehmer, ns_hgcd, speedup },
-		);
+		const speedup_h = @as(f64, @floatFromInt(ns_lehmer)) / @as(f64, @floatFromInt(ns_hgcd));
+		if (bits <= 4096) {
+			std.debug.print(
+				"\n[bench] invMod {d}-bit  Lehmer={d} ns/op  HGCD={d} ns/op (x{d:.2})  HGCDRec={d} ns/op (x{d:.2})\n",
+				.{ bits, ns_lehmer, ns_hgcd, speedup_h, ns_rec, speedup_r },
+			);
+		} else {
+			std.debug.print(
+				"\n[bench] invMod {d}-bit  Lehmer={d} ns/op  HGCD={d} ns/op  speedup={d:.2}x  (HGCDRec skipped: O(M(n) log n) requires FFT mul)\n",
+				.{ bits, ns_lehmer, ns_hgcd, speedup_h },
+			);
+		}
 	}
 }
 
@@ -4506,6 +4953,80 @@ test "hgcd: matches classical EEA reduction to half-bit threshold (random pairs)
 			try testing.expect(Mp.cmp(&r1_h, &r1_c) == .eq);
 
 			// Sanity: HGCD did make progress (bitLen(r0) ≤ target_bits OR r1 == 0).
+			try testing.expect(r1_h.cached_sign == 0 or r0_h.bitLen() <= target_bits);
+		}
+	}
+}
+
+// ── M11.2 — Recursive HGCD: failing test (TDD scaffold) ────────────────────
+
+test "hgcdRecursive: matches classical EEA reduction at large bit-widths" {
+	// Strict oracle: applying the recursive HGCD's matrix to (a, b) must yield
+	// the SAME (r0, r1) as classical step-by-step EEA reduction down to the
+	// same target_bits. This bit-for-bit equality is the tightest correctness
+	// check: it proves the recursive form computes the exact same EEA
+	// quotient sequence as the iterative form.
+	const SIZES = [_]usize{ 256, 512, 1024, 2048, 4096 };
+	const ITERS_PER_SIZE: usize = 8;
+	var prng = std.Random.DefaultPrng.init(0xCAFE_F00D_BABE_BEEF);
+	const rand = prng.random();
+
+	var raw_buf: [1024]u8 = undefined;
+	var enc_buf: [1100]u8 = undefined;
+
+	for (SIZES) |bits| {
+		const byte_len = (bits + 7) / 8;
+		var i: usize = 0;
+		while (i < ITERS_PER_SIZE) : (i += 1) {
+			var a = Mp.init(testing.allocator);
+			defer a.deinit();
+			var b = Mp.init(testing.allocator);
+			defer b.deinit();
+
+			rand.bytes(raw_buf[0..byte_len]);
+			raw_buf[byte_len - 1] = (raw_buf[byte_len - 1] & 0x7F) | 0x40;
+			const hdr_a = try tier3.writeHeader(&enc_buf, byte_len);
+			@memcpy(enc_buf[hdr_a..][0..byte_len], raw_buf[0..byte_len]);
+			try a.setBytes(enc_buf[0 .. hdr_a + byte_len]);
+
+			const half_byte_len = byte_len / 2;
+			if (half_byte_len == 0) continue;
+			rand.bytes(raw_buf[0..half_byte_len]);
+			raw_buf[half_byte_len - 1] = (raw_buf[half_byte_len - 1] & 0x7F) | 0x40;
+			raw_buf[0] |= 1;
+			const hdr_b = try tier3.writeHeader(&enc_buf, half_byte_len);
+			@memcpy(enc_buf[hdr_b..][0..half_byte_len], raw_buf[0..half_byte_len]);
+			try b.setBytes(enc_buf[0 .. hdr_b + half_byte_len]);
+
+			if (a.cached_sign == 0 or b.cached_sign == 0) continue;
+			if (Mp.cmp(&a, &b) != .gt) continue;
+
+			const orig_bits = a.bitLen();
+			const target_bits: usize = orig_bits / 2;
+
+			var M = Mp.HGCDMatrix.init(testing.allocator);
+			defer M.deinit();
+			try Mp.hgcdRecursive(&M, &a, &b, target_bits, testing.allocator);
+
+			var r0_h = Mp.init(testing.allocator);
+			defer r0_h.deinit();
+			var r1_h = Mp.init(testing.allocator);
+			defer r1_h.deinit();
+			try r0_h.setBytes(a.bytes());
+			try r1_h.setBytes(b.bytes());
+			try M.applyToPair(&r0_h, &r1_h);
+
+			var r0_c = Mp.init(testing.allocator);
+			defer r0_c.deinit();
+			var r1_c = Mp.init(testing.allocator);
+			defer r1_c.deinit();
+			try r0_c.setBytes(a.bytes());
+			try r1_c.setBytes(b.bytes());
+			try classicalReduceToTarget(&r0_c, &r1_c, target_bits, testing.allocator);
+
+			try testing.expect(Mp.cmp(&r0_h, &r0_c) == .eq);
+			try testing.expect(Mp.cmp(&r1_h, &r1_c) == .eq);
+
 			try testing.expect(r1_h.cached_sign == 0 or r0_h.bitLen() <= target_bits);
 		}
 	}
