@@ -2017,11 +2017,32 @@ pub fn divModSignedScratchNeed(a_pay_len: usize, b_pay_len: usize) usize {
 /// Compare two unsigned LE byte arrays. Returns -1/0/+1.
 fn cmpUnsignedLE(a: []const u8, a_len: usize, b: []const u8, b_len: usize) i8 {
 	if (a_len != b_len) return if (a_len > b_len) 1 else -1;
-	var i: usize = a_len;
-	while (i > 0) {
-		i -= 1;
-		if (a[i] > b[i]) return 1;
-		if (a[i] < b[i]) return -1;
+
+	// Chunked u64 high-to-low. For LE multi-byte arrays, the chunk at offset
+	// `off` represents bytes off..off+8 — and unsigned u64 comparison of the
+	// LE-interpreted chunk correctly orders these positions because byte
+	// off+7 occupies bits 56-63 of the u64 (dominates the unsigned compare),
+	// matching its dominant role in the magnitude.
+	const chunk_aligned: usize = (a_len / 8) * 8;
+
+	// Tail bytes (high end, > chunk_aligned) — scan first since they're
+	// higher magnitude.
+	var bi: usize = a_len;
+	while (bi > chunk_aligned) {
+		bi -= 1;
+		if (a[bi] != b[bi]) return if (a[bi] > b[bi]) 1 else -1;
+	}
+
+	// Aligned u64 chunks, top to bottom. Each compare is one LDR x + LDR x +
+	// CMP on aarch64 — handles 8 bytes per iteration vs the 8 LDR/LDR/CMP
+	// pairs of the per-byte form.
+	var ci: usize = chunk_aligned / 8;
+	while (ci > 0) {
+		ci -= 1;
+		const off = ci * 8;
+		const av = std.mem.readInt(u64, a[off..][0..8], .little);
+		const bv = std.mem.readInt(u64, b[off..][0..8], .little);
+		if (av != bv) return if (av > bv) 1 else -1;
 	}
 	return 0;
 }
@@ -3001,6 +3022,39 @@ test "negateInPlace: -129 (i16) -> 129" {
 	negateInPlace(&p);
 	try testing.expectEqual(@as(u8, 0x81), p[0]); // 129 = 0x81 low byte
 	try testing.expectEqual(@as(u8, 0x00), p[1]);
+}
+
+test "cmpUnsignedLE: chunked vs naive equivalence across sizes" {
+	// Naive reference (per-byte high-to-low) inline for cross-check.
+	const naive = struct {
+		fn cmp(a: []const u8, a_len: usize, b: []const u8, b_len: usize) i8 {
+			if (a_len != b_len) return if (a_len > b_len) 1 else -1;
+			var i: usize = a_len;
+			while (i > 0) {
+				i -= 1;
+				if (a[i] > b[i]) return 1;
+				if (a[i] < b[i]) return -1;
+			}
+			return 0;
+		}
+	}.cmp;
+	const sizes = [_]usize{ 1, 7, 8, 9, 15, 16, 17, 23, 32, 100, 256, 1024 };
+	var prng = std.Random.DefaultPrng.init(0xC0FFEE_5EED);
+	const r = prng.random();
+	var iter: usize = 0;
+	while (iter < 200) : (iter += 1) {
+		for (sizes) |sz| {
+			const a = try testing.allocator.alloc(u8, sz);
+			defer testing.allocator.free(a);
+			const b = try testing.allocator.alloc(u8, sz);
+			defer testing.allocator.free(b);
+			for (a) |*p| p.* = r.int(u8);
+			for (b) |*p| p.* = r.int(u8);
+			try testing.expectEqual(naive(a, sz, b, sz), cmpUnsignedLE(a, sz, b, sz));
+			// Also test equal: cmp(a, a) == 0
+			try testing.expectEqual(@as(i8, 0), cmpUnsignedLE(a, sz, a, sz));
+		}
+	}
 }
 
 test "negateInPlace: chunked path correctness across sizes (8/16/24/...)" {
