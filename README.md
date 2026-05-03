@@ -43,7 +43,7 @@ Apple Silicon (M-series), aarch64-darwin, Zig 0.16.0 ReleaseFast, libc malloc.
 ### Headline wins
 
 - **All `i64`-fitting values: 1.95–2.66× faster than GMP**
-- **All three standard RSA mul sizes (1024, 2048, 3072 bit) beat GMP by 1.11–1.45×** — includes RSA-2048 (just flipped from 0.91× to 1.16×). Nine mul sizes total beat GMP.
+- **All three standard RSA mul sizes (1024, 2048, 3072 bit) beat GMP by 1.19–1.45×** — twelve mul sizes total beat GMP after the iter-33 Karatsuba-leaf cleanup added new wins at 4096, 6144, and 8192 bit too.
 - **RSA-2048 trifecta**: blip_mp beats GMP at `mul` (1.16×) + `divMod` (1.31×) + `powm` (1.11×) at the most-deployed crypto operand size worldwide.
 - **Addition at 768-bit and above: 1.04–1.28× faster than GMP** (eight sizes now beat GMP after the M5/M9 bookkeeping cleanup; was previously 1.03× at 4096+ only)
 - **Subtraction at 256-bit and above: 1.03–2.11× faster than GMP** — ten Mp.sub sizes beat GMP after the chunked-`subPayloads` fix mirrored the long-standing addPayloads optimization. Headline: 6144-bit sub went 606 ns → 48 ns (12.7×).
@@ -57,7 +57,7 @@ Apple Silicon (M-series), aarch64-darwin, Zig 0.16.0 ReleaseFast, libc malloc.
 We're slower than GMP at:
 - **128-bit addition and subtraction** (~0.56–0.65× of GMP). The remaining gap at the smallest size is the load+store ABI cost difference from blip_mp's heavier struct (one cache line + 8B vs GMP's 24-byte mpz_t) — fundamental, not algorithmic. Other small sizes (192-512 bit) are now within 70-90% of GMP after the cleanup landed.
 - **128–256 bit multiplication** (0.40–0.67×). Same per-op overhead.
-- **8192+ bit multiplication** (0.52–0.72×). GMP uses Schönhage-Strassen FFT mul. We have a full pure-Zig FFT stack (single-prime NTT + two-prime CRT + NEON-SIMD butterflies) but it's currently gated off in production — even with the 1.40× speedup from vectorization (32K-bit FFT path: 191K → 135K ns), Toom-3 still wins at 117K ns. 13–15% gap remaining; M6-4-E ladder in PLAN.md targets the alloc-elimination + Stockham + inline-asm levers needed to flip it.
+- **16384+ bit multiplication** (0.55–0.87× post-iter-33). 8192-bit was 0.72× behind GMP pre-iter-33; the Karatsuba-leaf chunking flipped it to 1.04× WIN. 16384-bit closed from 0.68× → 0.87×. 32768-bit still in FFT territory (0.55×). GMP uses Schönhage-Strassen FFT mul above ~16K-bit. We have a full pure-Zig FFT stack (single-prime NTT + two-prime CRT + NEON-SIMD butterflies) shipped + correctness-validated but gated off in production — even with the 1.40× speedup from vectorization (32K-bit FFT path: 191K → 135K ns), Toom-3 still wins at 100K ns post-iter-33. M6-4-E ladder in PLAN.md targets the alloc-elimination + Stockham + inline-asm levers needed to flip it.
 
 ### Surprise: GMP's hand-tuned aarch64 asm gives ~0% advantage on Apple Silicon
 
