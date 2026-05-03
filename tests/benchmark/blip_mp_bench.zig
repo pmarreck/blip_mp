@@ -101,6 +101,15 @@ pub fn main() !void {
 		std.debug.print("RESULT impl=Mp.add bucket={s} ns_per_op={d:.2}\n", .{ lb.name, ns });
 	}
 
+	// Subtraction sweep — same bucket sizes as add. Goes through the same
+	// tier3Op dispatch + smallInlineTier3Add / sameSizeTier3Add fast paths
+	// (those helpers are op-polymorphic via comptime TierOp).
+	std.debug.print("\n--- subtraction ---\n", .{});
+	for (LARGE_BUCKETS) |lb| {
+		const ns = try benchmarkMpSubLarge(allocator, lb);
+		std.debug.print("RESULT impl=Mp.sub bucket={s} ns_per_op={d:.2}\n", .{ lb.name, ns });
+	}
+
 	// Multiplication sweep — same bucket sizes as add. Iterations scale down
 	// for large sizes (mul is O(n^1.58) Karatsuba / O(n^2) schoolbook).
 	std.debug.print("\n--- multiplication ---\n", .{});
@@ -211,6 +220,46 @@ fn benchmarkMpAddLarge(allocator: std.mem.Allocator, lb: LargeBucket) !f64 {
 		const a = &pool[i & (POOL_SIZE - 1)];
 		const b = &pool[(i + 1) & (POOL_SIZE - 1)];
 		try result.add(a, b);
+	}
+	const elapsed_ns = nowNs() - start_ns;
+
+	std.mem.doNotOptimizeAway(result.bytes().ptr);
+	return @as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(ITERATIONS_LARGE));
+}
+
+// Large-value sub bench: identical setup to benchmarkMpAddLarge, but exercises
+// Mp.sub which routes through the same tier-3 dispatch + comptime-polymorphic
+// smallInlineTier3Add / sameSizeTier3Add helpers (the helpers handle both add
+// and sub via the comptime TierOp parameter — the "Add" in the names is
+// historical).
+fn benchmarkMpSubLarge(allocator: std.mem.Allocator, lb: LargeBucket) !f64 {
+	const byte_count = lb.bits / 8;
+	var pool: [POOL_SIZE]blip_mp.Mp = undefined;
+	for (&pool, 0..) |*slot, i| {
+		slot.* = blip_mp.Mp.init(allocator);
+		const payload = try allocator.alloc(u8, byte_count);
+		defer allocator.free(payload);
+		var rng = std.Random.DefaultPrng.init(0xCAFE_BEEF + i);
+		const r = rng.random();
+		for (payload) |*p| p.* = r.int(u8);
+		payload[byte_count - 1] &= 0x7F; // ensure positive
+		const blip_buf = try allocator.alloc(u8, byte_count + 16);
+		defer allocator.free(blip_buf);
+		const hdr_len = try blip_mp.tier3.writeHeader(blip_buf, byte_count);
+		@memcpy(blip_buf[hdr_len .. hdr_len + byte_count], payload);
+		try slot.setBytes(blip_buf[0 .. hdr_len + byte_count]);
+	}
+	defer for (&pool) |*slot| slot.deinit();
+
+	var result = blip_mp.Mp.init(allocator);
+	defer result.deinit();
+
+	const start_ns = nowNs();
+	var i: usize = 0;
+	while (i < ITERATIONS_LARGE) : (i += 1) {
+		const a = &pool[i & (POOL_SIZE - 1)];
+		const b = &pool[(i + 1) & (POOL_SIZE - 1)];
+		try result.sub(a, b);
 	}
 	const elapsed_ns = nowNs() - start_ns;
 
