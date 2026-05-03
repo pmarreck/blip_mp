@@ -227,13 +227,9 @@ pub const Mp = struct {
 			// Both negative: longer canonical payload = more negative.
 			if (a_pay.len != b_pay.len) return std.math.order(b_pay.len, a_pay.len);
 		}
-		// Equal-length payloads: compare unsigned LE high-to-low.
-		var i: usize = a_pay.len;
-		while (i > 0) {
-			i -= 1;
-			if (a_pay[i] != b_pay[i]) return std.math.order(a_pay[i], b_pay[i]);
-		}
-		return .eq;
+		// Equal-length payloads: chunked u64 unsigned LE compare via tier3 helper.
+		const c = tier3.cmpUnsignedLE(a_pay, a_pay.len, b_pay, b_pay.len);
+		return if (c < 0) .lt else if (c > 0) .gt else .eq;
 	}
 
 	pub fn sign(self: *const Mp) GetError!i2 {

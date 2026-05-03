@@ -2015,7 +2015,7 @@ pub fn divModSignedScratchNeed(a_pay_len: usize, b_pay_len: usize) usize {
 }
 
 /// Compare two unsigned LE byte arrays. Returns -1/0/+1.
-fn cmpUnsignedLE(a: []const u8, a_len: usize, b: []const u8, b_len: usize) i8 {
+pub fn cmpUnsignedLE(a: []const u8, a_len: usize, b: []const u8, b_len: usize) i8 {
 	if (a_len != b_len) return if (a_len > b_len) 1 else -1;
 
 	// Chunked u64 high-to-low. For LE multi-byte arrays, the chunk at offset
