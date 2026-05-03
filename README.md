@@ -126,7 +126,7 @@ Full details in [`CODE_MINIMAP.md`](CODE_MINIMAP.md), benchmark history in [`BEN
 
 **What it isn't (yet):**
 - **FFT multiplication is correctness-shipped but gated off** — full single-prime NTT + two-prime CRT + NEON-SIMD vectorized butterflies live in `src/fft.zig`, all bit-identical to GMP across 8240/8240 cross-checks at sizes up to 256K-bit. But constant factors keep Toom-3 ahead at every operand size in our supported range (M-series-specific finding: pure-NEON Montgomery integrates slower than the existing scalar-inside-vector form because it crowds the NEON pipe and starves M4's dual scalar mul pipes). The 13–15% remaining gap needs alloc-elimination + inline asm, planned in M6-4-E.
-- **Modular inverse lags GMP** by ~7-8× at 1024-2048 bit (down from 29-38× before M9 Lehmer). Closing the remainder requires half-GCD (sub-quadratic divide-and-conquer reformulation), planned as M10.
+- **Modular inverse lags GMP** by ~4-6× at 1024-2048 bit (down from 29-38× before M9 Lehmer; further down from 7-8× after M10 wider-window Lehmer). Headline: 2048-bit invMod is now 3.96× behind GMP (was 7.85× pre-M10). Closing the remainder requires true recursive half-GCD, planned as M11.
 - **Single platform validated** — numbers above are all aarch64-darwin (Apple M-series). x86_64 may shift the picture, especially around the asm-vs-clang result.
 - **No C FFI yet** — public surface is Zig-only. Adding `include/blip_mp.h` is a clear extension.
 - **Not optimized for non-aligned operand sizes** — `tier3Op` works on any size but is fastest when payload lengths are multiples of 8 bytes (which most cryptographic sizes are).
@@ -148,7 +148,7 @@ Full details in [`CODE_MINIMAP.md`](CODE_MINIMAP.md), benchmark history in [`BEN
 
 3. **Cross-platform validation on x86_64 Linux + Windows.** Two M-series-specific findings need verification on x86_64: (a) "GMP asm gives ~0% on M-series, AVX-512 may shift it" (M5-5); (b) "pure-NEON Montgomery loses to scalar-inside-vector because of M4's dual scalar mul pipes" (M6-4-A.6) — different scheduler may flip this.
 
-4. **Half-GCD for `Mp.invMod`** — closes the remaining 7-8× gap to GMP. M9 Lehmer dropped the gap from 30-38× to 7-8×; sub-quadratic half-GCD is the next algorithmic step.
+4. **True recursive half-GCD for `Mp.invMod` (M11)** — closes the remaining 4-6× gap to GMP. M10 (wider-window Lehmer) just landed at 3.96× of GMP at 2048-bit; true recursive HGCD with multi-precision matrix entries is sub-quadratic and would close most of what's left.
 
 5. **C FFI header** (`include/blip_mp.h`) for downstream consumers.
 
