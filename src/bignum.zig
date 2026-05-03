@@ -1470,6 +1470,400 @@ pub const Mp = struct {
 		return true;
 	}
 
+	// ── M11.1 — HGCD primitive (standalone; not yet wired into invMod) ─────
+	//
+	// HGCDMatrix represents the accumulated 2x2 reduction matrix from a
+	// sequence of Euclidean (EEA) steps. All four entries are stored as
+	// non-negative `Mp` values; `parity_even` tracks the sign convention so
+	// that the matrix can represent any product of EEA-step matrices without
+	// requiring signed multi-precision arithmetic.
+	//
+	// Matrix application semantics (matches `invModLehmer`'s inner-loop
+	// convention so test expectations stay consistent across the codebase):
+	//   parity even (k = 0, 2, ...):
+	//     r0' = A·r0 - B·r1
+	//     r1' = D·r1 - C·r0
+	//   parity odd (k = 1, 3, ...):
+	//     r0' = B·r1 - A·r0
+	//     r1' = C·r0 - D·r1
+	// where the matrix is M = [[A, B], [C, D]] = [[a, b], [c, d]].
+	//
+	// Composition (M_new = M_outer · M_inner): if M_inner has parity p_i and
+	// M_outer has parity p_o, then M_new has parity (p_i XOR p_o), and its
+	// entries are derived per parity of M_outer (see `composeFrom`).
+	pub const HGCDMatrix = struct {
+		a: Mp, // top-left
+		b: Mp, // top-right
+		c: Mp, // bottom-left
+		d: Mp, // bottom-right
+		parity_even: bool,
+
+		pub fn init(allocator: std.mem.Allocator) HGCDMatrix {
+			return .{
+				.a = Mp.init(allocator),
+				.b = Mp.init(allocator),
+				.c = Mp.init(allocator),
+				.d = Mp.init(allocator),
+				.parity_even = true,
+			};
+		}
+
+		pub fn deinit(self: *HGCDMatrix) void {
+			self.a.deinit();
+			self.b.deinit();
+			self.c.deinit();
+			self.d.deinit();
+		}
+
+		/// Set this matrix to the identity I = [[1,0],[0,1]] with even parity
+		/// (the EEA "no steps taken" matrix).
+		pub fn setIdentity(self: *HGCDMatrix) ArithError!void {
+			try self.a.setI64(1);
+			try self.b.setI64(0);
+			try self.c.setI64(0);
+			try self.d.setI64(1);
+			self.parity_even = true;
+		}
+
+		/// Apply this matrix to a (r0, r1) pair in-place:
+		///   parity even: (r0, r1) <- (A·r0 - B·r1, D·r1 - C·r0)
+		///   parity odd:  (r0, r1) <- (B·r1 - A·r0, C·r0 - D·r1)
+		pub fn applyToPair(self: *const HGCDMatrix, r0: *Mp, r1: *Mp) ArithError!void {
+			const allocator = r0.allocator;
+			var ar0 = Mp.init(allocator);
+			defer ar0.deinit();
+			var br1 = Mp.init(allocator);
+			defer br1.deinit();
+			var cr0 = Mp.init(allocator);
+			defer cr0.deinit();
+			var dr1 = Mp.init(allocator);
+			defer dr1.deinit();
+			var new_r0 = Mp.init(allocator);
+			defer new_r0.deinit();
+			var new_r1 = Mp.init(allocator);
+			defer new_r1.deinit();
+
+			try ar0.mul(&self.a, r0);
+			try br1.mul(&self.b, r1);
+			try cr0.mul(&self.c, r0);
+			try dr1.mul(&self.d, r1);
+
+			if (self.parity_even) {
+				try new_r0.sub(&ar0, &br1);
+				try new_r1.sub(&dr1, &cr0);
+			} else {
+				try new_r0.sub(&br1, &ar0);
+				try new_r1.sub(&cr0, &dr1);
+			}
+			try r0.setBytes(new_r0.bytes());
+			try r1.setBytes(new_r1.bytes());
+		}
+
+		/// Compose: self <- M_outer · self (i.e., apply M_outer ON TOP of self).
+		/// Used by hgcd to fold the inner-loop matrix from each iteration into
+		/// the running accumulator.
+		///
+		/// Derivation: applying self to (r0_o, r1_o) gives some (r0', r1').
+		/// Applying M_outer to (r0', r1') gives the final (r0'', r1''). We want
+		/// a single matrix that maps (r0_o, r1_o) directly to (r0'', r1'').
+		///
+		/// Let self = [[A1, B1], [C1, D1]] with parity p1.
+		/// Let outer = [[A2, B2], [C2, D2]] with parity p2.
+		///
+		/// CASE p1 even, p2 even:
+		///   r0' = A1·r0o - B1·r1o
+		///   r1' = D1·r1o - C1·r0o
+		///   r0'' = A2·r0' - B2·r1'
+		///        = A2·(A1·r0o - B1·r1o) - B2·(D1·r1o - C1·r0o)
+		///        = (A2·A1 + B2·C1)·r0o - (A2·B1 + B2·D1)·r1o
+		///   r1'' = D2·r1' - C2·r0'
+		///        = D2·(D1·r1o - C1·r0o) - C2·(A1·r0o - B1·r1o)
+		///        = (D2·D1 + C2·B1)·r1o - (D2·C1 + C2·A1)·r0o
+		///   → new parity even (p1=even, p2=even → composed parity even)
+		///   A_new = A2·A1 + B2·C1
+		///   B_new = A2·B1 + B2·D1
+		///   C_new = C2·A1 + D2·C1
+		///   D_new = C2·B1 + D2·D1
+		///
+		/// CASE p1 even, p2 odd:
+		///   r0' = A1·r0o - B1·r1o
+		///   r1' = D1·r1o - C1·r0o
+		///   r0'' = B2·r1' - A2·r0'
+		///        = B2·(D1·r1o - C1·r0o) - A2·(A1·r0o - B1·r1o)
+		///        = (A2·B1 + B2·D1)·r1o - (A2·A1 + B2·C1)·r0o
+		///   r1'' = C2·r0' - D2·r1'
+		///        = C2·(A1·r0o - B1·r1o) - D2·(D1·r1o - C1·r0o)
+		///        = (C2·A1 + D2·C1)·r0o - (C2·B1 + D2·D1)·r1o
+		///   → new parity odd (even XOR odd = odd)
+		///   A_new = A2·A1 + B2·C1
+		///   B_new = A2·B1 + B2·D1
+		///   C_new = C2·A1 + D2·C1
+		///   D_new = C2·B1 + D2·D1
+		///
+		/// CASE p1 odd, p2 even:
+		///   r0' = B1·r1o - A1·r0o
+		///   r1' = C1·r0o - D1·r1o
+		///   r0'' = A2·r0' - B2·r1'
+		///        = A2·(B1·r1o - A1·r0o) - B2·(C1·r0o - D1·r1o)
+		///        = (A2·B1 + B2·D1)·r1o - (A2·A1 + B2·C1)·r0o
+		///   r1'' = D2·r1' - C2·r0'
+		///        = D2·(C1·r0o - D1·r1o) - C2·(B1·r1o - A1·r0o)
+		///        = (D2·C1 + C2·A1)·r0o - (D2·D1 + C2·B1)·r1o
+		///   → new parity odd (odd XOR even = odd)
+		///   A_new = A2·A1 + B2·C1
+		///   B_new = A2·B1 + B2·D1
+		///   C_new = C2·A1 + D2·C1
+		///   D_new = C2·B1 + D2·D1
+		///
+		/// CASE p1 odd, p2 odd:
+		///   r0' = B1·r1o - A1·r0o
+		///   r1' = C1·r0o - D1·r1o
+		///   r0'' = B2·r1' - A2·r0'
+		///        = B2·(C1·r0o - D1·r1o) - A2·(B1·r1o - A1·r0o)
+		///        = (A2·A1 + B2·C1)·r0o - (A2·B1 + B2·D1)·r1o
+		///   r1'' = C2·r0' - D2·r1'
+		///        = C2·(B1·r1o - A1·r0o) - D2·(C1·r0o - D1·r1o)
+		///        = (C2·B1 + D2·D1)·r1o - (C2·A1 + D2·C1)·r0o
+		///   → new parity even
+		///   A_new = A2·A1 + B2·C1
+		///   B_new = A2·B1 + B2·D1
+		///   C_new = C2·A1 + D2·C1
+		///   D_new = C2·B1 + D2·D1
+		///
+		/// EXCELLENT INVARIANT: across all four cases the entry formulas are
+		/// IDENTICAL. Only the parity flips. So composition is a single set of
+		/// 8 multiplications + 4 additions, with parity = p1 XOR p2.
+		pub fn composeOuter(self: *HGCDMatrix, outer: *const HGCDMatrix) ArithError!void {
+			const allocator = self.a.allocator;
+			var t1 = Mp.init(allocator);
+			defer t1.deinit();
+			var t2 = Mp.init(allocator);
+			defer t2.deinit();
+			var new_a = Mp.init(allocator);
+			defer new_a.deinit();
+			var new_b = Mp.init(allocator);
+			defer new_b.deinit();
+			var new_c = Mp.init(allocator);
+			defer new_c.deinit();
+			var new_d = Mp.init(allocator);
+			defer new_d.deinit();
+
+			// A_new = A2·A1 + B2·C1
+			try t1.mul(&outer.a, &self.a);
+			try t2.mul(&outer.b, &self.c);
+			try new_a.add(&t1, &t2);
+			// B_new = A2·B1 + B2·D1
+			try t1.mul(&outer.a, &self.b);
+			try t2.mul(&outer.b, &self.d);
+			try new_b.add(&t1, &t2);
+			// C_new = C2·A1 + D2·C1
+			try t1.mul(&outer.c, &self.a);
+			try t2.mul(&outer.d, &self.c);
+			try new_c.add(&t1, &t2);
+			// D_new = C2·B1 + D2·D1
+			try t1.mul(&outer.c, &self.b);
+			try t2.mul(&outer.d, &self.d);
+			try new_d.add(&t1, &t2);
+
+			try self.a.setBytes(new_a.bytes());
+			try self.b.setBytes(new_b.bytes());
+			try self.c.setBytes(new_c.bytes());
+			try self.d.setBytes(new_d.bytes());
+			self.parity_even = (self.parity_even == outer.parity_even);
+		}
+	};
+
+	/// HGCD primitive (M11.1, standalone — NOT wired into Mp.invMod).
+	///
+	/// Given (a, b) with a > b > 0, produces a 2x2 reduction matrix M such
+	/// that applying M to (a, b) yields (a', b') with `bitLen(a') ≤ target_bits`
+	/// or (a', b') = (gcd(a,b), 0) — whichever occurs first.
+	///
+	/// The matrix encodes a sequence of EEA quotients: for the canonical
+	/// "half-GCD" use, set `target_bits = bitLen(a) / 2`. The output matrix
+	/// will then drive a > 2× faster reduction than the equivalent
+	/// quotient-by-quotient classical EEA.
+	///
+	/// Implementation: iterative Lehmer-style reduction with multi-precision
+	/// matrix accumulation. Each iteration extracts a u64-window inner loop
+	/// (per Knuth Algorithm L), accumulates the inner-loop matrix into the
+	/// running HGCDMatrix via `composeOuter`, and applies the inner-loop
+	/// matrix to the working (r0, r1) so the next iteration sees reduced
+	/// magnitudes. Termination when bitLen(r0) drops below target_bits.
+	///
+	/// This is "M11.1.1 + iterative scaffold for M11.2 integration" — a
+	/// truly RECURSIVE HGCD (with O(M(n) log n) complexity) is M11.1.2 future
+	/// work and would build on this same matrix machinery + composeOuter.
+	pub fn hgcd(
+		out_M: *HGCDMatrix,
+		a: *const Mp,
+		b: *const Mp,
+		target_bits: usize,
+		allocator: std.mem.Allocator,
+	) ArithError!void {
+		try out_M.setIdentity();
+
+		// Working copies of (a, b) — caller owns the originals; we don't
+		// mutate them.
+		var r0 = Mp.init(allocator);
+		defer r0.deinit();
+		var r1 = Mp.init(allocator);
+		defer r1.deinit();
+		try r0.setBytes(a.bytes());
+		try r1.setBytes(b.bytes());
+
+		// Already at/below threshold or one operand is zero — identity matrix
+		// is correct.
+		if (r0.bitLen() <= target_bits) return;
+		if (r1.cached_sign == 0) return;
+
+		// Per-iteration inner-loop matrix (rebuilt each pass).
+		var inner = HGCDMatrix.init(allocator);
+		defer inner.deinit();
+
+		// Scratch Mps for divMod-fallback step.
+		var q_mp = Mp.init(allocator);
+		defer q_mp.deinit();
+		var rem_mp = Mp.init(allocator);
+		defer rem_mp.deinit();
+		var tmp = Mp.init(allocator);
+		defer tmp.deinit();
+
+		while (r1.cached_sign != 0 and r0.bitLen() > target_bits) {
+			const r0_bits = r0.bitLen();
+
+			// For very small r0, fall through to single-step EEA (cheap, and
+			// avoids edge cases in the inner-loop window logic).
+			if (r0_bits <= 64) {
+				// Single multi-limb EEA step: q = r0 / r1; (r0, r1) <- (r1, r0 - q·r1).
+				try Mp.divMod(&q_mp, &rem_mp, &r0, &r1);
+				try tmp.setBytes(r1.bytes());
+				try r0.setBytes(tmp.bytes());
+				try r1.setBytes(rem_mp.bytes());
+
+				// Build inner = [[0, 1], [1, q]] with parity odd (one EEA step
+				// from identity flips parity).
+				try inner.a.setI64(0);
+				try inner.b.setI64(1);
+				try inner.c.setI64(1);
+				try inner.d.setBytes(q_mp.bytes());
+				inner.parity_even = false;
+				try out_M.composeOuter(&inner);
+				continue;
+			}
+
+			// Knuth Algorithm L inner loop (u62 window).
+			const shift_down: usize = r0_bits - 62;
+			const mask62 = (@as(u64, 1) << 62) - 1;
+			var u_top: u64 = topU64(&r0, shift_down) & mask62;
+			var v_top: u64 = topU64(&r1, shift_down) & mask62;
+
+			if (v_top == 0) {
+				// Estimate uninformative — single classical step.
+				try Mp.divMod(&q_mp, &rem_mp, &r0, &r1);
+				try tmp.setBytes(r1.bytes());
+				try r0.setBytes(tmp.bytes());
+				try r1.setBytes(rem_mp.bytes());
+				try inner.a.setI64(0);
+				try inner.b.setI64(1);
+				try inner.c.setI64(1);
+				try inner.d.setBytes(q_mp.bytes());
+				inner.parity_even = false;
+				try out_M.composeOuter(&inner);
+				continue;
+			}
+
+			var aa: u64 = 1;
+			var bb: u64 = 0;
+			var cc: u64 = 0;
+			var dd: u64 = 1;
+			var inner_parity_even: bool = true;
+			var inner_steps: usize = 0;
+
+			while (true) {
+				var q_lo: u64 = 0;
+				var q_hi: u64 = 0;
+				var ok: bool = false;
+				if (inner_parity_even) {
+					if (cc < v_top) {
+						const denom_hi = v_top - cc;
+						const denom_lo = v_top + dd;
+						if (bb <= u_top and denom_hi != 0) {
+							const num_lo = u_top - bb;
+							const num_hi = u_top + aa;
+							q_lo = num_lo / denom_lo;
+							q_hi = num_hi / denom_hi;
+							ok = true;
+						}
+					}
+				} else {
+					if (dd < v_top) {
+						const denom_hi = v_top - dd;
+						const denom_lo = v_top + cc;
+						if (aa <= u_top and denom_hi != 0) {
+							const num_lo = u_top - aa;
+							const num_hi = u_top + bb;
+							q_lo = num_lo / denom_lo;
+							q_hi = num_hi / denom_hi;
+							ok = true;
+						}
+					}
+				}
+				if (!ok or q_lo != q_hi or q_lo == 0) break;
+				const q = q_lo;
+				const qv = @mulWithOverflow(q, v_top);
+				if (qv[1] != 0) break;
+				if (qv[0] > u_top) break;
+				const new_u = v_top;
+				const new_v = u_top - qv[0];
+				const qc = @mulWithOverflow(q, cc);
+				if (qc[1] != 0) break;
+				const new_c_ov = @addWithOverflow(aa, qc[0]);
+				if (new_c_ov[1] != 0) break;
+				if (new_c_ov[0] >= (@as(u64, 1) << 62)) break;
+				const qd = @mulWithOverflow(q, dd);
+				if (qd[1] != 0) break;
+				const new_d_ov = @addWithOverflow(bb, qd[0]);
+				if (new_d_ov[1] != 0) break;
+				if (new_d_ov[0] >= (@as(u64, 1) << 62)) break;
+				aa = cc;
+				bb = dd;
+				cc = new_c_ov[0];
+				dd = new_d_ov[0];
+				u_top = new_u;
+				v_top = new_v;
+				inner_parity_even = !inner_parity_even;
+				inner_steps += 1;
+			}
+
+			if (inner_steps == 0) {
+				// Lehmer estimate disagreed even on first step → one classical
+				// step.
+				try Mp.divMod(&q_mp, &rem_mp, &r0, &r1);
+				try tmp.setBytes(r1.bytes());
+				try r0.setBytes(tmp.bytes());
+				try r1.setBytes(rem_mp.bytes());
+				try inner.a.setI64(0);
+				try inner.b.setI64(1);
+				try inner.c.setI64(1);
+				try inner.d.setBytes(q_mp.bytes());
+				inner.parity_even = false;
+				try out_M.composeOuter(&inner);
+				continue;
+			}
+
+			// Materialise inner-loop matrix as Mp values, apply to (r0, r1),
+			// then compose into out_M.
+			try inner.a.setU64(aa);
+			try inner.b.setU64(bb);
+			try inner.c.setU64(cc);
+			try inner.d.setU64(dd);
+			inner.parity_even = inner_parity_even;
+			try inner.applyToPair(&r0, &r1);
+			try out_M.composeOuter(&inner);
+		}
+	}
+
 	/// Returns true iff this Mp's encoded form fits in the i64 universe
 	/// (signed canonical L ≤ 8 → at most 9 bytes total).
 	fn fitsTier01(self: *const Mp) bool {
@@ -3955,5 +4349,164 @@ test "bench: invModLehmer vs invModHGCD across bit-widths" {
 			"\n[bench] invMod {d}-bit  Lehmer={d} ns/op  HGCD={d} ns/op  speedup={d:.2}x\n",
 			.{ bits, ns_lehmer, ns_hgcd, speedup },
 		);
+	}
+}
+
+// ── M11.1 — HGCD primitive: standalone tests ────────────────────────────────
+
+/// Test helper: classical (multi-precision) EEA reduction tracking only
+/// (r0, r1). Reduces (r0, r1) by repeated `(r0, r1) <- (r1, r0 mod r1)` until
+/// either r1 == 0 or bitLen(r0) <= target_bits. Used as the HGCD oracle:
+/// HGCD's matrix applied to (a, b) must yield the same (r0, r1) as this
+/// classical step-by-step reduction down to the same threshold.
+fn classicalReduceToTarget(
+	r0: *Mp, r1: *Mp,
+	target_bits: usize,
+	allocator: std.mem.Allocator,
+) ArithError!void {
+	var q = Mp.init(allocator);
+	defer q.deinit();
+	var rem = Mp.init(allocator);
+	defer rem.deinit();
+	var tmp = Mp.init(allocator);
+	defer tmp.deinit();
+	while (r1.cached_sign != 0 and r0.bitLen() > target_bits) {
+		try Mp.divMod(&q, &rem, r0, r1);
+		try tmp.setBytes(r1.bytes());
+		try r0.setBytes(tmp.bytes());
+		try r1.setBytes(rem.bytes());
+	}
+}
+
+test "HGCDMatrix identity: applyToPair leaves (r0,r1) unchanged" {
+	var M = Mp.HGCDMatrix.init(testing.allocator);
+	defer M.deinit();
+	try M.setIdentity();
+
+	var r0 = Mp.init(testing.allocator);
+	defer r0.deinit();
+	var r1 = Mp.init(testing.allocator);
+	defer r1.deinit();
+	try r0.setI64(123456789);
+	try r1.setI64(987654);
+
+	try M.applyToPair(&r0, &r1);
+	try testing.expectEqual(@as(i64, 123456789), try r0.getI64());
+	try testing.expectEqual(@as(i64, 987654), try r1.getI64());
+}
+
+test "HGCDMatrix one-step EEA: matrix [[0,1],[1,q]] reproduces one quotient step" {
+	// One classical EEA step: (r0, r1) -> (r1, r0 - q*r1).
+	// In our parity convention starting from identity (parity even):
+	// - identity: r0 = 1*r0_o - 0*r1_o, r1 = 1*r1_o - 0*r0_o, parity even
+	// - after one step (q): the new matrix should yield
+	//   r0_new = r1_o = 0*r0_o + 1*r1_o (so parity becomes odd: B*r1_o - A*r0_o
+	//   with A=0, B=1)
+	//   r1_new = r0_o - q*r1_o: parity-odd r1 = C*r0_o - D*r1_o → C=1, D=q
+	const a_val: i64 = 1234;
+	const b_val: i64 = 56;
+	const q_val: i64 = a_val / b_val; // 22
+	_ = q_val;
+
+	var a = Mp.init(testing.allocator);
+	defer a.deinit();
+	var b = Mp.init(testing.allocator);
+	defer b.deinit();
+	try a.setI64(a_val);
+	try b.setI64(b_val);
+
+	// Construct M corresponding to one EEA step on (a, b).
+	var M = Mp.HGCDMatrix.init(testing.allocator);
+	defer M.deinit();
+	// After one EEA step: parity odd, A=0, B=1, C=1, D=q.
+	try M.a.setI64(0);
+	try M.b.setI64(1);
+	try M.c.setI64(1);
+	try M.d.setI64(@intCast(@divTrunc(a_val, b_val)));
+	M.parity_even = false;
+
+	var r0 = Mp.init(testing.allocator);
+	defer r0.deinit();
+	var r1 = Mp.init(testing.allocator);
+	defer r1.deinit();
+	try r0.setBytes(a.bytes());
+	try r1.setBytes(b.bytes());
+
+	try M.applyToPair(&r0, &r1);
+	try testing.expectEqual(@as(i64, 56), try r0.getI64()); // = b
+	try testing.expectEqual(@as(i64, 2), try r1.getI64()); // = a - q*b
+}
+
+test "hgcd: matches classical EEA reduction to half-bit threshold (random pairs)" {
+	const SIZES = [_]usize{ 64, 128, 256, 512, 1024, 2048 };
+	const ITERS_PER_SIZE: usize = 12;
+	var prng = std.Random.DefaultPrng.init(0xBADD_C0DE_BEAF_F00D);
+	const rand = prng.random();
+
+	var raw_buf: [512]u8 = undefined;
+	var enc_buf: [600]u8 = undefined;
+
+	for (SIZES) |bits| {
+		const byte_len = (bits + 7) / 8;
+		var i: usize = 0;
+		while (i < ITERS_PER_SIZE) : (i += 1) {
+			// Build (a, b) with bitLen(a) = bits and a > b > 0.
+			var a = Mp.init(testing.allocator);
+			defer a.deinit();
+			var b = Mp.init(testing.allocator);
+			defer b.deinit();
+
+			rand.bytes(raw_buf[0..byte_len]);
+			raw_buf[byte_len - 1] = (raw_buf[byte_len - 1] & 0x7F) | 0x40; // ensure top bit clear (positive) and high enough
+			const hdr_a = try tier3.writeHeader(&enc_buf, byte_len);
+			@memcpy(enc_buf[hdr_a..][0..byte_len], raw_buf[0..byte_len]);
+			try a.setBytes(enc_buf[0 .. hdr_a + byte_len]);
+
+			// b: half size, ensure < a.
+			const half_byte_len = byte_len / 2;
+			if (half_byte_len == 0) continue;
+			rand.bytes(raw_buf[0..half_byte_len]);
+			raw_buf[half_byte_len - 1] = (raw_buf[half_byte_len - 1] & 0x7F) | 0x40;
+			raw_buf[0] |= 1; // odd to give it a chance
+			const hdr_b = try tier3.writeHeader(&enc_buf, half_byte_len);
+			@memcpy(enc_buf[hdr_b..][0..half_byte_len], raw_buf[0..half_byte_len]);
+			try b.setBytes(enc_buf[0 .. hdr_b + half_byte_len]);
+
+			// Skip degenerate inputs.
+			if (a.cached_sign == 0 or b.cached_sign == 0) continue;
+			if (Mp.cmp(&a, &b) != .gt) continue;
+
+			const orig_bits = a.bitLen();
+			const target_bits: usize = orig_bits / 2;
+
+			// HGCD path: get matrix M, apply to (a, b).
+			var M = Mp.HGCDMatrix.init(testing.allocator);
+			defer M.deinit();
+			try Mp.hgcd(&M, &a, &b, target_bits, testing.allocator);
+
+			var r0_h = Mp.init(testing.allocator);
+			defer r0_h.deinit();
+			var r1_h = Mp.init(testing.allocator);
+			defer r1_h.deinit();
+			try r0_h.setBytes(a.bytes());
+			try r1_h.setBytes(b.bytes());
+			try M.applyToPair(&r0_h, &r1_h);
+
+			// Oracle: classical EEA reduction to same target.
+			var r0_c = Mp.init(testing.allocator);
+			defer r0_c.deinit();
+			var r1_c = Mp.init(testing.allocator);
+			defer r1_c.deinit();
+			try r0_c.setBytes(a.bytes());
+			try r1_c.setBytes(b.bytes());
+			try classicalReduceToTarget(&r0_c, &r1_c, target_bits, testing.allocator);
+
+			// Both must agree bit-for-bit (same EEA sequence position).
+			try testing.expect(Mp.cmp(&r0_h, &r0_c) == .eq);
+			try testing.expect(Mp.cmp(&r1_h, &r1_c) == .eq);
+
+			// Sanity: HGCD did make progress (bitLen(r0) ≤ target_bits OR r1 == 0).
+			try testing.expect(r1_h.cached_sign == 0 or r0_h.bitLen() <= target_bits);
+		}
 	}
 }
