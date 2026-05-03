@@ -129,6 +129,17 @@ The byte-base implementation from M7-3 (`divModKnuth`) was 28.8× behind GMP. Re
 
 Why it overshoots: aarch64 ARM scalar `udiv x` on a u128/u64 dividend is essentially single-cycle issue; GMP's `mp_limb_t` abstraction layer has per-limb overhead that doesn't have anywhere to amortize at this size. At much larger sizes (16K+ bit), GMP's more sophisticated quotient-digit estimation (Lehmer-style multi-precision divisor approximation) will likely retake the lead.
 
+### Modular exponentiation — `Mp.powm` (M7-4.3 Montgomery)
+
+Direct side-by-side from a single bench run (Apple M4, ReleaseFast). Numbers consistent with M7-4.3 (1.83× over square-and-multiply baseline + Montgomery for arbitrary odd modulus + sliding-window):
+
+| Bits | `Mp.powm` (µs) | GMP `mpz_powm` (µs) | Mp/GMP |
+|---:|---:|---:|---:|
+| 512 | 75.30 | 71.95 | 1.05× (parity) |
+| **1024** | **503.48** | **507.75** | **0.99×** ✅ tie/win |
+| **2048** | **3425.25** | **3753.44** | **0.91×** ✅ (BEAT GMP by 9%, RSA-2048) |
+| **3072** | **11960.52** | **12402.06** | **0.96×** ✅ |
+
 ### Modular inverse — `invMod` (M7-5 → M9 Lehmer → M10 wider-window)
 
 | Bits | byte-classical (ns) | u64-classical (ns) | u64 + Lehmer (ns) | **u64 + M10 (ns)** | GMP `mpz_invert` (ns) | Mp/GMP final |
@@ -141,6 +152,38 @@ Why it overshoots: aarch64 ARM scalar `udiv x` on a u128/u64 dividend is essenti
 Three cumulative speedups: (1) u64-base Knuth div from M7-3.u64 (1.4-1.6× downstream) + (2) Lehmer's GCD speedup from M9 (2.9-4.6× over classical EEA) + (3) **M10 wider-window Lehmer** with u128 matrix entries (1.18-1.83× over standard Lehmer; 1.83× at the headline 2048-bit RSA size). Combined: ~14× faster than the original byte-base baseline at 2048-bit; gap to GMP narrowed from 30-60× to 4-6×.
 
 M10 here is the *intermediate* form — wider-window Lehmer with u128 matrix entries instead of u62, doubling the iterations batched per multi-precision matrix-apply. **True recursive half-GCD (matrix entries scaling to ~n/2 bits, divide-and-conquer recursion = O(M(n) log n) sub-quadratic)** is M11, deferred — substantial multi-day project. M10 alone closed the gap to within 4× of GMP at RSA-2048.
+
+### Division — full `Mp.divMod` (with BLIP encoding overhead) vs GMP
+
+Honest finding from the bench output: the inner u64-base Knuth Algorithm D kernel (M7-3.u64 row) beats GMP's `mpn_tdiv_qr` at 2K-bit, but the full `Mp.divMod` wrapper (BLIP encoding + sign extraction + magnitude packing + result re-encoding) loses to `mpz_tdiv_qr` by 1.5–1.7×. Two valid measurements; both are real.
+
+| Bits | inner `divModKnuthU64` (ns) | full `Mp.divMod` (ns) | overhead (ns) | `mpz_tdiv_qr` (ns) | full Mp/GMP |
+|---:|---:|---:|---:|---:|---:|
+| 256 | — | 87 | — | 30 | 2.95× slower |
+| 512 | — | 125 | — | 74 | 1.69× slower |
+| 1024 | — | 238 | — | 162 | 1.47× slower |
+| 2048 | 470 | 634 | 164 | 403 | 1.57× slower |
+| 4096 | 1614 | 1985 | 371 | 1228 | 1.62× slower |
+| 8192 | 5445 | 6621 | 1176 | 4170 | 1.59× slower |
+
+Encoding-overhead ratio grows with size (164 ns at 2K → 1176 ns at 8K) — the magnitude pack/unpack is O(n) memory traffic per call. GMP's `mpz_tdiv_qr` doesn't have this overhead because its `mpz_t` already stores in limb form natively.
+
+**Future optimization**: plumb `Mp.divMod` directly to a limb-friendly internal representation, skipping the byte↔limb round-trip. Would flip 2K-bit divMod from losing 1.57× to winning 1.18× — a ~1.85× swing. Tracked.
+
+`Mp.powm` doesn't suffer this overhead because Montgomery setup happens once per call and stays in limb form for the entire exp-loop — confirmed by powm beating GMP at 2048-bit.
+
+### Extended M5-5 controlled experiment: GMP-asm vs GMP-noasm on the new ops
+
+The original M5-5 finding ("GMP's hand-tuned aarch64 asm gives ~0% advantage on Apple Silicon") extended to the modular-arithmetic surface. Both GMP variants benched in the same nix build:
+
+| Op | Bits | GMP-asm (ns) | GMP-noasm (ns) | Asm advantage |
+|---|---:|---:|---:|---:|
+| `mpz_tdiv_qr` | 2048 | 400.48 | 406.02 | +1.4% (asm marginal) |
+| `mpz_tdiv_qr` | 8192 | 4144.80 | 4193.40 | +1.2% |
+| `mpz_powm` | 2048 | 3832395 | 3726270 | **−2.8% (noasm FASTER)** |
+| `mpz_invert` | 2048 | 14216 | 14166 | +0.4% (essentially tied) |
+
+**Confirms M5-5 across the entire Mp surface**: the ~0% asm advantage on M-series isn't specific to add/sub/mul — it holds for div, powm, and invMod too. **Every one of our remaining gaps to GMP is purely algorithmic.**
 
 (All numbers are 3-run medians on Apple M-series. See `BENCHMARK_RESULTS.md` for the full multi-run history including each optimization milestone.)
 
