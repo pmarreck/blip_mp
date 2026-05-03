@@ -140,7 +140,9 @@ The byte-base implementation from M7-3 (`divModKnuth`) was 28.8× behind GMP. Re
 
 Three cumulative speedups: (1) u64-base Knuth div from M7-3.u64 (1.4-1.6× downstream) + (2) Lehmer's GCD speedup from M9 (2.9-4.6× over classical EEA) + (3) **M10 wider-window Lehmer** with u128 matrix entries (1.18-1.83× over standard Lehmer; 1.83× at the headline 2048-bit RSA size). Combined: ~14× faster than the original byte-base baseline at 2048-bit; gap to GMP narrowed from 30-60× to 4-6×.
 
-M10 here is the *intermediate* form — wider-window Lehmer with u128 matrix entries instead of u62, doubling the iterations batched per multi-precision matrix-apply. **True recursive half-GCD (matrix entries scaling to ~n/2 bits, divide-and-conquer recursion = O(M(n) log n) sub-quadratic)** is M11, deferred — substantial multi-day project. M10 alone closed the gap to within 4× of GMP at RSA-2048.
+M10 here is the *intermediate* form — wider-window Lehmer with u128 matrix entries instead of u62, doubling the iterations batched per multi-precision matrix-apply.
+
+**M11 update (2026-05-03):** True recursive HGCD primitive shipped (M11.1 iterative + M11.2.1 truly-recursive) and validated against EEA + M10 across {64..4096}-bit random pairs. **NOT wired into production**, however, because of a fundamental architectural mismatch: the asymptotic O(M(n) log n) advantage requires sub-quadratic M(n). With our Toom-3-class O(n^1.46) multiplication, the recursion-tree work ∑ M(n/2^i) sums to O(M(n)) — same complexity as the iterative form — while matrix coefficients DOUBLE per `composeOuter` and explode at deep recursion. Trial wire-up showed 60× regression at 8192-bit invMod. **M10 wider-window Lehmer remains practically optimal until FFT mul becomes viable for the inner ops** (gating on M6-4-E.3 hand-scheduled aarch64 inline asm or successor). The recursive primitive remains as a 3-way correctness oracle (invModLehmer / invModHGCD / invModHGCDRecursive all bit-equivalent) and as activation-ready code for when FFT mul lands.
 
 ### Division — full `Mp.divMod` (with BLIP encoding overhead) vs GMP — post-M-G
 
