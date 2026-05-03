@@ -129,18 +129,18 @@ The byte-base implementation from M7-3 (`divModKnuth`) was 28.8× behind GMP. Re
 
 Why it overshoots: aarch64 ARM scalar `udiv x` on a u128/u64 dividend is essentially single-cycle issue; GMP's `mp_limb_t` abstraction layer has per-limb overhead that doesn't have anywhere to amortize at this size. At much larger sizes (16K+ bit), GMP's more sophisticated quotient-digit estimation (Lehmer-style multi-precision divisor approximation) will likely retake the lead.
 
-### Modular inverse — `invMod` (M7-5 → M9 Lehmer)
+### Modular inverse — `invMod` (M7-5 → M9 Lehmer → M10 wider-window)
 
-| Bits | byte-base classical (ns) | u64-base classical (ns) | **u64-base + Lehmer (ns)** | GMP `mpz_invert` (ns) | Mp/GMP final |
-|---:|---:|---:|---:|---:|---:|
-| 256 | — | 19,140 | **6,560** | ~960 | 6.97× slower |
-| 512 | — | 48,130 | **14,510** | ~1,950 | 7.44× slower |
-| 1024 | 187,000 | 128,680 | **33,600** | 4,400 | 7.64× slower |
-| 2048 | 681,000 | 418,550 | **91,100** | 11,400 | 7.85× slower |
+| Bits | byte-classical (ns) | u64-classical (ns) | u64 + Lehmer (ns) | **u64 + M10 (ns)** | GMP `mpz_invert` (ns) | Mp/GMP final |
+|---:|---:|---:|---:|---:|---:|---:|
+| 256 | — | 19,140 | 6,560 | **5,870** | ~960 | 6.15× slower |
+| 512 | — | 48,130 | 14,510 | **12,350** | ~1,950 | 6.21× slower |
+| 1024 | 187,000 | 128,680 | 33,600 | **28,360** | 4,400 | 5.88× slower |
+| **2048** | 681,000 | 418,550 | 91,100 | **49,900** | 11,400 | **3.96×** slower |
 
-Two cumulative speedups: (1) u64-base Knuth div from M7-3.u64 (1.4-1.6× downstream) + (2) **Lehmer's GCD speedup from M9 (2.9-4.6× over classical EEA)**. Combined: ~5-7× faster than the original byte-base baseline; gap to GMP narrowed from 30-60× to 7-8×.
+Three cumulative speedups: (1) u64-base Knuth div from M7-3.u64 (1.4-1.6× downstream) + (2) Lehmer's GCD speedup from M9 (2.9-4.6× over classical EEA) + (3) **M10 wider-window Lehmer** with u128 matrix entries (1.18-1.83× over standard Lehmer; 1.83× at the headline 2048-bit RSA size). Combined: ~14× faster than the original byte-base baseline at 2048-bit; gap to GMP narrowed from 30-60× to 4-6×.
 
-Lehmer (Knuth Algorithm L) processes ~64 EEA iterations per Lehmer step by extracting a partial-quotient sequence from single-limb arithmetic, then applying a 2×2 update matrix to multi-limb (r0, r1, s0, s1) in one pair of multi-limb mul/sub each. The remaining 7-8× gap is what half-GCD (sub-quadratic divide-and-conquer) would close — substantial future engineering project (M10 in PLAN).
+M10 here is the *intermediate* form — wider-window Lehmer with u128 matrix entries instead of u62, doubling the iterations batched per multi-precision matrix-apply. **True recursive half-GCD (matrix entries scaling to ~n/2 bits, divide-and-conquer recursion = O(M(n) log n) sub-quadratic)** is M11, deferred — substantial multi-day project. M10 alone closed the gap to within 4× of GMP at RSA-2048.
 
 (All numbers are 3-run medians on Apple M-series. See `BENCHMARK_RESULTS.md` for the full multi-run history including each optimization milestone.)
 
