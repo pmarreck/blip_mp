@@ -44,6 +44,16 @@ int blip_mp_set_i64(blip_mp_t *mp, int64_t value);
 // Returns BLIP_MP_ERR_OUT_OF_RANGE if the value doesn't fit in i64.
 int blip_mp_get_i64(const blip_mp_t *mp, int64_t *out);
 
+// Replace `mp`'s value with `value` (unsigned). Returns 0 on success;
+// BLIP_MP_ERR_OUT_OF_RANGE if value > i64.max (the BLIP encoding stores
+// signed two's-complement payloads; values past i64.max would overflow).
+int blip_mp_set_u64(blip_mp_t *mp, uint64_t value);
+
+// Read `mp` as a uint64. Writes the value to *out and returns 0 on success.
+// Returns BLIP_MP_ERR_OUT_OF_RANGE if the value doesn't fit in u64 OR if it
+// is negative (callers wanting negative values should use blip_mp_get_i64).
+int blip_mp_get_u64(const blip_mp_t *mp, uint64_t *out);
+
 // Replace `mp`'s value with the BLIP-encoded byte slice [bytes, bytes+len).
 // Returns 0 on success, BLIP_MP_ERR_INVALID_INPUT if the encoding is malformed.
 int blip_mp_set_bytes(blip_mp_t *mp, const uint8_t *bytes, size_t len);
