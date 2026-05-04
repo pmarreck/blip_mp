@@ -176,9 +176,64 @@ The original M5-5 finding ("GMP's hand-tuned aarch64 asm gives ~0% advantage on 
 | `mpz_powm` | 2048 | 3832395 | 3726270 | **−2.8% (noasm FASTER)** |
 | `mpz_invert` | 2048 | 14216 | 14166 | +0.4% (essentially tied) |
 
-**Confirms M5-5 across the entire Mp surface**: the ~0% asm advantage on M-series isn't specific to add/sub/mul — it holds for div, powm, and invMod too. **Every one of our remaining gaps to GMP is purely algorithmic.**
+**Confirms M5-5 across the entire Mp surface on aarch64**: the ~0% asm advantage on M-series isn't specific to add/sub/mul — it holds for div, powm, and invMod too. **On M-series, every one of our remaining gaps to GMP is purely algorithmic.**
 
-(All numbers are 3-run medians on Apple M-series. See `BENCHMARK_RESULTS.md` for the full multi-run history including each optimization milestone.)
+(All M-series numbers are 3-run medians on Apple M-series. See `BENCHMARK_RESULTS.md` for the full multi-run history including each optimization milestone.)
+
+### Cross-platform validation: x86_64-linux Zen 4 (2026-05-04)
+
+Same `nix build .#bench` package run on a NixOS x86_64 Framework laptop (AMD Ryzen 9 7940HS, Zen 4 architecture, AVX-512 + AVX2 + BMI1/BMI2 + ADX, 16 cores, 6.12.85 kernel, idle box). Two real x86_64-linux compatibility fixes were needed first:
+
+1. `build.zig`: unit-test binary needed explicit `link_libc = true` (macOS auto-links libSystem; Linux requires explicit declaration for `std.c.clock_gettime` used in bench helpers).
+2. `flake.nix`: GMP `--disable-assembly` is incompatible with GMP's default x86_64 "fat build" (runtime CPU dispatch). Filter `--enable-fat` from `gmp-noasm` configure flags. Harmless on aarch64 (no fat build there).
+
+After fixes: **all 213 Zig unit tests + 12029 GMP cross-validation + C FFI smoke pass on x86_64-linux**. The library is bit-portable.
+
+#### The headline x86_64 finding: GMP-asm gives 1.17×–3.98× advantage on Zen 4
+
+In stark contrast to aarch64's ~0%, GMP's hand-tuned x86_64 asm IS load-bearing:
+
+| Op | Bits | GMP-asm (ns) | GMP-noasm (ns) | **asm advantage** |
+|---|---:|---:|---:|---:|
+| `mpz_add` | 1024 | 7.28 | 13.13 | **1.80× (asm 80% faster)** |
+| `mpz_add` | 4096 | 18.99 | 51.55 | **2.71×** |
+| `mpz_add` | 8192 | 33.43 | 105.10 | **3.14×** |
+| `mpz_add` | 32768 | 138.33 | 433.68 | **3.14×** |
+| `mpz_mul` | 1024 | 122.5 | 456.2 | **3.72×** |
+| `mpz_mul` | 4096 | 1221.5 | 4596.2 | **3.76×** |
+| `mpz_mul` | 8192 | 3643.7 | 14142.8 | **3.88×** |
+| `mpz_mul` | 16384 | 11002 | 42683 | **3.88×** |
+| `mpz_tdiv_qr` | 2048/1024 | 216.6 | 593.2 | **2.74×** |
+| `mpz_tdiv_qr` | 8192/4096 | 2210 | 6930 | **3.14×** |
+| `mpz_powm` | 2048 | 1914592 | 6602785 | **3.45×** |
+| `mpz_powm` | 3072 | 5995578 | 21407709 | **3.57×** |
+
+**Architectural conclusion:** GMP's 1990s+-accumulated x86 asm tuning (`mpn` inner loops with hand-scheduled `adc/sbb/mul`/`mulx`/`adx`/`adox` chains, AVX2/AVX-512 paths) IS doing real work on x86_64 — 2-4× speedup over the C reference on Zen 4. The M5-5 conclusion ("every gap is purely algorithmic, no asm needed") **only holds on aarch64**. On x86_64, GMP's asm advantage is a real engineering moat.
+
+#### Same-platform comparison: blip_mp (pure-Zig, no asm) vs both GMP variants
+
+For the storage-paradigm question (blip-bytes vs limb-array), the GMP-noasm baseline is the fair comparison:
+
+| Op | Bits | blip_mp (ns) | GMP-asm (ns) | GMP-noasm (ns) | blip / GMP-asm | **blip / GMP-noasm** |
+|---|---:|---:|---:|---:|---:|---:|
+| immediate add | L=0 | 3.36 | 4.44 | 4.90 | **0.76× ✅** | **0.69× ✅** (blip 1.46× faster vs noasm) |
+| add | 1024 | 11.65 | 7.28 | 13.13 | 1.60× | **0.89× ✅** (blip 12% faster vs noasm) |
+| add | 4096 | 39.45 | 18.99 | 51.55 | 2.08× | **0.77× ✅** (blip 30% faster vs noasm) |
+| add | 8192 | 70.18 | 33.43 | 105.10 | 2.10× | **0.67× ✅** (blip 50% faster vs noasm) |
+| mul | 1024 | 253.2 | 122.5 | 456.2 | 2.07× | **0.55× ✅** (blip 1.80× faster vs noasm) |
+| mul | 2048 | 865.3 | 386.5 | 1440.9 | 2.24× | **0.60× ✅** (blip 1.67× faster vs noasm) |
+| mul | 8192 | 8967 | 3644 | 14143 | 2.46× | **0.63× ✅** (blip 1.58× faster vs noasm) |
+| powm | 2048 | 3806915 | 1914592 | 6602785 | 1.99× | **0.58× ✅** (blip 1.73× faster vs noasm) |
+| divMod | 2048 | 452.8 | 216.6 | 593.2 | 2.09× | **0.76× ✅** (blip 31% faster vs noasm) |
+| invMod | 2048 | 48894 | 10357 | 17044 | 4.72× | **2.87× slower** (algorithm gap, see M11.2-PROD) |
+
+**Two clean conclusions on x86_64:**
+
+1. **The BLIP-storage paradigm wins again on x86_64** — blip-pure-Zig beats GMP-noasm at almost every size and op, with ratios reaching 1.5×–1.8× faster than the GMP C reference for mul, powm, and large add. The architectural advantage (storage-as-wire-form, sign-extended inline tail, byte-direct chunked arith, Möller-Granlund div, Mont-form powm) is platform-independent.
+
+2. **GMP-asm-x86_64 is currently the practical winner on x86_64** for tier-3 sizes — GMP's hand-tuned asm overpowers our pure-Zig codegen by 1.5–4×. Closing this gap on x86_64 would require either (a) hand-scheduled aarch64-style + x86_64-style inline asm in our codebase (substantial maintenance burden, parallel to M6-4-E.3) or (b) Zig's compiler getting better at emitting `adcx`/`adox` chains and AVX2/AVX-512 SIMD for big-integer code.
+
+The most-deployed crypto operation worldwide — RSA-2048 powm — runs at ~3.8 ms in blip_mp on Zen 4 vs ~1.9 ms in GMP-asm. blip_mp's RSA-2048 still beats GMP-asm by 13% on M-series; on Zen 4 the same code is 2× behind. **Hardware platform fundamentally re-orders the win/loss matrix.**
 
 ---
 

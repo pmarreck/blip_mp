@@ -63,7 +63,18 @@ We're slower than GMP at:
 
 We built a second GMP variant with `--disable-assembly` and ran the same benchmark. The asm advantage is essentially zero across all our test sizes. At 4096-bit and 32768-bit add, **the C reference code is actually faster than the asm.** Modern clang `-O3` generates near-optimal ADCS chains from C `__builtin_add_overflow` that the hand-tuned asm can't beat — and the asm becomes an opaque call boundary that breaks inlining.
 
-**Implication:** every gap to GMP is purely algorithmic. We don't need inline asm. We need FFT mul and tighter bookkeeping. Both are pure-Zig achievable.
+**Implication on aarch64:** every gap to GMP is purely algorithmic. We don't need inline asm. We need FFT mul and tighter bookkeeping. Both are pure-Zig achievable.
+
+### Cross-platform: x86_64 (AMD Zen 4) tells a different story
+
+We ran the same `nix build .#bench` on a NixOS x86_64 Framework laptop (AMD Ryzen 9 7940HS — Zen 4 with full AVX-512, AVX2, BMI/ADX). Two clean findings:
+
+1. **GMP-asm is load-bearing on x86_64**: 1.65–3.88× faster than GMP-noasm depending on size/op. Decades of hand-tuned `mpn_*` chains with `adcx`/`adox`/`mulx` + AVX2/AVX-512 paths IS doing real work on x86_64 — the M-series finding does NOT generalize.
+2. **The BLIP-storage paradigm still wins on x86_64**: compared against GMP-noasm-x86_64 (the storage-paradigm-only baseline), pure-Zig blip_mp wins at 22+ size/op pairs — including 1.46× faster on immediate add, 1.30–1.68× faster on add at 4K–32K-bit, 1.5–1.8× faster on mul at 1K–8K-bit, and 1.73× faster on RSA-2048 powm.
+
+So on x86_64 vs **GMP-asm**, blip_mp wins all tier-0/1 sizes but loses tier-3 by 1.5–4× (= the GMP-asm advantage above). Closing that on x86_64 would require equivalent hand-asm work in our codebase, OR upstream Zig codegen improvements for `adcx`/`adox` chains and AVX big-int SIMD. Full numbers in `BENCHMARK_RESULTS.md` Run 18 and `RESULTS.md` "Cross-platform validation" section.
+
+**Cross-platform conclusion:** the architectural advantage of BLIP-storage + sign-extended SBO + byte-direct chunked arithmetic + Möller-Granlund div + Mont-form powm is **platform-independent**. On M-series it produces a clean win-on-most-things vs GMP. On Zen 4 it produces a clean win-on-most-things vs GMP-noasm. The GMP-asm gap on x86_64 is a separate axis (hand-tuned asm vs pure-Zig codegen) — orthogonal to the storage paradigm.
 
 ---
 
@@ -127,14 +138,14 @@ Full details in [`CODE_MINIMAP.md`](CODE_MINIMAP.md), benchmark history in [`BEN
 **What it isn't (yet):**
 - **FFT multiplication is correctness-shipped but gated off** — full single-prime NTT + two-prime CRT + NEON-SIMD vectorized butterflies live in `src/fft.zig`, all bit-identical to GMP across 8240/8240 cross-checks at sizes up to 256K-bit. But constant factors keep Toom-3 ahead at every operand size in our supported range (M-series-specific finding: pure-NEON Montgomery integrates slower than the existing scalar-inside-vector form because it crowds the NEON pipe and starves M4's dual scalar mul pipes). The 13–15% remaining gap needs alloc-elimination + inline asm, planned in M6-4-E.
 - **Modular inverse lags GMP** by ~4-6× at 1024-2048 bit (down from 29-38× before M9 Lehmer; further down from 7-8× after M10 wider-window Lehmer). Headline: 2048-bit invMod is now 3.96× behind GMP (was 7.85× pre-M10). Closing the remainder requires true recursive half-GCD, planned as M11.
-- **Single platform validated** — numbers above are all aarch64-darwin (Apple M-series). x86_64 may shift the picture, especially around the asm-vs-clang result.
+- **Two platforms validated** — aarch64-darwin (Apple M-series) is the headline, x86_64-linux (AMD Zen 4 with AVX-512) is the cross-check. Library is bit-portable: 213 unit tests + 12029 GMP cross-validations + C FFI smoke pass on both. The asm-vs-clang result is M-series-specific; on x86_64 GMP's hand-asm is genuinely load-bearing (1.65–3.88× over GMP-noasm). Windows (x86_64 + aarch64) is covered by the Garnix CI cross-build matrix.
 - **No C FFI yet** — public surface is Zig-only. Adding `include/blip_mp.h` is a clear extension.
 - **Not optimized for non-aligned operand sizes** — `tier3Op` works on any size but is fastest when payload lengths are multiples of 8 bytes (which most cryptographic sizes are).
 
 **What it isn't trying to be:**
 - Not a full GMP replacement. No `mpf_t` (floats), no `mpq_t` (rationals), no `mpfr` (extended-precision floats).
 - Not chasing huge-number records. GMP's per-arch asm tuning is decades of work; we stop being competitive at 64K+ bit operands until FFT lands.
-- Not asm-tuned. The M5-5 controlled experiment showed asm gives ~0% on M-series. We may need to revisit on x86_64 if the picture differs.
+- Not asm-tuned. The M5-5 controlled experiment showed asm gives ~0% on M-series — and we beat GMP-asm at 22+ sizes there anyway. **On x86_64 the picture differs**: GMP-asm gives 1.65–3.88× over GMP-noasm on Zen 4, so blip_mp loses tier-3 to GMP-asm on x86_64 (but still beats GMP-noasm-x86_64, the storage-paradigm baseline). Closing the x86_64 GMP-asm gap is future work — would require equivalent hand-asm or Zig compiler improvements for `adcx`/`adox` + AVX big-int codegen.
 
 ---
 
