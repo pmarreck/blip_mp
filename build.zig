@@ -83,6 +83,11 @@ pub fn build(b: *std.Build) void {
 			.root_source_file = b.path("src/blip_mp.zig"),
 			.target = target,
 			.optimize = optimize,
+			// Tests reference std.c.clock_gettime via the bench-only monoNanos
+			// helpers in tier3.zig (and equivalents). On aarch64-darwin Zig
+			// auto-links libSystem; on linux/x86_64 libc must be explicit.
+			// Cheap to always link for unit tests — no runtime cost on macOS.
+			.link_libc = true,
 		}),
 	});
 	const run_unit_tests = b.addRunArtifact(unit_tests);

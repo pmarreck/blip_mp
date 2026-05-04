@@ -28,8 +28,17 @@
 				# inner mpn_* loops use only the C reference code. This isolates
 				# the BLIP-vs-limb-storage question from Zig-vs-aarch64-asm.
 				# blip_mp vs gmp-noasm = controlled storage-paradigm comparison.
+				# On x86_64, GMP's default 'fat build' (runtime CPU dispatch
+				# across Intel/AMD micro-architectures) is incompatible with
+				# --disable-assembly — configure errors with "when doing a fat
+				# build, disabling assembly will not work". Filter out
+				# --enable-fat from the inherited configureFlags before adding
+				# --disable-assembly. Harmless on aarch64 (no fat build there).
 				gmp-noasm = pkgs.gmp.overrideAttrs (old: {
-					configureFlags = (old.configureFlags or []) ++ [ "--disable-assembly" ];
+					configureFlags = (builtins.filter
+						(f: f != "--enable-fat")
+						(old.configureFlags or []))
+						++ [ "--disable-assembly" ];
 				});
 
 				commonBuild = ''
