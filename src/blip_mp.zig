@@ -10,6 +10,7 @@ pub const bignum = @import("bignum.zig");
 pub const tier3 = @import("tier3.zig");
 pub const fft = @import("fft.zig");
 pub const bitwise = @import("bitwise.zig");
+pub const sign = @import("sign.zig");
 pub const Mp = bignum.Mp;
 
 test {
