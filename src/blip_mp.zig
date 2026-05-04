@@ -18,7 +18,10 @@ pub const primes = @import("primes.zig");
 pub const scan = @import("scan.zig");
 pub const gcd = @import("gcd.zig");
 pub const random_mp = @import("random_mp.zig");
+pub const string_io = @import("string_io.zig");
+pub const fp = @import("fp.zig");
 pub const Mp = bignum.Mp;
+pub const Fp = fp.Fp;
 
 test {
 	std.testing.refAllDecls(@This());

@@ -113,6 +113,113 @@ int blip_mp_powm(blip_mp_t *r,
 // Returns BLIP_MP_ERR_DIVISION_BY_ZERO if m == 0.
 int blip_mp_inv_mod(blip_mp_t *r, const blip_mp_t *a, const blip_mp_t *m);
 
+// --- Bitwise (M12-A1) --------------------------------------------------
+// Two's-complement semantics: operands behave as conceptually-infinite-
+// precision signed integers, sign-extended past their stored bytes.
+// Matches GMP mpz_and / mpz_ior / mpz_xor / mpz_com / mpz_mul_2exp /
+// mpz_fdiv_q_2exp respectively.
+
+int blip_mp_and(blip_mp_t *r, const blip_mp_t *a, const blip_mp_t *b);
+int blip_mp_or(blip_mp_t *r, const blip_mp_t *a, const blip_mp_t *b);
+int blip_mp_xor(blip_mp_t *r, const blip_mp_t *a, const blip_mp_t *b);
+int blip_mp_not(blip_mp_t *r, const blip_mp_t *a);  // ~a == -(a+1)
+int blip_mp_shl(blip_mp_t *r, const blip_mp_t *a, size_t n);
+int blip_mp_shr(blip_mp_t *r, const blip_mp_t *a, size_t n);  // floor / arithmetic
+
+// --- Sign / abs / fits (M12-A2) ----------------------------------------
+
+int blip_mp_neg(blip_mp_t *r, const blip_mp_t *a);
+int blip_mp_abs(blip_mp_t *r, const blip_mp_t *a);
+// 1 if value fits in the given C type, 0 otherwise. No error returns.
+int blip_mp_fits_i64(const blip_mp_t *mp);
+int blip_mp_fits_u64(const blip_mp_t *mp);
+int blip_mp_fits_i32(const blip_mp_t *mp);
+int blip_mp_fits_u32(const blip_mp_t *mp);
+
+// --- popcount / scan (M12-A6) ------------------------------------------
+// Hamming weight + first-bit search. Matches GMP mpz_popcount / mpz_scan0
+// / mpz_scan1 semantics: SIZE_MAX is the not-found / infinite-1s sentinel.
+
+size_t blip_mp_popcount(const blip_mp_t *mp);   // SIZE_MAX for negatives
+size_t blip_mp_scan0(const blip_mp_t *mp, size_t start);
+size_t blip_mp_scan1(const blip_mp_t *mp, size_t start);
+
+// --- GCD / LCM (M12-A4) ------------------------------------------------
+// Both always return a non-negative result. gcd(0,0)=0, lcm(0,x)=0.
+
+int blip_mp_gcd(blip_mp_t *r, const blip_mp_t *a, const blip_mp_t *b);
+int blip_mp_lcm(blip_mp_t *r, const blip_mp_t *a, const blip_mp_t *b);
+
+// --- Random (M12-A5) ---------------------------------------------------
+// Opaque RNG handle wrapping a deterministic xoroshiro128 (std.Random
+// .DefaultPrng). Caller seeds it explicitly — the library does NOT
+// auto-seed from /dev/urandom. For cryptographic use, seed from a
+// system-provided entropy source first.
+
+typedef struct blip_mp_rng_t blip_mp_rng_t;
+
+// Allocate + seed an RNG. Returns NULL on OOM.
+blip_mp_rng_t *blip_mp_rng_create(uint64_t seed);
+void blip_mp_rng_destroy(blip_mp_rng_t *rng);
+
+// Uniform random integer in [0, 2^bits).
+int blip_mp_set_random_bits(blip_mp_t *mp, blip_mp_rng_t *rng, size_t bits);
+
+// Uniform random integer in [0, n) via rejection sampling. n must be > 0.
+int blip_mp_set_random_below(blip_mp_t *mp, blip_mp_rng_t *rng, const blip_mp_t *n);
+
+// --- String I/O (M12-A3) -----------------------------------------------
+// Bases 2, 8, 10, 16 supported. Negative values are formatted with a
+// leading '-'. setStr accepts the same form on input.
+
+// Parse `len` bytes starting at `str` as an integer in `base`.
+int blip_mp_set_str(blip_mp_t *mp, const char *str, size_t len, uint8_t base);
+
+// Format `mp` in `base` into the caller's buffer. `*required` is always
+// written with the length the formatted string occupies (excluding NUL).
+// If buf_len < required, returns BLIP_MP_ERR_BUFFER_TOO_SMALL. When
+// buf_len > required, the buffer is NUL-terminated for C convenience.
+int blip_mp_to_string(const blip_mp_t *mp,
+                      uint8_t base,
+                      char *buf,
+                      size_t buf_len,
+                      size_t *required);
+
+// --- Primality (M13-B1) ------------------------------------------------
+// Miller-Rabin probabilistic primality test (with deterministic small-
+// prime sieve trial division first). `witnesses` controls confidence:
+// per-witness probability of a false-positive is 1/4 worst-case, so
+// 20 witnesses → < 1 in 10^12 false-positive rate.
+
+int blip_mp_is_probably_prime(const blip_mp_t *mp,
+                              blip_mp_rng_t *rng,
+                              uint32_t witnesses,
+                              int *out);  // 1 if probably prime, 0 if composite
+
+// Smallest prime > n. Uses 20 internal witnesses.
+int blip_mp_next_prime(blip_mp_t *out, const blip_mp_t *n, blip_mp_rng_t *rng);
+
+// --- Roots (M13-B2) ----------------------------------------------------
+
+int blip_mp_isqrt(blip_mp_t *out, const blip_mp_t *n);
+int blip_mp_isqrt_rem(blip_mp_t *root, blip_mp_t *rem, const blip_mp_t *n);
+// floor(n^(1/k)). Allows odd k for negative n (root is negative).
+int blip_mp_iroot(blip_mp_t *out, const blip_mp_t *n, uint32_t k);
+int blip_mp_is_perfect_square(const blip_mp_t *mp);
+
+// --- Symbols (M13-B3) --------------------------------------------------
+// Jacobi / Legendre / Kronecker symbols. *out receives one of {-1, 0, +1}.
+
+int blip_mp_jacobi(const blip_mp_t *a, const blip_mp_t *n, int *out);
+int blip_mp_legendre(const blip_mp_t *a, const blip_mp_t *p, int *out);
+int blip_mp_kronecker(const blip_mp_t *a, const blip_mp_t *n, int *out);
+
+// --- Combinatorial (M13-B4) --------------------------------------------
+
+int blip_mp_factorial(blip_mp_t *out, uint32_t n);
+int blip_mp_binomial(blip_mp_t *out, uint32_t n, uint32_t k);
+int blip_mp_fibonacci(blip_mp_t *out, uint32_t n);
+
 // --- Error codes -------------------------------------------------------
 
 #define BLIP_MP_OK                    0
@@ -122,6 +229,8 @@ int blip_mp_inv_mod(blip_mp_t *r, const blip_mp_t *a, const blip_mp_t *m);
 #define BLIP_MP_ERR_INVALID_INPUT     4
 #define BLIP_MP_ERR_OUT_OF_RANGE      5
 #define BLIP_MP_ERR_NO_INVERSE        6
+#define BLIP_MP_ERR_NEGATIVE_OPERAND  7
+#define BLIP_MP_ERR_BUFFER_TOO_SMALL  8
 
 #ifdef __cplusplus
 }
