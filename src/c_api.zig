@@ -24,6 +24,8 @@ pub const BLIP_MP_ERR_NOT_IMPLEMENTED: c_int = 3;
 pub const BLIP_MP_ERR_INVALID_INPUT: c_int = 4;
 pub const BLIP_MP_ERR_OUT_OF_RANGE: c_int = 5;
 pub const BLIP_MP_ERR_NO_INVERSE: c_int = 6;
+pub const BLIP_MP_ERR_NEGATIVE_OPERAND: c_int = 7;
+pub const BLIP_MP_ERR_BUFFER_TOO_SMALL: c_int = 8;
 
 /// Translate a Zig error from any of `Mp`'s error sets into the C code
 /// surface. Centralised so every export uses the same mapping rules.
@@ -34,7 +36,10 @@ fn mapError(err: anyerror) c_int {
 		error.NotImplementedTier3, error.NegativeExponentNotSupported => BLIP_MP_ERR_NOT_IMPLEMENTED,
 		error.UnsignedTooLarge, error.OutputBufferTooSmall, error.TierOverflow => BLIP_MP_ERR_OUT_OF_RANGE,
 		error.SentinelValue, error.ValueIsNegative => BLIP_MP_ERR_OUT_OF_RANGE,
+		error.NegativeOperand => BLIP_MP_ERR_NEGATIVE_OPERAND,
 		error.BufferTooSmall, error.UnexpectedEndOfInput, error.OverlongEncoding => BLIP_MP_ERR_INVALID_INPUT,
+		error.EmptyString, error.InvalidDigit, error.UnsupportedBase => BLIP_MP_ERR_INVALID_INPUT,
+		error.ZeroExponent, error.ModulusMustBeOddPositive => BLIP_MP_ERR_INVALID_INPUT,
 		else => BLIP_MP_ERR_INVALID_INPUT,
 	};
 }
@@ -176,6 +181,225 @@ export fn blip_mp_inv_mod(r: *Mp, a: *const Mp, m: *const Mp) c_int {
 	return if (ok) BLIP_MP_OK else BLIP_MP_ERR_NO_INVERSE;
 }
 
+// --- Bitwise (M12-A1) ---------------------------------------------------
+
+export fn blip_mp_and(r: *Mp, a: *const Mp, b: *const Mp) c_int {
+	blip_mp.bitwise.bitwiseAnd(r, a, b) catch |e| return mapError(e);
+	return BLIP_MP_OK;
+}
+
+export fn blip_mp_or(r: *Mp, a: *const Mp, b: *const Mp) c_int {
+	blip_mp.bitwise.bitwiseOr(r, a, b) catch |e| return mapError(e);
+	return BLIP_MP_OK;
+}
+
+export fn blip_mp_xor(r: *Mp, a: *const Mp, b: *const Mp) c_int {
+	blip_mp.bitwise.bitwiseXor(r, a, b) catch |e| return mapError(e);
+	return BLIP_MP_OK;
+}
+
+export fn blip_mp_not(r: *Mp, a: *const Mp) c_int {
+	blip_mp.bitwise.bitwiseNot(r, a) catch |e| return mapError(e);
+	return BLIP_MP_OK;
+}
+
+export fn blip_mp_shl(r: *Mp, a: *const Mp, n: usize) c_int {
+	blip_mp.bitwise.shl(r, a, n) catch |e| return mapError(e);
+	return BLIP_MP_OK;
+}
+
+export fn blip_mp_shr(r: *Mp, a: *const Mp, n: usize) c_int {
+	blip_mp.bitwise.shr(r, a, n) catch |e| return mapError(e);
+	return BLIP_MP_OK;
+}
+
+// --- Sign / abs / fits (M12-A2) -----------------------------------------
+
+export fn blip_mp_neg(r: *Mp, a: *const Mp) c_int {
+	blip_mp.sign.neg(r, a) catch |e| return mapError(e);
+	return BLIP_MP_OK;
+}
+
+export fn blip_mp_abs(r: *Mp, a: *const Mp) c_int {
+	blip_mp.sign.abs(r, a) catch |e| return mapError(e);
+	return BLIP_MP_OK;
+}
+
+export fn blip_mp_fits_i64(mp: *const Mp) c_int {
+	return if (blip_mp.sign.fitsI64(mp)) 1 else 0;
+}
+
+export fn blip_mp_fits_u64(mp: *const Mp) c_int {
+	return if (blip_mp.sign.fitsU64(mp)) 1 else 0;
+}
+
+export fn blip_mp_fits_i32(mp: *const Mp) c_int {
+	return if (blip_mp.sign.fitsI32(mp)) 1 else 0;
+}
+
+export fn blip_mp_fits_u32(mp: *const Mp) c_int {
+	return if (blip_mp.sign.fitsU32(mp)) 1 else 0;
+}
+
+// --- popcount / scan (M12-A6) -------------------------------------------
+
+export fn blip_mp_popcount(mp: *const Mp) usize {
+	return blip_mp.scan.popcount(mp);
+}
+
+export fn blip_mp_scan0(mp: *const Mp, start: usize) usize {
+	return blip_mp.scan.scan0(mp, start);
+}
+
+export fn blip_mp_scan1(mp: *const Mp, start: usize) usize {
+	return blip_mp.scan.scan1(mp, start);
+}
+
+// --- GCD / LCM (M12-A4) -------------------------------------------------
+
+export fn blip_mp_gcd(r: *Mp, a: *const Mp, b: *const Mp) c_int {
+	blip_mp.gcd.gcd(r, a, b) catch |e| return mapError(e);
+	return BLIP_MP_OK;
+}
+
+export fn blip_mp_lcm(r: *Mp, a: *const Mp, b: *const Mp) c_int {
+	blip_mp.gcd.lcm(r, a, b) catch |e| return mapError(e);
+	return BLIP_MP_OK;
+}
+
+// --- Random (M12-A5) ----------------------------------------------------
+//
+// Opaque RNG handle backed by std.Random.DefaultPrng. Allocated on the heap
+// so it has stable identity / lifetime independent of the caller's stack.
+
+const Rng = std.Random.DefaultPrng;
+
+export fn blip_mp_rng_create(seed: u64) ?*Rng {
+	const r = allocator.create(Rng) catch return null;
+	r.* = Rng.init(seed);
+	return r;
+}
+
+export fn blip_mp_rng_destroy(rng: ?*Rng) void {
+	if (rng) |r| allocator.destroy(r);
+}
+
+export fn blip_mp_set_random_bits(mp: *Mp, rng: *Rng, bits: usize) c_int {
+	blip_mp.random_mp.setRandomBits(mp, rng.random(), bits) catch |e| return mapError(e);
+	return BLIP_MP_OK;
+}
+
+export fn blip_mp_set_random_below(mp: *Mp, rng: *Rng, n: *const Mp) c_int {
+	blip_mp.random_mp.setRandomBelow(mp, rng.random(), n) catch |e| return mapError(e);
+	return BLIP_MP_OK;
+}
+
+// --- String I/O (M12-A3) ------------------------------------------------
+
+export fn blip_mp_set_str(mp: *Mp, str: [*]const u8, str_len: usize, base: u8) c_int {
+	const slice = str[0..str_len];
+	blip_mp.string_io.setStr(mp, slice, base) catch |e| return mapError(e);
+	return BLIP_MP_OK;
+}
+
+/// Format mp in `base` (2/8/10/16) into the caller's buffer.
+/// Always writes the required length to *required (= length of the formatted
+/// string, NOT including a trailing NUL). If buf_len < required, returns
+/// BLIP_MP_ERR_BUFFER_TOO_SMALL and the buffer contents are unspecified —
+/// caller should reallocate to *required and retry. If buf_len >= required+1
+/// the result is NUL-terminated for C convenience.
+export fn blip_mp_to_string(
+	mp: *const Mp,
+	base: u8,
+	buf: [*]u8,
+	buf_len: usize,
+	required: *usize,
+) c_int {
+	const s = blip_mp.string_io.toString(mp, allocator, base) catch |e| return mapError(e);
+	defer allocator.free(s);
+	required.* = s.len;
+	if (buf_len < s.len) return BLIP_MP_ERR_BUFFER_TOO_SMALL;
+	@memcpy(buf[0..s.len], s);
+	if (buf_len > s.len) buf[s.len] = 0; // NUL-terminate when room
+	return BLIP_MP_OK;
+}
+
+// --- Primality (M13-B1) -------------------------------------------------
+
+export fn blip_mp_is_probably_prime(
+	mp: *const Mp,
+	rng: *Rng,
+	witnesses: u32,
+	out: *c_int,
+) c_int {
+	const verdict = blip_mp.primes.isProbablyPrime(mp, allocator, rng.random(), witnesses) catch |e| return mapError(e);
+	out.* = if (verdict) 1 else 0;
+	return BLIP_MP_OK;
+}
+
+export fn blip_mp_next_prime(out: *Mp, n: *const Mp, rng: *Rng) c_int {
+	blip_mp.primes.nextPrime(out, n, allocator, rng.random()) catch |e| return mapError(e);
+	return BLIP_MP_OK;
+}
+
+// --- Roots (M13-B2) -----------------------------------------------------
+
+export fn blip_mp_isqrt(out: *Mp, n: *const Mp) c_int {
+	blip_mp.roots.isqrt(out, n) catch |e| return mapError(e);
+	return BLIP_MP_OK;
+}
+
+export fn blip_mp_isqrt_rem(root: *Mp, rem: *Mp, n: *const Mp) c_int {
+	blip_mp.roots.isqrtRem(root, rem, n) catch |e| return mapError(e);
+	return BLIP_MP_OK;
+}
+
+export fn blip_mp_iroot(out: *Mp, n: *const Mp, k: u32) c_int {
+	blip_mp.roots.iroot(out, n, k) catch |e| return mapError(e);
+	return BLIP_MP_OK;
+}
+
+export fn blip_mp_is_perfect_square(mp: *const Mp) c_int {
+	return if (blip_mp.roots.isPerfectSquare(mp)) 1 else 0;
+}
+
+// --- Symbols (M13-B3) ---------------------------------------------------
+
+export fn blip_mp_jacobi(a: *const Mp, n: *const Mp, out: *c_int) c_int {
+	const v = blip_mp.symbols.jacobi(a, n, allocator) catch |e| return mapError(e);
+	out.* = @intCast(v);
+	return BLIP_MP_OK;
+}
+
+export fn blip_mp_legendre(a: *const Mp, p: *const Mp, out: *c_int) c_int {
+	const v = blip_mp.symbols.legendre(a, p, allocator) catch |e| return mapError(e);
+	out.* = @intCast(v);
+	return BLIP_MP_OK;
+}
+
+export fn blip_mp_kronecker(a: *const Mp, n: *const Mp, out: *c_int) c_int {
+	const v = blip_mp.symbols.kronecker(a, n, allocator) catch |e| return mapError(e);
+	out.* = @intCast(v);
+	return BLIP_MP_OK;
+}
+
+// --- Combinatorial (M13-B4) ---------------------------------------------
+
+export fn blip_mp_factorial(out: *Mp, n: u32) c_int {
+	blip_mp.combinatorial.factorial(out, n) catch |e| return mapError(e);
+	return BLIP_MP_OK;
+}
+
+export fn blip_mp_binomial(out: *Mp, n: u32, k: u32) c_int {
+	blip_mp.combinatorial.binomial(out, n, k) catch |e| return mapError(e);
+	return BLIP_MP_OK;
+}
+
+export fn blip_mp_fibonacci(out: *Mp, n: u32) c_int {
+	blip_mp.combinatorial.fibonacci(out, n) catch |e| return mapError(e);
+	return BLIP_MP_OK;
+}
+
 // Force the linker to retain every exported symbol when compiled as part
 // of a library (otherwise ReleaseFast may strip unreferenced exports).
 comptime {
@@ -201,4 +425,40 @@ comptime {
 	_ = blip_mp_div_mod;
 	_ = blip_mp_powm;
 	_ = blip_mp_inv_mod;
+	// M12 / M13 additions
+	_ = blip_mp_and;
+	_ = blip_mp_or;
+	_ = blip_mp_xor;
+	_ = blip_mp_not;
+	_ = blip_mp_shl;
+	_ = blip_mp_shr;
+	_ = blip_mp_neg;
+	_ = blip_mp_abs;
+	_ = blip_mp_fits_i64;
+	_ = blip_mp_fits_u64;
+	_ = blip_mp_fits_i32;
+	_ = blip_mp_fits_u32;
+	_ = blip_mp_popcount;
+	_ = blip_mp_scan0;
+	_ = blip_mp_scan1;
+	_ = blip_mp_gcd;
+	_ = blip_mp_lcm;
+	_ = blip_mp_rng_create;
+	_ = blip_mp_rng_destroy;
+	_ = blip_mp_set_random_bits;
+	_ = blip_mp_set_random_below;
+	_ = blip_mp_set_str;
+	_ = blip_mp_to_string;
+	_ = blip_mp_is_probably_prime;
+	_ = blip_mp_next_prime;
+	_ = blip_mp_isqrt;
+	_ = blip_mp_isqrt_rem;
+	_ = blip_mp_iroot;
+	_ = blip_mp_is_perfect_square;
+	_ = blip_mp_jacobi;
+	_ = blip_mp_legendre;
+	_ = blip_mp_kronecker;
+	_ = blip_mp_factorial;
+	_ = blip_mp_binomial;
+	_ = blip_mp_fibonacci;
 }

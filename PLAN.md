@@ -259,6 +259,69 @@ Each item: (a) Mp method in `src/bignum.zig`, (b) C FFI `export fn` + header dec
 - [ ] **M12-A5 — Random**: `Mp.setRandomBits(rng, bits)` + `Mp.setRandomBelow(rng, n)` (uniform in [0, n)). Use `std.Random` interface (caller provides). Cross-check via `mpz_urandomb`/`mpz_urandomm` semantics (modulo deterministic with seeded RNG comparison is pointless; instead test distribution properties: bitLen ≤ bits, < n, never produces n itself, hits all bit positions).
 - [ ] **M12-A6 — Misc small**: `Mp.popcount` (Hamming weight; for negatives, count of 0-bits in two's-complement infinite extension is `mpz_popcount` semantics — return `usize.max` per GMP), `Mp.scan0(start)` / `Mp.scan1(start)` (find first 0-bit / 1-bit at or after position).
 
+## Milestone 14 — Fixed-point arithmetic ("the IEEE754 disruption")
+
+**Goal:** arbitrary-precision **exact** fixed-point arithmetic on top of `Mp`. No NaN, no ±∞, no signed zero, no denormals, no silent rounding. Every operation that can't be represented exactly either errors or returns an explicit (quotient, remainder) pair. Built for finance, exact decimal computation, fixed-point DSP/graphics, and any domain where IEEE754's "0.1 + 0.2 ≠ 0.3" is unacceptable.
+
+**Architecture: dynamic-precision per-value.**
+```zig
+pub const Fp = struct {
+    mantissa: Mp,        // arbitrary-precision integer
+    scale:    i32,       // exponent (mantissa * base^scale)
+    base:     enum { binary, decimal },
+};
+```
+Mirrors blip_mp's "variable-length self-describing storage" philosophy: each value carries its own scale. **Binary base** = fast ×2^n shifts (DSP, graphics, Q-format). **Decimal base** = bit-exact ×10^n (finance, human-facing values, no representation drift).
+
+**Foundational rule: no silent precision loss.** Division takes a precision budget (max scale digits to compute) and either errors on inexact-overflow OR returns `(quotient, remainder)` so the caller sees the exact tail. Calling code makes every rounding decision explicit.
+
+### M14-1 — Type & lifecycle  →  src/fp.zig
+- [ ] `Fp` struct + `init(allocator) Fp` + `deinit()`
+- [ ] `setI64(v, scale, base)` — set from raw mantissa+scale
+- [ ] `setRationalDecimal(num, den)` — `2/5 → 0.4 base=10 scale=-1`; error if exact decimal expansion is non-terminating (i.e., den has prime factors other than 2 and 5)
+- [ ] `setRationalBinary(num, den)` — same but for base=2 (den's only prime factor must be 2)
+- [ ] `setStr(s)` — parse `"3.14"` (auto-detect base), `"-0.0001"`, `"1e-9"`, `"0xFF.A0"` (hex fp), etc.
+
+### M14-2 — Comparison + canonical form
+- [ ] `cmp(a, b)` — align scales (pick larger), compare mantissas. Same-base only.
+- [ ] `eq(a, b)` — true exact equality (no -0.0 == 0.0 nonsense; mantissa+scale must match in canonical form)
+- [ ] `canonicalize(self)` — strip trailing zeros from mantissa AND from fractional scale; e.g., `12.300 base=10 scale=-3` → `123 base=10 scale=-1`. Eq depends on this.
+
+### M14-3 — Add / sub / mul (the easy three)
+- [ ] `add(out, a, b)` — operands must share a base. Align scales (shift the smaller-scale operand up by `Δscale` × `base^Δscale` mul on its mantissa). Add mantissas. Output scale = min(a.scale, b.scale).
+- [ ] `sub(out, a, b)` — same alignment, subtract.
+- [ ] `mul(out, a, b)` — multiply mantissas, sum scales. **Exact, no precision loss possible.**
+
+### M14-4 — Division (the hard one)
+- [ ] `divExact(out, a, b)` — succeeds only if a/b has a terminating expansion in `base`. Otherwise error.NonTerminatingExpansion. Detection: factor b/gcd(a,b); for base=10 the remaining cofactor must be 2^x · 5^y; for base=2 it must be 2^x. Computes the result with no truncation.
+- [ ] `divPrecision(out, a, b, max_scale_digits)` — gives the caller a precision budget. Result is exact within that budget; the function reports whether the result IS exact via the return value or out-param. No silent rounding past the budget.
+- [ ] `divQR(quot, rem, a, b)` — euclidean integer-style: rem has the same scale as the smaller operand and is the **exact** leftover. Reconstruction `quot * b + rem == a` is bit-exact.
+
+### M14-5 — Cross-base conversions (exit the binary/decimal silo)
+- [ ] `toBinary(out, a)` — base=10 → base=2. Errors on non-terminating (1/3, 0.1, etc.). Forces the caller to acknowledge this is where lossiness would creep in if allowed.
+- [ ] `toDecimal(out, a)` — base=2 → base=10. Always exact (powers of 2 always have finite decimal expansion).
+
+### M14-6 — Round / floor / ceil / trunc (explicit choices, never default)
+- [ ] `roundToScale(out, a, target_scale, mode)` — modes: `.exact_or_error`, `.banker`, `.half_up`, `.half_down`, `.toward_zero`, `.toward_pos_inf`, `.toward_neg_inf`. Caller picks; no default.
+- [ ] `roundToMp(out, a, mode)` — round to the underlying `Mp` (drop the fractional part).
+
+### M14-7 — String I/O
+- [ ] `toString(allocator, a, fmt)` — fmt picks `.fixed("%.6f")`-like vs `.scientific("%e")`-like vs `.canonical` (no superfluous zeros). Hex output for base=2.
+- [ ] Round-trip across all three for {0, ±1, very-small fractions, very-large mantissas, scale extremes near ±i32.maxInt}
+
+### M14-8 — IEEE754 interop (the ugly necessary)
+- [ ] `setF64(self, v)` — accept an f64, decode bit-exact to base=2 dyadic rational. Decodes the IEEE754 mantissa+exponent; errors on NaN/±∞ (we don't represent them). Subnormals OK.
+- [ ] `getF64(self)` — round to nearest f64 (or error on non-representable). User must opt-in to IEEE754's lossiness.
+
+### M14-9 — C FFI surface
+- [ ] All M14-1..M14-7 ops exported via `src/c_api.zig` + `include/blip_mp.h`. Mirror the M12/M13 pattern.
+
+### M14-10 — GMP comparison (where applicable)
+- [ ] mpf_t / mpq_t are GMP's float / rational types. Add cross-validation tests in `tests/integration/cross_check.zig` against `mpq_class` for the exact operations and `mpf_class` for binary fixed-point. `Fp` is *more* precise than `mpf_t` so the comparison is "do we agree at mpf_t's precision".
+
+### Test queueing convention
+Every M14-N item lands as: (a) failing test added that exercises the API as the spec demands, (b) `error.SkipZigTest` placeholder while not yet implemented (test is in the suite as a known-skipped TODO), (c) implementation lands, (d) skip removed, (e) test passes. This keeps the suite green per project policy while making the queued behaviors visible in the test run.
+
 ## Milestone 13 — Tier B GMP feature parity (number theory + crypto)
 
 - [ ] **M13-B1 — Miller-Rabin primality**: `Mp.isProbablyPrime(rng, witnesses)` + `Mp.nextPrime(out, n)`. Deterministic small-prime sieve trial-div first, then Miller-Rabin with caller-supplied witness count. Built on existing `powm`. Tests: known primes (2, 3, 5, 7, …, 2^521-1 Mersenne), known composites (Carmichael 561, 1729, 2465), cross-check 1000 random {32, 64, 256, 512}-bit cases vs `mpz_probab_prime_p`.

@@ -1,0 +1,1993 @@
+// fp.zig — exact arbitrary-precision fixed-point arithmetic.
+//
+// Built on top of `Mp`. Each value carries its own (mantissa, scale, base).
+// The design goal is to disrupt IEEE754 by being correct-by-construction
+// where IEEE754 is convenient-by-default:
+//   - No NaN, no ±∞: ops error rather than silently produce a poison value.
+//   - No signed zero: zero is zero.
+//   - No denormals: representation has nothing special at any boundary.
+//   - No silent precision loss: division either succeeds exactly, takes a
+//     caller-supplied precision budget, or returns an exact (quot, rem).
+//
+// "Dynamic precision" — every value carries its own scale exponent, mirroring
+// blip_mp's variable-length self-describing storage philosophy.
+//
+// Status: M14 scaffold (PLAN.md §M14). This file currently exposes the type
+// and lifecycle; arithmetic, IO, and rounding land incrementally under TDD.
+// Placeholder tests below name the contracts via SkipZigTest stubs so
+// `./test` shows the surface as a queued TODO list while the suite stays green.
+
+const std = @import("std");
+const bignum = @import("bignum.zig");
+const Mp = bignum.Mp;
+
+pub const Base = enum(u8) {
+	binary = 2,
+	decimal = 10,
+};
+
+pub const Fp = struct {
+	mantissa: Mp,
+	scale: i32,
+	base: Base,
+
+	pub fn init(allocator: std.mem.Allocator) Fp {
+		return .{
+			.mantissa = Mp.init(allocator),
+			.scale = 0,
+			.base = .decimal,
+		};
+	}
+
+	pub fn deinit(self: *Fp) void {
+		self.mantissa.deinit();
+		self.scale = 0;
+	}
+
+	/// True if the value is exactly zero (mantissa == 0, scale ignored).
+	/// No signed-zero distinction.
+	pub fn isZero(self: *const Fp) bool {
+		return self.mantissa.cachedSign() == 0;
+	}
+
+	/// Set the value to mantissa × base^scale where mantissa is an i64.
+	/// The base is whichever the Fp is currently configured for.
+	pub fn setI64(self: *Fp, mantissa: i64, scale: i32, base: Base) FpError!void {
+		try self.mantissa.setI64(mantissa);
+		self.scale = scale;
+		self.base = base;
+	}
+
+	/// Set self = num/den exactly in base 10. Errors with NonTerminatingExpansion
+	/// when the reduced denominator has any prime factor other than 2 or 5.
+	/// Special cases: num=0 → zero with scale=0; den=0 → DivisionByZero.
+	pub fn setRationalDecimal(self: *Fp, num: i64, den: i64) FpError!void {
+		return setRational(self, num, den, .decimal);
+	}
+
+	/// Set self = num/den exactly in base 2. Errors with NonTerminatingExpansion
+	/// when the reduced denominator has any prime factor other than 2.
+	pub fn setRationalBinary(self: *Fp, num: i64, den: i64) FpError!void {
+		return setRational(self, num, den, .binary);
+	}
+
+	/// Decode an IEEE754 double bit-exactly into a base=2 Fp. NaN and ±∞
+	/// have no exact rational representation — they error NotRepresentable
+	/// (the user must explicitly opt out of IEEE754's footguns rather than
+	/// silently smuggling them through).
+	///
+	/// Layout reminder: f64 = (sign:1, exp:11 bias=1023, mantissa:52).
+	///   normalized: value = (-1)^sign × (1<<52 | mant) × 2^(exp - 1023 - 52)
+	///   subnormal:  value = (-1)^sign × mant × 2^(-1074)
+	///   ±0:         exp=0, mant=0 — collapses to our zero (no signed zero)
+	///   NaN/inf:    exp=2047 — error
+	pub fn setF64(self: *Fp, v: f64) FpError!void {
+		const bits: u64 = @bitCast(v);
+		const sign_bit: u1 = @intCast((bits >> 63) & 1);
+		const exp: u11 = @intCast((bits >> 52) & 0x7FF);
+		const mant: u52 = @intCast(bits & 0xFFFFFFFFFFFFF);
+		if (exp == 0x7FF) return error.NotRepresentable; // NaN or ±∞
+		if (exp == 0 and mant == 0) {
+			try self.mantissa.setI64(0);
+			self.scale = 0;
+			self.base = .binary;
+			return;
+		}
+		var raw_mant: u64 = undefined;
+		var actual_exp: i32 = undefined;
+		if (exp == 0) {
+			// Subnormal.
+			raw_mant = mant;
+			actual_exp = -1074; // -1022 - 52
+		} else {
+			// Normalized: implicit leading 1 + 52 mantissa bits = 53.
+			raw_mant = (@as(u64, 1) << 52) | mant;
+			actual_exp = @as(i32, exp) - 1023 - 52;
+		}
+		// raw_mant fits in i64 (≤ 2^53 - 1 < 2^63). Apply sign separately.
+		const signed_mant: i64 = if (sign_bit == 1)
+			-@as(i64, @intCast(raw_mant))
+		else
+			@intCast(raw_mant);
+		try self.mantissa.setI64(signed_mant);
+		self.scale = actual_exp;
+		self.base = .binary;
+	}
+
+	/// Parse `s` as a fixed-point literal in `base`. Accepts optional leading
+	/// '-', optional fractional part with '.' separator. Bases 2/8/10/16
+	/// supported (delegated to Mp.setStr). The radix point is splice-only —
+	/// we just track its position to set scale; the integer-side and
+	/// fractional-side digits are concatenated and parsed as one Mp integer.
+	///
+	/// Examples:
+	///   "3.14"  → mantissa=314, scale=-2
+	///   "0.125" → mantissa=125, scale=-3
+	///   "-0.5"  → mantissa=-5,  scale=-1
+	///   ".5"    → mantissa=5,   scale=-1
+	///   "100"   → mantissa=100, scale=0
+	///   "0.11" base=2 → mantissa=3, scale=-2
+	pub fn setStr(self: *Fp, s: []const u8, base: Base) FpError!void {
+		if (s.len == 0) return error.EmptyString;
+		const allocator = self.mantissa.allocator;
+		// Find optional minus.
+		var negative = false;
+		var start: usize = 0;
+		if (s[0] == '-') {
+			negative = true;
+			start = 1;
+		}
+		if (start >= s.len) return error.EmptyString;
+		// Find the radix point (at most one).
+		var dot_pos: ?usize = null;
+		var i: usize = start;
+		while (i < s.len) : (i += 1) {
+			if (s[i] == '.') {
+				if (dot_pos != null) return error.InvalidDigit;
+				dot_pos = i;
+			}
+		}
+		// Build the digit string (no '.', no '-') as a contiguous slice that
+		// the Mp parser can consume.
+		const digits_len = (s.len - start) - (if (dot_pos != null) @as(usize, 1) else 0);
+		if (digits_len == 0) return error.EmptyString;
+		var digits = try allocator.alloc(u8, digits_len + (if (negative) @as(usize, 1) else 0));
+		defer allocator.free(digits);
+		var pos: usize = 0;
+		if (negative) {
+			digits[0] = '-';
+			pos = 1;
+		}
+		var k: usize = start;
+		while (k < s.len) : (k += 1) {
+			if (s[k] == '.') continue;
+			digits[pos] = s[k];
+			pos += 1;
+		}
+		const blip_mp_root = @import("blip_mp.zig");
+		try blip_mp_root.string_io.setStr(&self.mantissa, digits, @intFromEnum(base));
+		// Compute scale based on how many digits sat after the radix point.
+		const frac_len: usize = if (dot_pos) |dp| (s.len - 1 - dp) else 0;
+		if (frac_len > std.math.maxInt(i32)) return error.OutputBufferTooSmall;
+		self.scale = -@as(i32, @intCast(frac_len));
+		self.base = base;
+	}
+
+	/// Strip trailing factors-of-base from the mantissa and bump scale by the
+	/// same count. Two Fps numerically equal in the same base reach the same
+	/// (mantissa, scale) post-canonicalize, so direct field equality becomes
+	/// a valid eq test on canonical inputs. Zero is a special case — its
+	/// scale collapses to 0 unconditionally.
+	pub fn canonicalize(self: *Fp) FpError!void {
+		if (self.mantissa.cachedSign() == 0) {
+			self.scale = 0;
+			return;
+		}
+		switch (self.base) {
+			.binary => {
+				// 2-adic valuation = position of first 1-bit in two's-complement form,
+				// which scan1 surfaces. Works for negative mantissas too — the 2-adic
+				// valuation of a value equals that of its magnitude.
+				const blip_mp_root = @import("blip_mp.zig");
+				const tz: usize = blip_mp_root.scan.scan1(&self.mantissa, 0);
+				if (tz == 0) return;
+				try shrInPlace(&self.mantissa, tz);
+				self.scale += @intCast(tz);
+			},
+			.decimal => {
+				var divisor = Mp.init(self.mantissa.allocator);
+				defer divisor.deinit();
+				try divisor.setI64(10);
+				var quot = Mp.init(self.mantissa.allocator);
+				defer quot.deinit();
+				var rem = Mp.init(self.mantissa.allocator);
+				defer rem.deinit();
+				while (true) {
+					try Mp.divMod(&quot, &rem, &self.mantissa, &divisor);
+					if (rem.cachedSign() != 0) break;
+					try copyInto(&self.mantissa, &quot);
+					self.scale += 1;
+				}
+			},
+		}
+	}
+};
+
+/// Copy src's value into dst (dst may already hold a value).
+fn copyInto(dst: *Mp, src: *const Mp) FpError!void {
+	try dst.setBytes(src.bytes());
+}
+
+/// In-place shr without round-trip through bitwise.shr (which allocates a
+/// fresh Mp via setBytes underneath anyway, but expressing here keeps the
+/// fp.zig module from depending on bitwise.zig directly).
+fn shrInPlace(m: *Mp, n: usize) FpError!void {
+	const blip_mp_root = @import("blip_mp.zig");
+	var tmp = Mp.init(m.allocator);
+	defer tmp.deinit();
+	try blip_mp_root.bitwise.shr(&tmp, m, n);
+	try copyInto(m, &tmp);
+}
+
+/// Three-way numerical compare. Errors on mixed bases — caller must explicitly
+/// convert (toBinary / toDecimal) first; we don't paper over the lossiness.
+pub fn cmp(a: *const Fp, b: *const Fp) (FpError || error{MixedBases})!std.math.Order {
+	if (a.base != b.base) return error.MixedBases;
+	const a_sign = a.mantissa.cachedSign();
+	const b_sign = b.mantissa.cachedSign();
+	if (a_sign != b_sign) return std.math.order(a_sign, b_sign);
+	if (a_sign == 0) return .eq;
+	// Same base, same sign, both non-zero. Align scales by lifting the
+	// higher-scaled mantissa down to the lower scale via mul by base^Δ.
+	if (a.scale == b.scale) return a.mantissa.cmp(&b.mantissa);
+	const allocator = a.mantissa.allocator;
+	var a_aligned = Mp.init(allocator);
+	defer a_aligned.deinit();
+	var b_aligned = Mp.init(allocator);
+	defer b_aligned.deinit();
+	try copyInto(&a_aligned, &a.mantissa);
+	try copyInto(&b_aligned, &b.mantissa);
+	if (a.scale > b.scale) {
+		try liftMantissa(&a_aligned, a.base, @intCast(a.scale - b.scale));
+	} else {
+		try liftMantissa(&b_aligned, b.base, @intCast(b.scale - a.scale));
+	}
+	return a_aligned.cmp(&b_aligned);
+}
+
+/// Numerical equality (same base required). Convenience over cmp.
+pub fn eq(a: *const Fp, b: *const Fp) (FpError || error{MixedBases})!bool {
+	return (try cmp(a, b)) == .eq;
+}
+
+/// out = a + b. Operands must share a base (else error.MixedBases).
+/// Output scale is min(a.scale, b.scale); the higher-scaled operand's
+/// mantissa is lifted by base^Δscale before mantissa addition. Exact.
+pub fn add(out: *Fp, a: *const Fp, b: *const Fp) (FpError || error{MixedBases})!void {
+	return addOrSub(out, a, b, .add);
+}
+
+/// out = a - b. Same alignment rule as add.
+pub fn sub(out: *Fp, a: *const Fp, b: *const Fp) (FpError || error{MixedBases})!void {
+	return addOrSub(out, a, b, .sub);
+}
+
+const AddOrSub = enum { add, sub };
+
+fn addOrSub(
+	out: *Fp,
+	a: *const Fp,
+	b: *const Fp,
+	comptime op: AddOrSub,
+) (FpError || error{MixedBases})!void {
+	if (a.base != b.base) return error.MixedBases;
+	const allocator = out.mantissa.allocator;
+	var a_aligned = Mp.init(allocator);
+	defer a_aligned.deinit();
+	var b_aligned = Mp.init(allocator);
+	defer b_aligned.deinit();
+	try copyInto(&a_aligned, &a.mantissa);
+	try copyInto(&b_aligned, &b.mantissa);
+	const out_scale: i32 = @min(a.scale, b.scale);
+	if (a.scale > b.scale) {
+		try liftMantissa(&a_aligned, a.base, @intCast(a.scale - b.scale));
+	} else if (b.scale > a.scale) {
+		try liftMantissa(&b_aligned, b.base, @intCast(b.scale - a.scale));
+	}
+	switch (op) {
+		.add => try out.mantissa.add(&a_aligned, &b_aligned),
+		.sub => try out.mantissa.sub(&a_aligned, &b_aligned),
+	}
+	out.scale = out_scale;
+	out.base = a.base;
+}
+
+/// out = a / b, exact, or error.NonTerminatingExpansion if a/b can't be
+/// represented in `base` with finite digits. The cornerstone of the
+/// no-silent-rounding philosophy: callers who want exact get exact, or a
+/// loud error pointing them at divPrecision / divQR.
+pub fn divExact(out: *Fp, a: *const Fp, b: *const Fp) (FpError || error{MixedBases})!void {
+	if (a.base != b.base) return error.MixedBases;
+	if (b.mantissa.cachedSign() == 0) return error.DivisionByZero;
+	if (a.mantissa.cachedSign() == 0) {
+		try out.mantissa.setI64(0);
+		out.scale = 0;
+		out.base = a.base;
+		return;
+	}
+	const allocator = out.mantissa.allocator;
+	// Reduce mantissas by their gcd, working on absolute values; track sign
+	// separately so we never feed a negative into the prime-factor strippers.
+	const a_neg = a.mantissa.cachedSign() < 0;
+	const b_neg = b.mantissa.cachedSign() < 0;
+	const result_negative = a_neg != b_neg;
+	const blip_mp_root = @import("blip_mp.zig");
+	var num = Mp.init(allocator);
+	defer num.deinit();
+	var den = Mp.init(allocator);
+	defer den.deinit();
+	try blip_mp_root.sign.abs(&num, &a.mantissa);
+	try blip_mp_root.sign.abs(&den, &b.mantissa);
+	{
+		var g = Mp.init(allocator);
+		defer g.deinit();
+		try blip_mp_root.gcd.gcd(&g, &num, &den);
+		var tmp = Mp.init(allocator);
+		defer tmp.deinit();
+		try Mp.div(&tmp, &num, &g);
+		try copyInto(&num, &tmp);
+		try Mp.div(&tmp, &den, &g);
+		try copyInto(&den, &tmp);
+	}
+	// Strip 2s from den. scan1 gives the 2-adic valuation of |den| in one shot.
+	const a_count: u32 = blk: {
+		const tz = blip_mp_root.scan.scan1(&den, 0);
+		if (tz == 0) break :blk 0;
+		var tmp = Mp.init(allocator);
+		defer tmp.deinit();
+		try blip_mp_root.bitwise.shr(&tmp, &den, tz);
+		try copyInto(&den, &tmp);
+		break :blk @intCast(tz);
+	};
+	// Strip 5s from den (decimal only).
+	var b_count: u32 = 0;
+	if (a.base == .decimal) {
+		var five = Mp.init(allocator);
+		defer five.deinit();
+		try five.setI64(5);
+		var quot = Mp.init(allocator);
+		defer quot.deinit();
+		var rem = Mp.init(allocator);
+		defer rem.deinit();
+		while (true) {
+			try Mp.divMod(&quot, &rem, &den, &five);
+			if (rem.cachedSign() != 0) break;
+			try copyInto(&den, &quot);
+			b_count += 1;
+		}
+	}
+	// If anything remains in den, the expansion is non-terminating.
+	{
+		var one = Mp.init(allocator);
+		defer one.deinit();
+		try one.setI64(1);
+		if (den.cmp(&one) != .eq) return error.NonTerminatingExpansion;
+	}
+	// Compute the multiplier base^max - the prime-power gap on each side.
+	const max_count: u32 = @max(a_count, b_count);
+	// Multiply num by 2^(max-a_count).
+	if (max_count > a_count) {
+		var tmp = Mp.init(allocator);
+		defer tmp.deinit();
+		try blip_mp_root.bitwise.shl(&tmp, &num, max_count - a_count);
+		try copyInto(&num, &tmp);
+	}
+	// Multiply num by 5^(max-b_count) for decimal.
+	if (a.base == .decimal and max_count > b_count) {
+		var five_pow = Mp.init(allocator);
+		defer five_pow.deinit();
+		try five_pow.setI64(1);
+		var five = Mp.init(allocator);
+		defer five.deinit();
+		try five.setI64(5);
+		var i: u32 = 0;
+		while (i < max_count - b_count) : (i += 1) {
+			var tmp = Mp.init(allocator);
+			defer tmp.deinit();
+			try tmp.mul(&five_pow, &five);
+			try copyInto(&five_pow, &tmp);
+		}
+		var tmp = Mp.init(allocator);
+		defer tmp.deinit();
+		try tmp.mul(&num, &five_pow);
+		try copyInto(&num, &tmp);
+	}
+	// Apply sign and emit.
+	if (result_negative) {
+		var tmp = Mp.init(allocator);
+		defer tmp.deinit();
+		try blip_mp_root.sign.neg(&tmp, &num);
+		try copyInto(&out.mantissa, &tmp);
+	} else {
+		try copyInto(&out.mantissa, &num);
+	}
+	const scale_diff: i64 = @as(i64, a.scale) - @as(i64, b.scale) - @as(i64, max_count);
+	if (scale_diff > std.math.maxInt(i32) or scale_diff < std.math.minInt(i32)) {
+		return error.OutputBufferTooSmall;
+	}
+	out.scale = @intCast(scale_diff);
+	out.base = a.base;
+}
+
+/// out = a / b at most `max_scale_digits` more fractional digits than the
+/// dividend already has. Returns true if the result is BIT-EXACT, false if
+/// the function had to truncate. Caller picks how to react to inexactness
+/// — the function never silently rounds without surfacing the choice.
+///
+/// Algorithm: scale up |num| by base^max_scale_digits, divMod by |den|,
+/// take the floor of the magnitude, re-apply sign. Exactness == (rem == 0).
+pub fn divPrecision(
+	out: *Fp,
+	a: *const Fp,
+	b: *const Fp,
+	max_scale_digits: u32,
+) (FpError || error{MixedBases})!bool {
+	if (a.base != b.base) return error.MixedBases;
+	if (b.mantissa.cachedSign() == 0) return error.DivisionByZero;
+	if (a.mantissa.cachedSign() == 0) {
+		try out.mantissa.setI64(0);
+		out.scale = 0;
+		out.base = a.base;
+		return true;
+	}
+	const allocator = out.mantissa.allocator;
+	const blip_mp_root = @import("blip_mp.zig");
+	const a_neg = a.mantissa.cachedSign() < 0;
+	const b_neg = b.mantissa.cachedSign() < 0;
+	const result_negative = a_neg != b_neg;
+
+	var num = Mp.init(allocator);
+	defer num.deinit();
+	var den = Mp.init(allocator);
+	defer den.deinit();
+	try blip_mp_root.sign.abs(&num, &a.mantissa);
+	try blip_mp_root.sign.abs(&den, &b.mantissa);
+
+	// Lift |num| by base^max_scale_digits.
+	if (max_scale_digits > 0) {
+		switch (a.base) {
+			.binary => {
+				var tmp = Mp.init(allocator);
+				defer tmp.deinit();
+				try blip_mp_root.bitwise.shl(&tmp, &num, max_scale_digits);
+				try copyInto(&num, &tmp);
+			},
+			.decimal => {
+				var ten = Mp.init(allocator);
+				defer ten.deinit();
+				try ten.setI64(10);
+				var i: u32 = 0;
+				while (i < max_scale_digits) : (i += 1) {
+					var tmp = Mp.init(allocator);
+					defer tmp.deinit();
+					try tmp.mul(&num, &ten);
+					try copyInto(&num, &tmp);
+				}
+			},
+		}
+	}
+	// quot = lifted_num / den; rem == 0 ↔ exact.
+	var quot = Mp.init(allocator);
+	defer quot.deinit();
+	var rem = Mp.init(allocator);
+	defer rem.deinit();
+	try Mp.divMod(&quot, &rem, &num, &den);
+	const exact = rem.cachedSign() == 0;
+
+	if (result_negative) {
+		var tmp = Mp.init(allocator);
+		defer tmp.deinit();
+		try blip_mp_root.sign.neg(&tmp, &quot);
+		try copyInto(&out.mantissa, &tmp);
+	} else {
+		try copyInto(&out.mantissa, &quot);
+	}
+	const scale_diff: i64 = @as(i64, a.scale) - @as(i64, b.scale) - @as(i64, max_scale_digits);
+	if (scale_diff > std.math.maxInt(i32) or scale_diff < std.math.minInt(i32)) {
+		return error.OutputBufferTooSmall;
+	}
+	out.scale = @intCast(scale_diff);
+	out.base = a.base;
+	return exact;
+}
+
+/// out = x converted to base=10. ALWAYS exact: any base=2 dyadic rational
+/// has a finite decimal expansion (because 1/2 = 5/10).
+///
+/// Algorithm:
+///   x.scale ≥ 0:  out = mantissa × 2^scale (multiply out the powers of 2),
+///                 out.scale = 0.
+///   x.scale < 0:  1/2^k = 5^k / 10^k, so mantissa × 2^-k = (mantissa × 5^k) × 10^-k.
+///                 out.mantissa = mantissa × 5^k, out.scale = -k.
+pub fn toDecimal(out: *Fp, x: *const Fp) FpError!void {
+	if (x.base == .decimal) {
+		try copyInto(&out.mantissa, &x.mantissa);
+		out.scale = x.scale;
+		out.base = .decimal;
+		return;
+	}
+	const allocator = out.mantissa.allocator;
+	const blip_mp_root = @import("blip_mp.zig");
+	if (x.scale >= 0) {
+		var tmp = Mp.init(allocator);
+		defer tmp.deinit();
+		try copyInto(&tmp, &x.mantissa);
+		if (x.scale > 0) {
+			var lifted = Mp.init(allocator);
+			defer lifted.deinit();
+			try blip_mp_root.bitwise.shl(&lifted, &tmp, @intCast(x.scale));
+			try copyInto(&out.mantissa, &lifted);
+		} else {
+			try copyInto(&out.mantissa, &tmp);
+		}
+		out.scale = 0;
+		out.base = .decimal;
+		return;
+	}
+	// x.scale < 0
+	const k: u32 = @intCast(-x.scale);
+	// Build 5^k.
+	var five_pow = Mp.init(allocator);
+	defer five_pow.deinit();
+	try five_pow.setI64(1);
+	{
+		var five = Mp.init(allocator);
+		defer five.deinit();
+		try five.setI64(5);
+		var i: u32 = 0;
+		while (i < k) : (i += 1) {
+			var tmp = Mp.init(allocator);
+			defer tmp.deinit();
+			try tmp.mul(&five_pow, &five);
+			try copyInto(&five_pow, &tmp);
+		}
+	}
+	var product = Mp.init(allocator);
+	defer product.deinit();
+	try product.mul(&x.mantissa, &five_pow);
+	try copyInto(&out.mantissa, &product);
+	out.scale = x.scale; // -k
+	out.base = .decimal;
+}
+
+/// out = x converted to base=2. NOT always exact: a decimal rational like
+/// 0.1 has no terminating binary expansion (1/10 = 1/(2·5), the 5 is the
+/// problem). Errors NonTerminatingExpansion when the conversion would lose
+/// precision — the user must explicitly opt into rounding via divPrecision
+/// or equivalent.
+///
+/// Algorithm:
+///   x.scale ≥ 0:  10^k = 2^k × 5^k, so mantissa × 10^k = (mantissa × 5^k) × 2^k.
+///                 Always exact.
+///   x.scale < 0:  10^-k = 1/(2^k × 5^k). For exactness, mantissa must be
+///                 divisible by 5^k. Strip 5^k; result = (mantissa / 5^k) × 2^-k.
+pub fn toBinary(out: *Fp, x: *const Fp) FpError!void {
+	if (x.base == .binary) {
+		try copyInto(&out.mantissa, &x.mantissa);
+		out.scale = x.scale;
+		out.base = .binary;
+		return;
+	}
+	const allocator = out.mantissa.allocator;
+	const blip_mp_root = @import("blip_mp.zig");
+	if (x.scale >= 0) {
+		// mantissa × 5^scale × 2^scale.
+		var five_pow = Mp.init(allocator);
+		defer five_pow.deinit();
+		try five_pow.setI64(1);
+		var five = Mp.init(allocator);
+		defer five.deinit();
+		try five.setI64(5);
+		var i: i32 = 0;
+		while (i < x.scale) : (i += 1) {
+			var tmp = Mp.init(allocator);
+			defer tmp.deinit();
+			try tmp.mul(&five_pow, &five);
+			try copyInto(&five_pow, &tmp);
+		}
+		var prod = Mp.init(allocator);
+		defer prod.deinit();
+		try prod.mul(&x.mantissa, &five_pow);
+		try copyInto(&out.mantissa, &prod);
+		out.scale = x.scale;
+		out.base = .binary;
+		return;
+	}
+	// x.scale < 0: need mantissa to be divisible by 5^k where k = -x.scale.
+	const k: u32 = @intCast(-x.scale);
+	var num = Mp.init(allocator);
+	defer num.deinit();
+	try blip_mp_root.sign.abs(&num, &x.mantissa);
+	const negative = x.mantissa.cachedSign() < 0;
+	var five = Mp.init(allocator);
+	defer five.deinit();
+	try five.setI64(5);
+	var i: u32 = 0;
+	while (i < k) : (i += 1) {
+		var quot = Mp.init(allocator);
+		defer quot.deinit();
+		var rem = Mp.init(allocator);
+		defer rem.deinit();
+		try Mp.divMod(&quot, &rem, &num, &five);
+		if (rem.cachedSign() != 0) return error.NonTerminatingExpansion;
+		try copyInto(&num, &quot);
+	}
+	if (negative) {
+		var tmp = Mp.init(allocator);
+		defer tmp.deinit();
+		try blip_mp_root.sign.neg(&tmp, &num);
+		try copyInto(&out.mantissa, &tmp);
+	} else {
+		try copyInto(&out.mantissa, &num);
+	}
+	out.scale = x.scale; // -k
+	out.base = .binary;
+}
+
+/// Format `x` in its native base as a canonical decimal/binary/hex string:
+/// no scientific notation, no superfluous zeros (assumes the input is
+/// already canonicalized — call `canonicalize` first if unsure).
+///
+/// Algorithm: render |mantissa| in `base` via Mp.toString, then splice in
+/// the radix point at position determined by `scale`:
+///   scale ≥ 0: pad with `scale` trailing zeros (integer or scaled-up int).
+///   scale < 0, len > -scale: split: "{int_part}.{frac_part}".
+///   scale < 0, len ≤ -scale: prepend "0.{leading_zeros}{mantissa}".
+pub fn toStringCanonical(allocator: std.mem.Allocator, x: *const Fp) FpError![]u8 {
+	if (x.mantissa.cachedSign() == 0) {
+		const out = try allocator.alloc(u8, 1);
+		out[0] = '0';
+		return out;
+	}
+	const blip_mp_root = @import("blip_mp.zig");
+	// Render the magnitude.
+	var mag = Mp.init(allocator);
+	defer mag.deinit();
+	try blip_mp_root.sign.abs(&mag, &x.mantissa);
+	const radix: u8 = @intFromEnum(x.base);
+	const mag_str = try blip_mp_root.string_io.toString(&mag, allocator, radix);
+	defer allocator.free(mag_str);
+	const negative = x.mantissa.cachedSign() < 0;
+	const sign_len: usize = if (negative) 1 else 0;
+	if (x.scale >= 0) {
+		// Append `scale` trailing zeros to the magnitude.
+		const pad: usize = @intCast(x.scale);
+		const out = try allocator.alloc(u8, sign_len + mag_str.len + pad);
+		var pos: usize = 0;
+		if (negative) {
+			out[0] = '-';
+			pos = 1;
+		}
+		@memcpy(out[pos .. pos + mag_str.len], mag_str);
+		pos += mag_str.len;
+		@memset(out[pos..], '0');
+		return out;
+	}
+	const frac_digits: usize = @intCast(-x.scale);
+	if (mag_str.len > frac_digits) {
+		// "{int}.{frac}" form.
+		const int_len = mag_str.len - frac_digits;
+		const out = try allocator.alloc(u8, sign_len + mag_str.len + 1);
+		var pos: usize = 0;
+		if (negative) {
+			out[0] = '-';
+			pos = 1;
+		}
+		@memcpy(out[pos .. pos + int_len], mag_str[0..int_len]);
+		pos += int_len;
+		out[pos] = '.';
+		pos += 1;
+		@memcpy(out[pos..], mag_str[int_len..]);
+		return out;
+	} else {
+		// "0.{zeros}{mag}" form.
+		const leading_zeros = frac_digits - mag_str.len;
+		const out = try allocator.alloc(u8, sign_len + 2 + leading_zeros + mag_str.len);
+		var pos: usize = 0;
+		if (negative) {
+			out[0] = '-';
+			pos = 1;
+		}
+		out[pos] = '0';
+		out[pos + 1] = '.';
+		pos += 2;
+		@memset(out[pos .. pos + leading_zeros], '0');
+		pos += leading_zeros;
+		@memcpy(out[pos..], mag_str);
+		return out;
+	}
+}
+
+/// out = a * b. Exact-by-construction: mantissas multiply, scales sum.
+/// No precision loss possible. Operands must share a base.
+pub fn mul(out: *Fp, a: *const Fp, b: *const Fp) (FpError || error{MixedBases})!void {
+	if (a.base != b.base) return error.MixedBases;
+	try out.mantissa.mul(&a.mantissa, &b.mantissa);
+	// Cast each i32 to i64 to detect overflow, then narrow back. In practice
+	// callers won't construct scales beyond a few thousand, so overflow is
+	// only a concern at hand-constructed extremes.
+	const sum: i64 = @as(i64, a.scale) + @as(i64, b.scale);
+	if (sum > std.math.maxInt(i32) or sum < std.math.minInt(i32)) {
+		return error.OutputBufferTooSmall;
+	}
+	out.scale = @intCast(sum);
+	out.base = a.base;
+}
+
+/// Multiply mantissa by base^k in place. Used by cmp to align scales.
+fn liftMantissa(m: *Mp, base: Base, k: u32) FpError!void {
+	if (k == 0) return;
+	const allocator = m.allocator;
+	switch (base) {
+		.binary => {
+			const blip_mp_root = @import("blip_mp.zig");
+			var tmp = Mp.init(allocator);
+			defer tmp.deinit();
+			try blip_mp_root.bitwise.shl(&tmp, m, k);
+			try copyInto(m, &tmp);
+		},
+		.decimal => {
+			// Multiply by 10^k. Build the multiplier via repeated ×10 on a
+			// local Mp; could be smarter (powI of 10 chunked) but small k is
+			// the common case in cmp.
+			var ten = Mp.init(allocator);
+			defer ten.deinit();
+			try ten.setI64(10);
+			var i: u32 = 0;
+			while (i < k) : (i += 1) {
+				var tmp = Mp.init(allocator);
+				defer tmp.deinit();
+				try tmp.mul(m, &ten);
+				try copyInto(m, &tmp);
+			}
+		},
+	}
+}
+
+/// Common implementation for setRationalDecimal / setRationalBinary.
+///
+/// Algorithm (base=10):
+///   1. Reduce num/den by gcd(|num|, |den|).
+///   2. Strip 2s and 5s from den; let a = #2s, b = #5s removed.
+///   3. If anything remains in den after stripping, the expansion is
+///      non-terminating (denominator has a prime factor other than 2 or 5).
+///   4. scale = -max(a, b).
+///   5. mantissa = num × 2^(max(a,b)-a) × 5^(max(a,b)-b).
+///
+/// Base=2 is the same minus the 5-factor track.
+fn setRational(self: *Fp, num: i64, den: i64, base: Base) FpError!void {
+	if (den == 0) return error.DivisionByZero;
+	if (num == 0) {
+		try self.mantissa.setI64(0);
+		self.scale = 0;
+		self.base = base;
+		return;
+	}
+	// Track sign separately; do all arithmetic on magnitudes.
+	const negative = (num < 0) != (den < 0);
+	var num_mag: u64 = if (num < 0) @bitCast(-num) else @intCast(num);
+	var den_mag: u64 = if (den < 0) @bitCast(-den) else @intCast(den);
+	// Reduce by gcd. Euclid on u64 is fine for the i64 input range.
+	{
+		var a = num_mag;
+		var b = den_mag;
+		while (b != 0) {
+			const t = a % b;
+			a = b;
+			b = t;
+		}
+		num_mag /= a;
+		den_mag /= a;
+	}
+	// Strip 2s.
+	var a_count: u32 = 0;
+	while (den_mag % 2 == 0) {
+		den_mag /= 2;
+		a_count += 1;
+	}
+	// Strip 5s only when base is decimal.
+	var b_count: u32 = 0;
+	if (base == .decimal) {
+		while (den_mag % 5 == 0) {
+			den_mag /= 5;
+			b_count += 1;
+		}
+	}
+	if (den_mag != 1) return error.NonTerminatingExpansion;
+	const max_count: u32 = @max(a_count, b_count);
+	// Compute the multiplier that brings the mantissa up to scale=-max_count.
+	// Decimal: 2^(max-a) * 5^(max-b). Binary: just 2^(max-a) — there's no
+	// 5-track because base=2's only allowed prime is 2.
+	var multiplier: u64 = 1;
+	{
+		var k: u32 = 0;
+		while (k < max_count - a_count) : (k += 1) {
+			multiplier *= 2;
+		}
+		if (base == .decimal) {
+			k = 0;
+			while (k < max_count - b_count) : (k += 1) {
+				multiplier *= 5;
+			}
+		}
+	}
+	// mantissa = num_mag * multiplier (sign re-applied). u128 to avoid overflow
+	// when both num_mag and multiplier are large.
+	const big: u128 = @as(u128, num_mag) * @as(u128, multiplier);
+	if (big > std.math.maxInt(i64)) {
+		// Promote into Mp via setBytes. Build via two-step: load u64 halves.
+		// For now, the i64-input path can't actually exceed i64 range here in
+		// practice (num was an i64; multiplier comes from den which was i64;
+		// product up to ~i64×i64). But just in case, fall back to wide setBytes.
+		var lo_buf: [16]u8 = undefined;
+		std.mem.writeInt(u128, &lo_buf, big, .little);
+		// Build a BLIP slice from the magnitude.
+		// Quickest: setU64 the low 64, then if high != 0 manually combine.
+		// Simplest defensive path: error out — caller passing this large of a
+		// product to a u64-input rational is misuse.
+		return error.OutputBufferTooSmall;
+	}
+	const mant_signed: i64 = if (negative) -@as(i64, @intCast(big)) else @intCast(big);
+	try self.mantissa.setI64(mant_signed);
+	self.scale = -@as(i32, @intCast(max_count));
+	self.base = base;
+}
+
+pub const FpError = error{
+	NonTerminatingExpansion, // exact representation in this base would require infinite digits
+	UnsupportedBase,
+	DivisionByZero,
+	EmptyString,
+	InvalidDigit,
+	NotRepresentable, // setF64(NaN/inf), getF64 of value outside f64's range or not exactly representable
+} || bignum.SetError || bignum.ArithError || std.mem.Allocator.Error;
+
+// ── tests ────────────────────────────────────────────────────────────────────
+
+const testing = std.testing;
+
+test "M14-1: Fp.init produces a zero value, default base = decimal, scale = 0" {
+	var x = Fp.init(testing.allocator);
+	defer x.deinit();
+	try testing.expect(x.isZero());
+	try testing.expectEqual(@as(i32, 0), x.scale);
+	try testing.expectEqual(Base.decimal, x.base);
+}
+
+test "M14-1: Fp.init / deinit round-trip leaks no memory" {
+	var x = Fp.init(testing.allocator);
+	x.deinit();
+	// testing.allocator (GeneralPurposeAllocator) panics on leak — silent pass = no leak.
+}
+
+test "M14-1: setI64 stores mantissa, scale, base verbatim" {
+	var x = Fp.init(testing.allocator);
+	defer x.deinit();
+	try x.setI64(314, -2, .decimal);
+	try testing.expectEqual(@as(i64, 314), try x.mantissa.getI64());
+	try testing.expectEqual(@as(i32, -2), x.scale);
+	try testing.expectEqual(Base.decimal, x.base);
+}
+
+test "M14-1: setI64 with negative mantissa preserves sign" {
+	var x = Fp.init(testing.allocator);
+	defer x.deinit();
+	try x.setI64(-12345, 3, .binary);
+	try testing.expectEqual(@as(i64, -12345), try x.mantissa.getI64());
+	try testing.expectEqual(@as(i32, 3), x.scale);
+	try testing.expectEqual(Base.binary, x.base);
+}
+
+test "M14-1: setI64(0, _, _) keeps isZero() true regardless of scale/base" {
+	var x = Fp.init(testing.allocator);
+	defer x.deinit();
+	try x.setI64(0, 999, .binary);
+	try testing.expect(x.isZero());
+	try x.setI64(0, -42, .decimal);
+	try testing.expect(x.isZero());
+}
+
+// Queued failing tests for upcoming M14-N work. Each one names the contract
+// the implementation must honor. Skipped while pending so the suite stays
+// green; remove the skip line as each feature lands.
+
+test "M14-1: setRationalDecimal(2, 5) → mantissa=4 scale=-1 (i.e., 0.4)" {
+	var x = Fp.init(testing.allocator);
+	defer x.deinit();
+	try x.setRationalDecimal(2, 5);
+	try testing.expectEqual(@as(i64, 4), try x.mantissa.getI64());
+	try testing.expectEqual(@as(i32, -1), x.scale);
+	try testing.expectEqual(Base.decimal, x.base);
+}
+
+test "M14-1: setRationalDecimal(1, 4) → mantissa=25 scale=-2 (i.e., 0.25)" {
+	var x = Fp.init(testing.allocator);
+	defer x.deinit();
+	try x.setRationalDecimal(1, 4);
+	try testing.expectEqual(@as(i64, 25), try x.mantissa.getI64());
+	try testing.expectEqual(@as(i32, -2), x.scale);
+}
+
+test "M14-1: setRationalDecimal(1, 8) → mantissa=125 scale=-3" {
+	var x = Fp.init(testing.allocator);
+	defer x.deinit();
+	try x.setRationalDecimal(1, 8);
+	try testing.expectEqual(@as(i64, 125), try x.mantissa.getI64());
+	try testing.expectEqual(@as(i32, -3), x.scale);
+}
+
+test "M14-1: setRationalDecimal(3, 2) → mantissa=15 scale=-1 (1.5)" {
+	var x = Fp.init(testing.allocator);
+	defer x.deinit();
+	try x.setRationalDecimal(3, 2);
+	try testing.expectEqual(@as(i64, 15), try x.mantissa.getI64());
+	try testing.expectEqual(@as(i32, -1), x.scale);
+}
+
+test "M14-1: setRationalDecimal(7, 1) → mantissa=7 scale=0 (integer)" {
+	var x = Fp.init(testing.allocator);
+	defer x.deinit();
+	try x.setRationalDecimal(7, 1);
+	try testing.expectEqual(@as(i64, 7), try x.mantissa.getI64());
+	try testing.expectEqual(@as(i32, 0), x.scale);
+}
+
+test "M14-1: setRationalDecimal(-1, 4) → mantissa=-25 scale=-2 (-0.25)" {
+	var x = Fp.init(testing.allocator);
+	defer x.deinit();
+	try x.setRationalDecimal(-1, 4);
+	try testing.expectEqual(@as(i64, -25), try x.mantissa.getI64());
+	try testing.expectEqual(@as(i32, -2), x.scale);
+}
+
+test "M14-1: setRationalDecimal(0, anything) → zero with scale=0" {
+	var x = Fp.init(testing.allocator);
+	defer x.deinit();
+	try x.setRationalDecimal(0, 17);
+	try testing.expect(x.isZero());
+	try testing.expectEqual(@as(i32, 0), x.scale);
+}
+
+test "M14-1: setRationalDecimal(_, 0) errors DivisionByZero" {
+	var x = Fp.init(testing.allocator);
+	defer x.deinit();
+	try testing.expectError(error.DivisionByZero, x.setRationalDecimal(1, 0));
+}
+
+test "M14-1: setRationalDecimal(1, 3) errors with NonTerminatingExpansion" {
+	var x = Fp.init(testing.allocator);
+	defer x.deinit();
+	try testing.expectError(error.NonTerminatingExpansion, x.setRationalDecimal(1, 3));
+}
+
+test "M14-1: setRationalDecimal(2, 6) reduces 2/6=1/3 → NonTerminating" {
+	var x = Fp.init(testing.allocator);
+	defer x.deinit();
+	try testing.expectError(error.NonTerminatingExpansion, x.setRationalDecimal(2, 6));
+}
+
+test "M14-1: setRationalDecimal(3, 6) reduces 3/6=1/2 → 0.5" {
+	var x = Fp.init(testing.allocator);
+	defer x.deinit();
+	try x.setRationalDecimal(3, 6);
+	try testing.expectEqual(@as(i64, 5), try x.mantissa.getI64());
+	try testing.expectEqual(@as(i32, -1), x.scale);
+}
+
+test "M14-1: setRationalBinary(1, 8) → mantissa=1 scale=-3 (i.e., 0.001₂ = 0.125)" {
+	var x = Fp.init(testing.allocator);
+	defer x.deinit();
+	try x.setRationalBinary(1, 8);
+	try testing.expectEqual(@as(i64, 1), try x.mantissa.getI64());
+	try testing.expectEqual(@as(i32, -3), x.scale);
+	try testing.expectEqual(Base.binary, x.base);
+}
+
+test "M14-1: setRationalBinary(1, 5) errors NonTerminatingExpansion (5 isn't a power of 2)" {
+	var x = Fp.init(testing.allocator);
+	defer x.deinit();
+	try testing.expectError(error.NonTerminatingExpansion, x.setRationalBinary(1, 5));
+}
+
+test "M14-1: setRationalBinary(3, 4) reduces to 3 × 2^-2" {
+	var x = Fp.init(testing.allocator);
+	defer x.deinit();
+	try x.setRationalBinary(3, 4);
+	try testing.expectEqual(@as(i64, 3), try x.mantissa.getI64());
+	try testing.expectEqual(@as(i32, -2), x.scale);
+}
+
+test "M14-1: setStr(\"3.14\") base=10 → mantissa=314 scale=-2" {
+	const a = testing.allocator;
+	var x = Fp.init(a);
+	defer x.deinit();
+	try x.setStr("3.14", .decimal);
+	try testing.expectEqual(@as(i64, 314), try x.mantissa.getI64());
+	try testing.expectEqual(@as(i32, -2), x.scale);
+}
+
+test "M14-1: setStr(\"0.125\") → mantissa=125 scale=-3" {
+	const a = testing.allocator;
+	var x = Fp.init(a);
+	defer x.deinit();
+	try x.setStr("0.125", .decimal);
+	try testing.expectEqual(@as(i64, 125), try x.mantissa.getI64());
+	try testing.expectEqual(@as(i32, -3), x.scale);
+}
+
+test "M14-1: setStr(\"-0.5\") → mantissa=-5 scale=-1" {
+	const a = testing.allocator;
+	var x = Fp.init(a);
+	defer x.deinit();
+	try x.setStr("-0.5", .decimal);
+	try testing.expectEqual(@as(i64, -5), try x.mantissa.getI64());
+	try testing.expectEqual(@as(i32, -1), x.scale);
+}
+
+test "M14-1: setStr(\"100\") → mantissa=100 scale=0 (integer)" {
+	const a = testing.allocator;
+	var x = Fp.init(a);
+	defer x.deinit();
+	try x.setStr("100", .decimal);
+	try testing.expectEqual(@as(i64, 100), try x.mantissa.getI64());
+	try testing.expectEqual(@as(i32, 0), x.scale);
+}
+
+test "M14-1: setStr(\".5\") → mantissa=5 scale=-1" {
+	const a = testing.allocator;
+	var x = Fp.init(a);
+	defer x.deinit();
+	try x.setStr(".5", .decimal);
+	try testing.expectEqual(@as(i64, 5), try x.mantissa.getI64());
+	try testing.expectEqual(@as(i32, -1), x.scale);
+}
+
+test "M14-1: setStr(\"100.\") → mantissa=100 scale=0 (trailing dot OK)" {
+	const a = testing.allocator;
+	var x = Fp.init(a);
+	defer x.deinit();
+	try x.setStr("100.", .decimal);
+	try testing.expectEqual(@as(i64, 100), try x.mantissa.getI64());
+	try testing.expectEqual(@as(i32, 0), x.scale);
+}
+
+test "M14-1: setStr(\"0\") → zero" {
+	const a = testing.allocator;
+	var x = Fp.init(a);
+	defer x.deinit();
+	try x.setStr("0", .decimal);
+	try testing.expect(x.isZero());
+}
+
+test "M14-1: setStr(\"\") errors EmptyString" {
+	const a = testing.allocator;
+	var x = Fp.init(a);
+	defer x.deinit();
+	try testing.expectError(error.EmptyString, x.setStr("", .decimal));
+}
+
+test "M14-1: setStr(\"3.1.4\") errors InvalidDigit" {
+	const a = testing.allocator;
+	var x = Fp.init(a);
+	defer x.deinit();
+	try testing.expectError(error.InvalidDigit, x.setStr("3.1.4", .decimal));
+}
+
+test "M14-1: setStr(\"0.11\", binary) → mantissa=3 scale=-2 (= 0.75 dec)" {
+	const a = testing.allocator;
+	var x = Fp.init(a);
+	defer x.deinit();
+	try x.setStr("0.11", .binary);
+	try testing.expectEqual(@as(i64, 3), try x.mantissa.getI64());
+	try testing.expectEqual(@as(i32, -2), x.scale);
+}
+
+test "M14-1: setStr / toStringCanonical round-trip — full IEEE754 disruption demo" {
+	const a = testing.allocator;
+	var x = Fp.init(a);
+	defer x.deinit();
+	var y = Fp.init(a);
+	defer y.deinit();
+	var r = Fp.init(a);
+	defer r.deinit();
+	try x.setStr("0.1", .decimal);
+	try y.setStr("0.2", .decimal);
+	try add(&r, &x, &y);
+	try r.canonicalize();
+	const s = try toStringCanonical(a, &r);
+	defer a.free(s);
+	try testing.expectEqualStrings("0.3", s);
+}
+
+test "M14-2: canonicalize strips trailing zeros — 1.500 → 1.5 (mantissa=1500 scale=-3 → 15 scale=-1)" {
+	var x = Fp.init(testing.allocator);
+	defer x.deinit();
+	try x.setI64(1500, -3, .decimal);
+	try x.canonicalize();
+	try testing.expectEqual(@as(i64, 15), try x.mantissa.getI64());
+	try testing.expectEqual(@as(i32, -1), x.scale);
+}
+
+test "M14-2: canonicalize on integer with trailing zeros: 1500 → 15 × 10^2" {
+	var x = Fp.init(testing.allocator);
+	defer x.deinit();
+	try x.setI64(1500, 0, .decimal);
+	try x.canonicalize();
+	try testing.expectEqual(@as(i64, 15), try x.mantissa.getI64());
+	try testing.expectEqual(@as(i32, 2), x.scale);
+}
+
+test "M14-2: canonicalize: zero gets scale=0 regardless of starting scale" {
+	var x = Fp.init(testing.allocator);
+	defer x.deinit();
+	try x.setI64(0, -7, .decimal);
+	try x.canonicalize();
+	try testing.expectEqual(@as(i32, 0), x.scale);
+	try testing.expect(x.isZero());
+}
+
+test "M14-2: canonicalize: already-canonical leaves Fp unchanged" {
+	var x = Fp.init(testing.allocator);
+	defer x.deinit();
+	try x.setI64(13, -1, .decimal);
+	try x.canonicalize();
+	try testing.expectEqual(@as(i64, 13), try x.mantissa.getI64());
+	try testing.expectEqual(@as(i32, -1), x.scale);
+}
+
+test "M14-2: canonicalize binary: 12 = 0b1100 → 3 × 2^2" {
+	var x = Fp.init(testing.allocator);
+	defer x.deinit();
+	try x.setI64(12, 0, .binary);
+	try x.canonicalize();
+	try testing.expectEqual(@as(i64, 3), try x.mantissa.getI64());
+	try testing.expectEqual(@as(i32, 2), x.scale);
+}
+
+test "M14-2: cmp aligns scales — 0.1 == 0.10 == 0.100 base=10" {
+	var a = Fp.init(testing.allocator);
+	defer a.deinit();
+	var b = Fp.init(testing.allocator);
+	defer b.deinit();
+	var c = Fp.init(testing.allocator);
+	defer c.deinit();
+	try a.setI64(1, -1, .decimal);    // 0.1
+	try b.setI64(10, -2, .decimal);   // 0.10
+	try c.setI64(100, -3, .decimal);  // 0.100
+	try testing.expectEqual(std.math.Order.eq, try cmp(&a, &b));
+	try testing.expectEqual(std.math.Order.eq, try cmp(&b, &c));
+	try testing.expectEqual(std.math.Order.eq, try cmp(&a, &c));
+}
+
+test "M14-2: cmp orders distinct values correctly across scales" {
+	var a = Fp.init(testing.allocator);
+	defer a.deinit();
+	var b = Fp.init(testing.allocator);
+	defer b.deinit();
+	try a.setI64(1, -1, .decimal);    // 0.1
+	try b.setI64(11, -2, .decimal);   // 0.11
+	try testing.expectEqual(std.math.Order.lt, try cmp(&a, &b));
+	try testing.expectEqual(std.math.Order.gt, try cmp(&b, &a));
+}
+
+test "M14-2: cmp negatives" {
+	var a = Fp.init(testing.allocator);
+	defer a.deinit();
+	var b = Fp.init(testing.allocator);
+	defer b.deinit();
+	try a.setI64(-1, -1, .decimal);   // -0.1
+	try b.setI64(1, -1, .decimal);    // 0.1
+	try testing.expectEqual(std.math.Order.lt, try cmp(&a, &b));
+}
+
+test "M14-2: cmp zero handling — 0 == 0 regardless of scale/base" {
+	var a = Fp.init(testing.allocator);
+	defer a.deinit();
+	var b = Fp.init(testing.allocator);
+	defer b.deinit();
+	try a.setI64(0, -3, .decimal);
+	try b.setI64(0, 5, .decimal);
+	try testing.expectEqual(std.math.Order.eq, try cmp(&a, &b));
+}
+
+test "M14-2: cmp errors on mixed bases" {
+	var a = Fp.init(testing.allocator);
+	defer a.deinit();
+	var b = Fp.init(testing.allocator);
+	defer b.deinit();
+	try a.setI64(1, -1, .decimal);
+	try b.setI64(1, -1, .binary);
+	try testing.expectError(error.MixedBases, cmp(&a, &b));
+}
+
+test "M14-2: eq returns true for numerically-equal values regardless of scale" {
+	var a = Fp.init(testing.allocator);
+	defer a.deinit();
+	var b = Fp.init(testing.allocator);
+	defer b.deinit();
+	try a.setI64(1, -1, .decimal);
+	try b.setI64(100, -3, .decimal);
+	try testing.expect(try eq(&a, &b));
+}
+
+test "M14-2: eq returns false for distinct values" {
+	var a = Fp.init(testing.allocator);
+	defer a.deinit();
+	var b = Fp.init(testing.allocator);
+	defer b.deinit();
+	try a.setI64(1, -1, .decimal);
+	try b.setI64(2, -1, .decimal);
+	try testing.expect(!(try eq(&a, &b)));
+}
+
+test "M14-3: 0.1 + 0.2 == 0.3 EXACTLY (the IEEE754 disruption headline)" {
+	const a = testing.allocator;
+	var x = Fp.init(a);
+	defer x.deinit();
+	var y = Fp.init(a);
+	defer y.deinit();
+	var r = Fp.init(a);
+	defer r.deinit();
+	var expected = Fp.init(a);
+	defer expected.deinit();
+	try x.setRationalDecimal(1, 10);
+	try y.setRationalDecimal(2, 10);
+	try expected.setRationalDecimal(3, 10);
+	try add(&r, &x, &y);
+	try testing.expect(try eq(&r, &expected));
+}
+
+test "M14-3: add aligns scales — 0.5 + 0.25 == 0.75" {
+	const a = testing.allocator;
+	var x = Fp.init(a);
+	defer x.deinit();
+	var y = Fp.init(a);
+	defer y.deinit();
+	var r = Fp.init(a);
+	defer r.deinit();
+	var expected = Fp.init(a);
+	defer expected.deinit();
+	try x.setRationalDecimal(1, 2);    // 0.5
+	try y.setRationalDecimal(1, 4);    // 0.25
+	try expected.setRationalDecimal(3, 4); // 0.75
+	try add(&r, &x, &y);
+	try testing.expect(try eq(&r, &expected));
+}
+
+test "M14-3: add x + 0 == x" {
+	const a = testing.allocator;
+	var x = Fp.init(a);
+	defer x.deinit();
+	var z = Fp.init(a);
+	defer z.deinit();
+	var r = Fp.init(a);
+	defer r.deinit();
+	try x.setRationalDecimal(7, 4); // 1.75
+	try z.setI64(0, 0, .decimal);
+	try add(&r, &x, &z);
+	try testing.expect(try eq(&r, &x));
+}
+
+test "M14-3: add mixes sign — 0.5 + (-0.3) == 0.2" {
+	const a = testing.allocator;
+	var x = Fp.init(a);
+	defer x.deinit();
+	var y = Fp.init(a);
+	defer y.deinit();
+	var r = Fp.init(a);
+	defer r.deinit();
+	var expected = Fp.init(a);
+	defer expected.deinit();
+	try x.setRationalDecimal(1, 2);     // 0.5
+	try y.setRationalDecimal(-3, 10);   // -0.3
+	try expected.setRationalDecimal(1, 5); // 0.2
+	try add(&r, &x, &y);
+	try testing.expect(try eq(&r, &expected));
+}
+
+test "M14-3: add binary base — 0.5 + 0.25 = 0.75" {
+	const a = testing.allocator;
+	var x = Fp.init(a);
+	defer x.deinit();
+	var y = Fp.init(a);
+	defer y.deinit();
+	var r = Fp.init(a);
+	defer r.deinit();
+	var expected = Fp.init(a);
+	defer expected.deinit();
+	try x.setRationalBinary(1, 2);
+	try y.setRationalBinary(1, 4);
+	try expected.setRationalBinary(3, 4);
+	try add(&r, &x, &y);
+	try testing.expect(try eq(&r, &expected));
+}
+
+test "M14-3: add errors on mixed bases" {
+	const a = testing.allocator;
+	var x = Fp.init(a);
+	defer x.deinit();
+	var y = Fp.init(a);
+	defer y.deinit();
+	var r = Fp.init(a);
+	defer r.deinit();
+	try x.setI64(1, 0, .decimal);
+	try y.setI64(1, 0, .binary);
+	try testing.expectError(error.MixedBases, add(&r, &x, &y));
+}
+
+test "M14-3: sub — 0.3 - 0.1 == 0.2" {
+	const a = testing.allocator;
+	var x = Fp.init(a);
+	defer x.deinit();
+	var y = Fp.init(a);
+	defer y.deinit();
+	var r = Fp.init(a);
+	defer r.deinit();
+	var expected = Fp.init(a);
+	defer expected.deinit();
+	try x.setRationalDecimal(3, 10);
+	try y.setRationalDecimal(1, 10);
+	try expected.setRationalDecimal(2, 10);
+	try sub(&r, &x, &y);
+	try testing.expect(try eq(&r, &expected));
+}
+
+test "M14-3: sub — x - x == 0" {
+	const a = testing.allocator;
+	var x = Fp.init(a);
+	defer x.deinit();
+	var r = Fp.init(a);
+	defer r.deinit();
+	try x.setRationalDecimal(7, 4);
+	try sub(&r, &x, &x);
+	try testing.expect(r.isZero());
+}
+
+test "M14-3: mul is always exact — 0.5 * 0.2 == 0.1" {
+	const a = testing.allocator;
+	var x = Fp.init(a);
+	defer x.deinit();
+	var y = Fp.init(a);
+	defer y.deinit();
+	var r = Fp.init(a);
+	defer r.deinit();
+	var expected = Fp.init(a);
+	defer expected.deinit();
+	try x.setRationalDecimal(1, 2);    // 0.5
+	try y.setRationalDecimal(1, 5);    // 0.2
+	try expected.setRationalDecimal(1, 10); // 0.1
+	try mul(&r, &x, &y);
+	try testing.expect(try eq(&r, &expected));
+}
+
+test "M14-3: mul x * 0 == 0" {
+	const a = testing.allocator;
+	var x = Fp.init(a);
+	defer x.deinit();
+	var z = Fp.init(a);
+	defer z.deinit();
+	var r = Fp.init(a);
+	defer r.deinit();
+	try x.setRationalDecimal(355, 100);
+	try z.setI64(0, 0, .decimal);
+	try mul(&r, &x, &z);
+	try testing.expect(r.isZero());
+}
+
+test "M14-3: mul x * 1 == x" {
+	const a = testing.allocator;
+	var x = Fp.init(a);
+	defer x.deinit();
+	var one = Fp.init(a);
+	defer one.deinit();
+	var r = Fp.init(a);
+	defer r.deinit();
+	try x.setRationalDecimal(7, 4);
+	try one.setI64(1, 0, .decimal);
+	try mul(&r, &x, &one);
+	try testing.expect(try eq(&r, &x));
+}
+
+test "M14-3: mul scales sum correctly: 1.5 × 2.0 = 3.0 (mantissa 30, scale -1 → canonical 3, scale 0)" {
+	const a = testing.allocator;
+	var x = Fp.init(a);
+	defer x.deinit();
+	var y = Fp.init(a);
+	defer y.deinit();
+	var r = Fp.init(a);
+	defer r.deinit();
+	var expected = Fp.init(a);
+	defer expected.deinit();
+	try x.setRationalDecimal(3, 2); // 1.5
+	try y.setI64(2, 0, .decimal);   // 2.0
+	try expected.setI64(3, 0, .decimal);
+	try mul(&r, &x, &y);
+	try testing.expect(try eq(&r, &expected));
+}
+
+test "M14-4: divExact(1, 4) base=10 → 0.25 (terminates: 4 = 2^2)" {
+	const a = testing.allocator;
+	var x = Fp.init(a);
+	defer x.deinit();
+	var y = Fp.init(a);
+	defer y.deinit();
+	var r = Fp.init(a);
+	defer r.deinit();
+	var expected = Fp.init(a);
+	defer expected.deinit();
+	try x.setI64(1, 0, .decimal);
+	try y.setI64(4, 0, .decimal);
+	try expected.setRationalDecimal(1, 4); // 0.25
+	try divExact(&r, &x, &y);
+	try testing.expect(try eq(&r, &expected));
+}
+
+test "M14-4: divExact(5, 8) base=10 → 0.625" {
+	const a = testing.allocator;
+	var x = Fp.init(a);
+	defer x.deinit();
+	var y = Fp.init(a);
+	defer y.deinit();
+	var r = Fp.init(a);
+	defer r.deinit();
+	var expected = Fp.init(a);
+	defer expected.deinit();
+	try x.setI64(5, 0, .decimal);
+	try y.setI64(8, 0, .decimal);
+	try expected.setRationalDecimal(625, 1000); // 0.625
+	try divExact(&r, &x, &y);
+	try testing.expect(try eq(&r, &expected));
+}
+
+test "M14-4: divExact preserves sign — -1/4 → -0.25" {
+	const a = testing.allocator;
+	var x = Fp.init(a);
+	defer x.deinit();
+	var y = Fp.init(a);
+	defer y.deinit();
+	var r = Fp.init(a);
+	defer r.deinit();
+	var expected = Fp.init(a);
+	defer expected.deinit();
+	try x.setI64(-1, 0, .decimal);
+	try y.setI64(4, 0, .decimal);
+	try expected.setRationalDecimal(-1, 4);
+	try divExact(&r, &x, &y);
+	try testing.expect(try eq(&r, &expected));
+}
+
+test "M14-4: divExact respects existing scales — 0.5 / 0.25 = 2" {
+	const a = testing.allocator;
+	var x = Fp.init(a);
+	defer x.deinit();
+	var y = Fp.init(a);
+	defer y.deinit();
+	var r = Fp.init(a);
+	defer r.deinit();
+	var expected = Fp.init(a);
+	defer expected.deinit();
+	try x.setRationalDecimal(1, 2); // 0.5
+	try y.setRationalDecimal(1, 4); // 0.25
+	try expected.setI64(2, 0, .decimal);
+	try divExact(&r, &x, &y);
+	try testing.expect(try eq(&r, &expected));
+}
+
+test "M14-4: divExact(1, 3) base=10 errors NonTerminatingExpansion" {
+	const a = testing.allocator;
+	var x = Fp.init(a);
+	defer x.deinit();
+	var y = Fp.init(a);
+	defer y.deinit();
+	var r = Fp.init(a);
+	defer r.deinit();
+	try x.setI64(1, 0, .decimal);
+	try y.setI64(3, 0, .decimal);
+	try testing.expectError(error.NonTerminatingExpansion, divExact(&r, &x, &y));
+}
+
+test "M14-4: divExact(1, 7) base=10 errors NonTerminatingExpansion" {
+	const a = testing.allocator;
+	var x = Fp.init(a);
+	defer x.deinit();
+	var y = Fp.init(a);
+	defer y.deinit();
+	var r = Fp.init(a);
+	defer r.deinit();
+	try x.setI64(1, 0, .decimal);
+	try y.setI64(7, 0, .decimal);
+	try testing.expectError(error.NonTerminatingExpansion, divExact(&r, &x, &y));
+}
+
+test "M14-4: divExact(_ , 0) errors DivisionByZero" {
+	const a = testing.allocator;
+	var x = Fp.init(a);
+	defer x.deinit();
+	var z = Fp.init(a);
+	defer z.deinit();
+	var r = Fp.init(a);
+	defer r.deinit();
+	try x.setI64(7, 0, .decimal);
+	try z.setI64(0, 0, .decimal);
+	try testing.expectError(error.DivisionByZero, divExact(&r, &x, &z));
+}
+
+test "M14-4: divExact 0/x = 0" {
+	const a = testing.allocator;
+	var z = Fp.init(a);
+	defer z.deinit();
+	var x = Fp.init(a);
+	defer x.deinit();
+	var r = Fp.init(a);
+	defer r.deinit();
+	try z.setI64(0, 0, .decimal);
+	try x.setI64(7, 0, .decimal);
+	try divExact(&r, &z, &x);
+	try testing.expect(r.isZero());
+}
+
+test "M14-4: divExact binary 1/8 → 0.125 (1 × 2^-3)" {
+	const a = testing.allocator;
+	var x = Fp.init(a);
+	defer x.deinit();
+	var y = Fp.init(a);
+	defer y.deinit();
+	var r = Fp.init(a);
+	defer r.deinit();
+	var expected = Fp.init(a);
+	defer expected.deinit();
+	try x.setI64(1, 0, .binary);
+	try y.setI64(8, 0, .binary);
+	try expected.setRationalBinary(1, 8);
+	try divExact(&r, &x, &y);
+	try testing.expect(try eq(&r, &expected));
+}
+
+test "M14-4: divExact binary 1/3 errors (3 is not a power of 2)" {
+	const a = testing.allocator;
+	var x = Fp.init(a);
+	defer x.deinit();
+	var y = Fp.init(a);
+	defer y.deinit();
+	var r = Fp.init(a);
+	defer r.deinit();
+	try x.setI64(1, 0, .binary);
+	try y.setI64(3, 0, .binary);
+	try testing.expectError(error.NonTerminatingExpansion, divExact(&r, &x, &y));
+}
+
+test "M14-4: divExact 6/4 reduces to 3/2 → 1.5" {
+	const a = testing.allocator;
+	var x = Fp.init(a);
+	defer x.deinit();
+	var y = Fp.init(a);
+	defer y.deinit();
+	var r = Fp.init(a);
+	defer r.deinit();
+	var expected = Fp.init(a);
+	defer expected.deinit();
+	try x.setI64(6, 0, .decimal);
+	try y.setI64(4, 0, .decimal);
+	try expected.setRationalDecimal(3, 2);
+	try divExact(&r, &x, &y);
+	try testing.expect(try eq(&r, &expected));
+}
+
+test "M14-4: divPrecision(1, 4, max=5) base=10 → exact (25000 × 10^-5 = 0.25), reports exact=true" {
+	const a = testing.allocator;
+	var x = Fp.init(a);
+	defer x.deinit();
+	var y = Fp.init(a);
+	defer y.deinit();
+	var r = Fp.init(a);
+	defer r.deinit();
+	var expected = Fp.init(a);
+	defer expected.deinit();
+	try x.setI64(1, 0, .decimal);
+	try y.setI64(4, 0, .decimal);
+	try expected.setRationalDecimal(1, 4);
+	const exact = try divPrecision(&r, &x, &y, 5);
+	try testing.expect(exact);
+	try testing.expect(try eq(&r, &expected));
+}
+
+test "M14-4: divPrecision(1, 3, max=5) base=10 → inexact, mantissa=33333 scale=-5" {
+	const a = testing.allocator;
+	var x = Fp.init(a);
+	defer x.deinit();
+	var y = Fp.init(a);
+	defer y.deinit();
+	var r = Fp.init(a);
+	defer r.deinit();
+	try x.setI64(1, 0, .decimal);
+	try y.setI64(3, 0, .decimal);
+	const exact = try divPrecision(&r, &x, &y, 5);
+	try testing.expect(!exact);
+	try testing.expectEqual(@as(i64, 33333), try r.mantissa.getI64());
+	try testing.expectEqual(@as(i32, -5), r.scale);
+}
+
+test "M14-4: divPrecision(22, 7, max=10) base=10 ≈ 3.1428571428" {
+	const a = testing.allocator;
+	var x = Fp.init(a);
+	defer x.deinit();
+	var y = Fp.init(a);
+	defer y.deinit();
+	var r = Fp.init(a);
+	defer r.deinit();
+	try x.setI64(22, 0, .decimal);
+	try y.setI64(7, 0, .decimal);
+	const exact = try divPrecision(&r, &x, &y, 10);
+	try testing.expect(!exact);
+	try testing.expectEqual(@as(i64, 31428571428), try r.mantissa.getI64());
+	try testing.expectEqual(@as(i32, -10), r.scale);
+}
+
+test "M14-4: divPrecision preserves sign — -1/3 max=4 → -3333 × 10^-4" {
+	const a = testing.allocator;
+	var x = Fp.init(a);
+	defer x.deinit();
+	var y = Fp.init(a);
+	defer y.deinit();
+	var r = Fp.init(a);
+	defer r.deinit();
+	try x.setI64(-1, 0, .decimal);
+	try y.setI64(3, 0, .decimal);
+	const exact = try divPrecision(&r, &x, &y, 4);
+	try testing.expect(!exact);
+	try testing.expectEqual(@as(i64, -3333), try r.mantissa.getI64());
+	try testing.expectEqual(@as(i32, -4), r.scale);
+}
+
+test "M14-4: divPrecision errors on division by zero" {
+	const a = testing.allocator;
+	var x = Fp.init(a);
+	defer x.deinit();
+	var z = Fp.init(a);
+	defer z.deinit();
+	var r = Fp.init(a);
+	defer r.deinit();
+	try x.setI64(1, 0, .decimal);
+	try z.setI64(0, 0, .decimal);
+	try testing.expectError(error.DivisionByZero, divPrecision(&r, &x, &z, 5));
+}
+
+test "M14-4: divPrecision binary — 1/3 max=8 truncates" {
+	const a = testing.allocator;
+	var x = Fp.init(a);
+	defer x.deinit();
+	var y = Fp.init(a);
+	defer y.deinit();
+	var r = Fp.init(a);
+	defer r.deinit();
+	try x.setI64(1, 0, .binary);
+	try y.setI64(3, 0, .binary);
+	const exact = try divPrecision(&r, &x, &y, 8);
+	try testing.expect(!exact);
+	// 1/3 in binary at 8 fractional bits: 0.01010101 = 0x55 = 85
+	// Result: mantissa=85, scale=-8. 85 × 2^-8 = 85/256 ≈ 0.332 ≈ 1/3 - tiny
+	try testing.expectEqual(@as(i64, 85), try r.mantissa.getI64());
+	try testing.expectEqual(@as(i32, -8), r.scale);
+}
+
+test "M14-4: divQR reconstructs: quot * divisor + rem == dividend" {
+	return error.SkipZigTest; // M14-4 divQR not yet implemented
+}
+
+test "M14-5: toDecimal of base=10 fp is a trivial copy" {
+	const a = testing.allocator;
+	var x = Fp.init(a);
+	defer x.deinit();
+	var y = Fp.init(a);
+	defer y.deinit();
+	try x.setRationalDecimal(7, 4); // 1.75
+	try toDecimal(&y, &x);
+	try testing.expect(try eq(&x, &y));
+}
+
+test "M14-5: toDecimal of base=2 0.5 (1 × 2^-1) → 5 × 10^-1 = 0.5 (always exact)" {
+	const a = testing.allocator;
+	var x = Fp.init(a);
+	defer x.deinit();
+	var y = Fp.init(a);
+	defer y.deinit();
+	try x.setI64(1, -1, .binary); // 0.5 in binary
+	try toDecimal(&y, &x);
+	try testing.expectEqual(Base.decimal, y.base);
+	try testing.expectEqual(@as(i64, 5), try y.mantissa.getI64());
+	try testing.expectEqual(@as(i32, -1), y.scale);
+}
+
+test "M14-5: toDecimal positive-scale binary — 3 × 2^4 = 48" {
+	const a = testing.allocator;
+	var x = Fp.init(a);
+	defer x.deinit();
+	var y = Fp.init(a);
+	defer y.deinit();
+	try x.setI64(3, 4, .binary); // 3 × 16 = 48
+	try toDecimal(&y, &x);
+	try testing.expectEqual(@as(i64, 48), try y.mantissa.getI64());
+	try testing.expectEqual(@as(i32, 0), y.scale);
+}
+
+test "M14-5: toDecimal of binary -1 × 2^-3 = -0.125" {
+	const a = testing.allocator;
+	var x = Fp.init(a);
+	defer x.deinit();
+	var y = Fp.init(a);
+	defer y.deinit();
+	try x.setI64(-1, -3, .binary);
+	try toDecimal(&y, &x);
+	const s = try toStringCanonical(a, &y);
+	defer a.free(s);
+	try testing.expectEqualStrings("-0.125", s);
+}
+
+test "M14-5: toBinary of base=2 fp is a trivial copy" {
+	const a = testing.allocator;
+	var x = Fp.init(a);
+	defer x.deinit();
+	var y = Fp.init(a);
+	defer y.deinit();
+	try x.setRationalBinary(3, 4);
+	try toBinary(&y, &x);
+	try testing.expect(try eq(&x, &y));
+}
+
+test "M14-5: toBinary of decimal 0.5 → 5 × 2^-1 (terminates)" {
+	const a = testing.allocator;
+	var x = Fp.init(a);
+	defer x.deinit();
+	var y = Fp.init(a);
+	defer y.deinit();
+	try x.setRationalDecimal(1, 2); // 5 × 10^-1
+	try toBinary(&y, &x);
+	try testing.expectEqual(Base.binary, y.base);
+	// 0.5 = 1 × 2^-1; the toBinary impl divides 5 by 5^1 and gives 1 × 2^-1.
+	try testing.expectEqual(@as(i64, 1), try y.mantissa.getI64());
+	try testing.expectEqual(@as(i32, -1), y.scale);
+}
+
+test "M14-5: toBinary of decimal 0.1 errors NonTerminatingExpansion (the IEEE754 confession)" {
+	const a = testing.allocator;
+	var x = Fp.init(a);
+	defer x.deinit();
+	var y = Fp.init(a);
+	defer y.deinit();
+	try x.setRationalDecimal(1, 10);
+	try testing.expectError(error.NonTerminatingExpansion, toBinary(&y, &x));
+}
+
+test "M14-5: toBinary of decimal integer 25 → 25 × 2^0 (always exact for integers)" {
+	const a = testing.allocator;
+	var x = Fp.init(a);
+	defer x.deinit();
+	var y = Fp.init(a);
+	defer y.deinit();
+	try x.setI64(25, 0, .decimal);
+	try toBinary(&y, &x);
+	try testing.expectEqual(@as(i64, 25), try y.mantissa.getI64());
+	try testing.expectEqual(@as(i32, 0), y.scale);
+}
+
+test "M14-6: roundToScale(.exact_or_error) errors when target scale would lose info" {
+	return error.SkipZigTest; // M14-6 round not yet implemented
+}
+
+test "M14-6: roundToScale(.banker) round-half-to-even on 0.5 boundary" {
+	return error.SkipZigTest; // M14-6 round not yet implemented
+}
+
+test "M14-7: toStringCanonical of 0 → \"0\"" {
+	const a = testing.allocator;
+	var x = Fp.init(a);
+	defer x.deinit();
+	const s = try toStringCanonical(a, &x);
+	defer a.free(s);
+	try testing.expectEqualStrings("0", s);
+}
+
+test "M14-7: toStringCanonical of 314 × 10^-2 → \"3.14\"" {
+	const a = testing.allocator;
+	var x = Fp.init(a);
+	defer x.deinit();
+	try x.setI64(314, -2, .decimal);
+	const s = try toStringCanonical(a, &x);
+	defer a.free(s);
+	try testing.expectEqualStrings("3.14", s);
+}
+
+test "M14-7: toStringCanonical of 125 × 10^-3 → \"0.125\"" {
+	const a = testing.allocator;
+	var x = Fp.init(a);
+	defer x.deinit();
+	try x.setI64(125, -3, .decimal);
+	const s = try toStringCanonical(a, &x);
+	defer a.free(s);
+	try testing.expectEqualStrings("0.125", s);
+}
+
+test "M14-7: toStringCanonical of 25 × 10^-3 → \"0.025\" (leading zero pad)" {
+	const a = testing.allocator;
+	var x = Fp.init(a);
+	defer x.deinit();
+	try x.setI64(25, -3, .decimal);
+	const s = try toStringCanonical(a, &x);
+	defer a.free(s);
+	try testing.expectEqualStrings("0.025", s);
+}
+
+test "M14-7: toStringCanonical of 15 × 10^2 → \"1500\" (positive scale)" {
+	const a = testing.allocator;
+	var x = Fp.init(a);
+	defer x.deinit();
+	try x.setI64(15, 2, .decimal);
+	const s = try toStringCanonical(a, &x);
+	defer a.free(s);
+	try testing.expectEqualStrings("1500", s);
+}
+
+test "M14-7: toStringCanonical preserves sign — -1/4 → \"-0.25\"" {
+	const a = testing.allocator;
+	var x = Fp.init(a);
+	defer x.deinit();
+	try x.setRationalDecimal(-1, 4);
+	const s = try toStringCanonical(a, &x);
+	defer a.free(s);
+	try testing.expectEqualStrings("-0.25", s);
+}
+
+test "M14-7: HEADLINE — toStringCanonical(0.1 + 0.2) prints exactly \"0.3\"" {
+	const a = testing.allocator;
+	var x = Fp.init(a);
+	defer x.deinit();
+	var y = Fp.init(a);
+	defer y.deinit();
+	var r = Fp.init(a);
+	defer r.deinit();
+	try x.setRationalDecimal(1, 10);
+	try y.setRationalDecimal(2, 10);
+	try add(&r, &x, &y);
+	try r.canonicalize();
+	const s = try toStringCanonical(a, &r);
+	defer a.free(s);
+	try testing.expectEqualStrings("0.3", s);
+}
+
+test "M14-7: toStringCanonical binary 11 × 2^-2 → \"0.11\" (= 0.75 dec)" {
+	const a = testing.allocator;
+	var x = Fp.init(a);
+	defer x.deinit();
+	try x.setRationalBinary(3, 4); // 3 × 2^-2 = 0.11 binary = 0.75 decimal
+	const s = try toStringCanonical(a, &x);
+	defer a.free(s);
+	try testing.expectEqualStrings("0.11", s);
+}
+
+test "M14-8: setF64(0.0) → zero" {
+	const a = testing.allocator;
+	var x = Fp.init(a);
+	defer x.deinit();
+	try x.setF64(0.0);
+	try testing.expect(x.isZero());
+}
+
+test "M14-8: setF64(-0.0) → zero (no signed zero distinction)" {
+	const a = testing.allocator;
+	var x = Fp.init(a);
+	defer x.deinit();
+	try x.setF64(-0.0);
+	try testing.expect(x.isZero());
+}
+
+test "M14-8: setF64(1.0) canonicalizes to 1 × 2^0" {
+	const a = testing.allocator;
+	var x = Fp.init(a);
+	defer x.deinit();
+	try x.setF64(1.0);
+	try x.canonicalize();
+	try testing.expectEqual(@as(i64, 1), try x.mantissa.getI64());
+	try testing.expectEqual(@as(i32, 0), x.scale);
+	try testing.expectEqual(Base.binary, x.base);
+}
+
+test "M14-8: setF64(0.5) canonicalizes to 1 × 2^-1" {
+	const a = testing.allocator;
+	var x = Fp.init(a);
+	defer x.deinit();
+	try x.setF64(0.5);
+	try x.canonicalize();
+	try testing.expectEqual(@as(i64, 1), try x.mantissa.getI64());
+	try testing.expectEqual(@as(i32, -1), x.scale);
+}
+
+test "M14-8: setF64(-2.0) → -1 × 2^1 after canonicalize" {
+	const a = testing.allocator;
+	var x = Fp.init(a);
+	defer x.deinit();
+	try x.setF64(-2.0);
+	try x.canonicalize();
+	try testing.expectEqual(@as(i64, -1), try x.mantissa.getI64());
+	try testing.expectEqual(@as(i32, 1), x.scale);
+}
+
+test "M14-8: setF64(0.1) — proves IEEE754 lies (non-canonical-1)" {
+	const a = testing.allocator;
+	var x = Fp.init(a);
+	defer x.deinit();
+	try x.setF64(0.1);
+	try x.canonicalize();
+	// 0.1f64 is exactly 0xCCCCCCCCCCCCCD × 2^-55 = 3602879701896397 × 2^-55
+	// (the mantissa with one trailing zero bit stripped from raw 0x1999999999999A × 2^-56)
+	try testing.expectEqual(@as(i64, 3602879701896397), try x.mantissa.getI64());
+	try testing.expectEqual(@as(i32, -55), x.scale);
+}
+
+test "M14-8 KILLSHOT: setF64(0.1) → toDecimal → prints the exact 55-digit lie IEEE754 hides" {
+	const a = testing.allocator;
+	var x = Fp.init(a);
+	defer x.deinit();
+	var d = Fp.init(a);
+	defer d.deinit();
+	try x.setF64(0.1);
+	try toDecimal(&d, &x);
+	try d.canonicalize();
+	const s = try toStringCanonical(a, &d);
+	defer a.free(s);
+	try testing.expectEqualStrings("0.1000000000000000055511151231257827021181583404541015625", s);
+}
+
+test "M14-8 KILLSHOT 2: setF64(0.1) + setF64(0.2) ≠ setF64(0.3) (the famous IEEE754 disaster)" {
+	const a = testing.allocator;
+	var x = Fp.init(a);
+	defer x.deinit();
+	var y = Fp.init(a);
+	defer y.deinit();
+	var z = Fp.init(a);
+	defer z.deinit();
+	var s = Fp.init(a);
+	defer s.deinit();
+	try x.setF64(0.1);
+	try y.setF64(0.2);
+	try z.setF64(0.3);
+	try add(&s, &x, &y);
+	try testing.expect(!(try eq(&s, &z))); // s and z DIFFER — IEEE754 caught in the act
+}
+
+test "M14-8: setF64(NaN) errors NotRepresentable" {
+	const a = testing.allocator;
+	var x = Fp.init(a);
+	defer x.deinit();
+	const nan = std.math.nan(f64);
+	try testing.expectError(error.NotRepresentable, x.setF64(nan));
+}
+
+test "M14-8: setF64(+inf) errors NotRepresentable" {
+	const a = testing.allocator;
+	var x = Fp.init(a);
+	defer x.deinit();
+	const inf = std.math.inf(f64);
+	try testing.expectError(error.NotRepresentable, x.setF64(inf));
+}
+
+test "M14-8: setF64(-inf) errors NotRepresentable" {
+	const a = testing.allocator;
+	var x = Fp.init(a);
+	defer x.deinit();
+	const inf = -std.math.inf(f64);
+	try testing.expectError(error.NotRepresentable, x.setF64(inf));
+}
+
+test "M14-8: getF64 errors when value is not representable as f64 (rather than rounding silently)" {
+	return error.SkipZigTest; // M14-8 getF64 not yet implemented
+}
