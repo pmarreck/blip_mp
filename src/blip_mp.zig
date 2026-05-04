@@ -12,6 +12,7 @@ pub const fft = @import("fft.zig");
 pub const bitwise = @import("bitwise.zig");
 pub const sign = @import("sign.zig");
 pub const combinatorial = @import("combinatorial.zig");
+pub const roots = @import("roots.zig");
 pub const Mp = bignum.Mp;
 
 test {
