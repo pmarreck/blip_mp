@@ -17,6 +17,7 @@ pub const symbols = @import("symbols.zig");
 pub const primes = @import("primes.zig");
 pub const scan = @import("scan.zig");
 pub const gcd = @import("gcd.zig");
+pub const random_mp = @import("random_mp.zig");
 pub const Mp = bignum.Mp;
 
 test {
