@@ -220,17 +220,119 @@ int blip_mp_factorial(blip_mp_t *out, uint32_t n);
 int blip_mp_binomial(blip_mp_t *out, uint32_t n, uint32_t k);
 int blip_mp_fibonacci(blip_mp_t *out, uint32_t n);
 
+// ────────────────────────────────────────────────────────────────────
+// Fp — exact arbitrary-precision fixed-point (M14 IEEE754 disruption)
+// ────────────────────────────────────────────────────────────────────
+//
+// Each Fp carries (mantissa, scale, base). Every operation either
+// succeeds bit-exactly, takes a caller-supplied precision budget,
+// or errors loudly. No NaN, no ±∞, no signed zero, no denormals,
+// no silent rounding — none of IEEE754's footguns.
+//
+// Demo (the "IEEE754 disruption" pitch):
+//   blip_mp_fp_t *x = blip_mp_fp_create();
+//   blip_mp_fp_t *y = blip_mp_fp_create();
+//   blip_mp_fp_t *r = blip_mp_fp_create();
+//   blip_mp_fp_set_str(x, "0.1", 3, BLIP_MP_FP_BASE_DECIMAL);
+//   blip_mp_fp_set_str(y, "0.2", 3, BLIP_MP_FP_BASE_DECIMAL);
+//   blip_mp_fp_add(r, x, y);
+//   blip_mp_fp_canonicalize(r);
+//   char buf[16]; size_t need;
+//   blip_mp_fp_to_string_canonical(r, buf, sizeof buf, &need);
+//   // buf == "0.3"  (literally, no IEEE754 lying)
+
+typedef struct blip_mp_fp_t blip_mp_fp_t;
+
+// Base wire values match the Zig Base enum.
+#define BLIP_MP_FP_BASE_BINARY    2
+#define BLIP_MP_FP_BASE_DECIMAL   10
+
+// Rounding modes — caller MUST choose explicitly. No default.
+#define BLIP_MP_FP_ROUND_EXACT_OR_ERROR   0  // error if any info would be lost
+#define BLIP_MP_FP_ROUND_TOWARD_ZERO      1  // truncate magnitude
+#define BLIP_MP_FP_ROUND_TOWARD_POS_INF   2  // ceiling
+#define BLIP_MP_FP_ROUND_TOWARD_NEG_INF   3  // floor
+#define BLIP_MP_FP_ROUND_HALF_UP          4  // ties away from zero
+#define BLIP_MP_FP_ROUND_HALF_DOWN        5  // ties toward zero
+#define BLIP_MP_FP_ROUND_HALF_TO_EVEN     6  // banker's rounding
+#define BLIP_MP_FP_ROUND_HALF_TO_ODD      7  // ties to odd
+
+// Lifecycle.
+blip_mp_fp_t *blip_mp_fp_create(void);
+void          blip_mp_fp_destroy(blip_mp_fp_t *fp);
+
+// Construction. `base` is one of the BLIP_MP_FP_BASE_* constants.
+int blip_mp_fp_set_i64(blip_mp_fp_t *fp, int64_t mantissa, int32_t scale, int base);
+int blip_mp_fp_set_rational_decimal(blip_mp_fp_t *fp, int64_t num, int64_t den);
+int blip_mp_fp_set_rational_binary(blip_mp_fp_t *fp, int64_t num, int64_t den);
+int blip_mp_fp_set_str(blip_mp_fp_t *fp, const char *str, size_t str_len, int base);
+// setF64: decode IEEE754 bit-exactly. NaN/±∞ → BLIP_MP_ERR_NOT_REPRESENTABLE.
+int blip_mp_fp_set_f64(blip_mp_fp_t *fp, double v);
+
+// Queries.
+int     blip_mp_fp_is_zero(const blip_mp_fp_t *fp);
+int     blip_mp_fp_get_base(const blip_mp_fp_t *fp);
+int32_t blip_mp_fp_get_scale(const blip_mp_fp_t *fp);
+// Borrowed Mp pointer; valid until the next mutating call on fp.
+// Pass to read-only blip_mp_* ops; do NOT destroy.
+blip_mp_t *blip_mp_fp_get_mantissa(blip_mp_fp_t *fp);
+
+// Canonical form: strip trailing factors-of-base from the mantissa.
+int blip_mp_fp_canonicalize(blip_mp_fp_t *fp);
+
+// Comparison. Same-base required; mixed bases error MIXED_BASES.
+int blip_mp_fp_cmp(const blip_mp_fp_t *a, const blip_mp_fp_t *b, int *out);  // out ∈ {-1,0,1}
+int blip_mp_fp_eq(const blip_mp_fp_t *a, const blip_mp_fp_t *b, int *out);   // out ∈ {0,1}
+
+// Arithmetic. Same-base required.
+int blip_mp_fp_add(blip_mp_fp_t *r, const blip_mp_fp_t *a, const blip_mp_fp_t *b);
+int blip_mp_fp_sub(blip_mp_fp_t *r, const blip_mp_fp_t *a, const blip_mp_fp_t *b);
+int blip_mp_fp_mul(blip_mp_fp_t *r, const blip_mp_fp_t *a, const blip_mp_fp_t *b);
+
+// divExact: succeeds bit-exactly OR errors NON_TERMINATING (e.g. 1/3 in
+// base 10). The no-silent-rounding cornerstone.
+int blip_mp_fp_div_exact(blip_mp_fp_t *r, const blip_mp_fp_t *a, const blip_mp_fp_t *b);
+
+// divPrecision: caller-supplied budget. *out_exact is 1 if bit-exact, 0
+// if had to truncate. Caller decides how to react.
+int blip_mp_fp_div_precision(blip_mp_fp_t *r,
+                             const blip_mp_fp_t *a,
+                             const blip_mp_fp_t *b,
+                             uint32_t max_scale_digits,
+                             int *out_exact);
+
+// Cross-base. toDecimal always exact; toBinary errors NON_TERMINATING
+// when needed (e.g. 0.1₁₀ in binary).
+int blip_mp_fp_to_decimal(blip_mp_fp_t *out, const blip_mp_fp_t *x);
+int blip_mp_fp_to_binary(blip_mp_fp_t *out, const blip_mp_fp_t *x);
+
+// Rounding. `mode` is one of BLIP_MP_FP_ROUND_* — no default.
+int blip_mp_fp_round_to_scale(blip_mp_fp_t *out,
+                              const blip_mp_fp_t *a,
+                              int32_t target_scale,
+                              int mode);
+int blip_mp_fp_round_to_mp(blip_mp_t *out, const blip_mp_fp_t *a, int mode);
+
+// Format. Caller-provided buffer + required-len pattern.
+int blip_mp_fp_to_string_canonical(const blip_mp_fp_t *fp,
+                                   char *buf,
+                                   size_t buf_len,
+                                   size_t *required);
+
 // --- Error codes -------------------------------------------------------
 
-#define BLIP_MP_OK                    0
-#define BLIP_MP_ERR_DIVISION_BY_ZERO  1
-#define BLIP_MP_ERR_OUT_OF_MEMORY     2
-#define BLIP_MP_ERR_NOT_IMPLEMENTED   3
-#define BLIP_MP_ERR_INVALID_INPUT     4
-#define BLIP_MP_ERR_OUT_OF_RANGE      5
-#define BLIP_MP_ERR_NO_INVERSE        6
-#define BLIP_MP_ERR_NEGATIVE_OPERAND  7
-#define BLIP_MP_ERR_BUFFER_TOO_SMALL  8
+#define BLIP_MP_OK                       0
+#define BLIP_MP_ERR_DIVISION_BY_ZERO     1
+#define BLIP_MP_ERR_OUT_OF_MEMORY        2
+#define BLIP_MP_ERR_NOT_IMPLEMENTED      3
+#define BLIP_MP_ERR_INVALID_INPUT        4
+#define BLIP_MP_ERR_OUT_OF_RANGE         5
+#define BLIP_MP_ERR_NO_INVERSE           6
+#define BLIP_MP_ERR_NEGATIVE_OPERAND     7
+#define BLIP_MP_ERR_BUFFER_TOO_SMALL     8
+#define BLIP_MP_ERR_MIXED_BASES          9
+#define BLIP_MP_ERR_NON_TERMINATING     10
+#define BLIP_MP_ERR_NOT_REPRESENTABLE   11
 
 #ifdef __cplusplus
 }
