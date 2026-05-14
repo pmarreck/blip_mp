@@ -114,6 +114,52 @@ pub const Fp = struct {
 		self.base = .binary;
 	}
 
+	/// Encode self as IEEE754 double, ONLY if exactly representable. Errors:
+	///   error.NonTerminatingExpansion — original is decimal with no
+	///     terminating binary form (e.g. 0.1₁₀).
+	///   error.NotRepresentable — value's significand needs more than 53
+	///     bits, OR magnitude is outside f64's normal/subnormal range.
+	///
+	/// Caller wanting silent rounding should call .canonicalize() then
+	/// roundToScale(target_scale=-52 - E, mode=.banker) first, then this.
+	/// (No silent IEEE754 rounding is provided here on purpose.)
+	pub fn getF64Exact(self: *const Fp) FpError!f64 {
+		if (self.isZero()) return 0.0;
+		const allocator = self.mantissa.allocator;
+		const blip_mp_root = @import("blip_mp.zig");
+		// Convert to base=2 first; toBinary errors NonTerminatingExpansion when
+		// the original is decimal with infinite binary expansion.
+		var binary = Fp.init(allocator);
+		defer binary.deinit();
+		try toBinary(&binary, self);
+		try binary.canonicalize();
+		var mag = Mp.init(allocator);
+		defer mag.deinit();
+		try blip_mp_root.sign.abs(&mag, &binary.mantissa);
+		const bl: usize = mag.bitLen();
+		if (bl > 53) return error.NotRepresentable;
+		const negative = binary.mantissa.cachedSign() < 0;
+		// Unbiased exponent E: value = (mantissa-with-implicit-1) × 2^E,
+		// equivalent to mag × 2^scale where mag's high bit is at position bl-1.
+		const E: i64 = @as(i64, binary.scale) + @as(i64, @intCast(bl)) - 1;
+		if (E > 1023) return error.NotRepresentable; // overflow
+		const m = try mag.getU64();
+		// Subnormal range: E < -1022. Encoded mantissa = mag × 2^(scale + 1074).
+		if (E < -1022) {
+			const shift_left: i64 = @as(i64, binary.scale) + 1074;
+			if (shift_left < 0) return error.NotRepresentable; // smaller than smallest subnormal
+			const subnormal_mant: u64 = m << @intCast(shift_left);
+			const sign_bit: u64 = if (negative) (@as(u64, 1) << 63) else 0;
+			return @bitCast(sign_bit | subnormal_mant);
+		}
+		// Normalized: pad mag to 53 bits (top bit = implicit 1), then drop top bit.
+		const padded: u64 = m << @intCast(53 - bl);
+		const stored_mant: u64 = padded & ((@as(u64, 1) << 52) - 1);
+		const stored_exp: u64 = @intCast(E + 1023);
+		const sign_bit: u64 = if (negative) (@as(u64, 1) << 63) else 0;
+		return @bitCast(sign_bit | (stored_exp << 52) | stored_mant);
+	}
+
 	/// Parse `s` as a fixed-point literal in `base`. Accepts optional leading
 	/// '-', optional fractional part with '.' separator. Bases 2/8/10/16
 	/// supported (delegated to Mp.setStr). The radix point is splice-only —
@@ -2425,6 +2471,39 @@ test "M14-8: setF64(-inf) errors NotRepresentable" {
 	try testing.expectError(error.NotRepresentable, x.setF64(inf));
 }
 
-test "M14-8: getF64 errors when value is not representable as f64 (rather than rounding silently)" {
-	return error.SkipZigTest; // M14-8 getF64 not yet implemented
+test "M14-8: getF64Exact round-trips setF64 — 0.0, 1.0, 0.5, -0.25, π-as-f64" {
+	const a = testing.allocator;
+	const cases = [_]f64{ 0.0, 1.0, -1.0, 0.5, -0.25, 0.1, 0.2, 0.3, 1024.0, -1024.0, 3.14159, std.math.floatMin(f64) };
+	for (cases) |v| {
+		var x = Fp.init(a);
+		defer x.deinit();
+		try x.setF64(v);
+		const round_tripped = try x.getF64Exact();
+		try testing.expectEqual(v, round_tripped);
+	}
+}
+
+test "M14-8: getF64Exact errors NotRepresentable for values needing >53 mantissa bits" {
+	const a = testing.allocator;
+	var x = Fp.init(a);
+	defer x.deinit();
+	// Mantissa with 54 significant bits: 2^53 + 1.
+	try x.setI64(@as(i64, 1) << 53 | 1, 0, .binary);
+	try testing.expectError(error.NotRepresentable, x.getF64Exact());
+}
+
+test "M14-8: getF64Exact errors NotRepresentable on decimal non-terminating in binary" {
+	const a = testing.allocator;
+	var x = Fp.init(a);
+	defer x.deinit();
+	try x.setRationalDecimal(1, 10); // 0.1 decimal — no terminating binary
+	try testing.expectError(error.NonTerminatingExpansion, x.getF64Exact());
+}
+
+test "M14-8: getF64Exact recovers a decimal value that DOES have an exact binary form" {
+	const a = testing.allocator;
+	var x = Fp.init(a);
+	defer x.deinit();
+	try x.setRationalDecimal(1, 4); // 0.25 — exact in both bases
+	try testing.expectEqual(@as(f64, 0.25), try x.getF64Exact());
 }
