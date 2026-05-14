@@ -247,6 +247,21 @@ fn benchNttStockhamVec(orig: *const [NTT_N]u64, work: *[NTT_N]u64, scratch: *[NT
 	return @as(f64, @floatFromInt(elapsed)) / @as(f64, @floatFromInt(NTT_ITERS));
 }
 
+// Stockham + Mont hybrid (M6-4-E.3). Same shape as nttStockhamVec but with
+// Mont-form data and twiddles + montMul_x2 inner mul.
+fn benchNttStockhamMontVec(orig_m: *const [NTT_N]u64, work: *[NTT_N]u64, scratch: *[NTT_N]u64, tw_m: *const [NTT_N / 2]u64) f64 {
+	var elapsed: u64 = 0;
+	var i: usize = 0;
+	while (i < NTT_ITERS) : (i += 1) {
+		@memcpy(work, orig_m);
+		const t0 = nowNs();
+		fft.nttStockhamMontVec(work, scratch, tw_m);
+		elapsed += nowNs() - t0;
+	}
+	std.mem.doNotOptimizeAway(work);
+	return @as(f64, @floatFromInt(elapsed)) / @as(f64, @floatFromInt(NTT_ITERS));
+}
+
 // Radix-4 NTT (M6-4-D): mixed-radix at N=8192 (one initial radix-2 pass +
 // 6 radix-4 passes). Same in-place, bit-reversal-based call shape as
 // nttWithTwiddlesVec.
@@ -364,6 +379,15 @@ pub fn main() !void {
 	std.debug.print("Stockham vs Cooley-Tukey vec ({d}x) — lower is better\n", .{1});
 	std.debug.print("Stockham NTT speedup (stockham_vec vs %P_vec): {d:.2}x\n", .{ns_ntt_vec / ns_ntt_stockham_vec});
 	std.debug.print("Stockham NTT speedup (stockham_vec vs scalar): {d:.2}x\n", .{ns_ntt_scalar / ns_ntt_stockham_vec});
+
+	// Stockham + Mont hybrid (M6-4-E.3): combines Stockham's bit-reversal-pass
+	// elimination with Mont's faster per-mul.
+	_ = benchNttStockhamMontVec(&orig_m, &work, &st_scratch, &tw_m); // warm-up
+	const ns_ntt_stockham_mont_vec = benchNttStockhamMontVec(&orig_m, &work, &st_scratch, &tw_m);
+	std.debug.print("RESULT impl=nttStockhamMontVec n={d} ns_per_pass={d:.0}\n", .{ NTT_N, ns_ntt_stockham_mont_vec });
+	std.debug.print("Stockham+Mont speedup vs nttStockhamVec:    {d:.2}x\n", .{ns_ntt_stockham_vec / ns_ntt_stockham_mont_vec});
+	std.debug.print("Stockham+Mont speedup vs nttWithMontVec:    {d:.2}x\n", .{ns_ntt_mont_vec / ns_ntt_stockham_mont_vec});
+	std.debug.print("Stockham+Mont speedup vs scalar baseline:   {d:.2}x\n", .{ns_ntt_scalar / ns_ntt_stockham_mont_vec});
 
 	// Radix-4 mixed-radix vec NTT (M6-4-D): same call shape as
 	// nttWithTwiddlesVec; in-place, bit-reversal-based, fused two-stage radix-2.
