@@ -628,6 +628,54 @@ export fn blip_mp_fp_to_string_canonical(
 	return BLIP_MP_OK;
 }
 
+/// Format with EXACTLY `frac_digits` digits after the radix point. See
+/// blip_mp_fp_to_string_canonical for the buf/buf_len/required pattern.
+export fn blip_mp_fp_to_string_fixed(
+	fp: *const Fp,
+	frac_digits: u32,
+	buf: [*]u8,
+	buf_len: usize,
+	required: *usize,
+) c_int {
+	const s = blip_mp.fp.toStringFixed(allocator, fp, frac_digits) catch |e| return mapError(e);
+	defer allocator.free(s);
+	required.* = s.len;
+	if (buf_len < s.len) return BLIP_MP_ERR_BUFFER_TOO_SMALL;
+	@memcpy(buf[0..s.len], s);
+	if (buf_len > s.len) buf[s.len] = 0;
+	return BLIP_MP_OK;
+}
+
+/// Format in scientific notation. Decimal: 'M.MMMeE'. Binary: 'M.MMMpE'
+/// (C99 hex-float style — but with binary digits per the brief). See
+/// blip_mp_fp_to_string_canonical for the buf/buf_len/required pattern.
+export fn blip_mp_fp_to_string_scientific(
+	fp: *const Fp,
+	buf: [*]u8,
+	buf_len: usize,
+	required: *usize,
+) c_int {
+	const s = blip_mp.fp.toStringScientific(allocator, fp) catch |e| return mapError(e);
+	defer allocator.free(s);
+	required.* = s.len;
+	if (buf_len < s.len) return BLIP_MP_ERR_BUFFER_TOO_SMALL;
+	@memcpy(buf[0..s.len], s);
+	if (buf_len > s.len) buf[s.len] = 0;
+	return BLIP_MP_OK;
+}
+
+/// getF64 with explicit rounding mode for >53-bit mantissas. `mode` is one
+/// of BLIP_MP_FP_ROUND_*. Errors:
+///   NON_TERMINATING — original is decimal AND no terminating binary form
+///   NOT_REPRESENTABLE — magnitude exceeds f64 range, OR mode == EXACT_OR_ERROR
+///                       AND mantissa exceeds 53 bits
+export fn blip_mp_fp_get_f64(fp: *const Fp, mode: c_int, out: *f64) c_int {
+	const m = roundFromC(mode) orelse return BLIP_MP_ERR_INVALID_INPUT;
+	const v = blip_mp.fp.Fp.getF64(fp, m) catch |e| return mapError(e);
+	out.* = v;
+	return BLIP_MP_OK;
+}
+
 // Force the linker to retain every exported symbol when compiled as part
 // of a library (otherwise ReleaseFast may strip unreferenced exports).
 comptime {
@@ -715,4 +763,7 @@ comptime {
 	_ = blip_mp_fp_round_to_scale;
 	_ = blip_mp_fp_round_to_mp;
 	_ = blip_mp_fp_to_string_canonical;
+	_ = blip_mp_fp_to_string_fixed;
+	_ = blip_mp_fp_to_string_scientific;
+	_ = blip_mp_fp_get_f64;
 }
