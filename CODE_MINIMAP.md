@@ -161,8 +161,8 @@ Exact arbitrary-precision fixed-point on top of Mp. **No NaN, no ±∞, no signe
 - Division: `divExact` (exact-or-error), `divPrecision` (caller-supplied digit budget, returns bool exact), `divQR` (truncating-int quotient + exact reconstructible remainder).
 - Cross-base: `toDecimal` (always exact), `toBinary` (errors NonTerminating when needed — e.g. 0.1₁₀ has no terminating binary form).
 - Rounding: `roundToScale(target_scale, mode)` + `roundToMp(mode)` with 8 explicit modes (`.exact_or_error / .toward_zero / .toward_pos_inf / .toward_neg_inf / .half_up / .half_down / .half_to_even / .half_to_odd`).
-- Output: `toStringCanonical(allocator)` — splice radix point into Mp.toString output; produces `"0.3"`, `"0.025"`, `"1500"`, etc.
-- IEEE754: `getF64Exact` — encode back to f64 ONLY if exactly representable; errors otherwise.
+- Output: `toStringCanonical(allocator)` — splice radix point into Mp.toString output; produces `"0.3"`, `"0.025"`, `"1500"`, etc. `toStringFixed(allocator, x, frac_digits)` — pad/round (banker) to fixed fractional width. `toStringScientific(allocator, x)` — `[-]M.MMMeE` (decimal) / `[-]M.MMMpE` (binary, C99 hex-float style with binary digits).
+- IEEE754: `getF64Exact` — encode back to f64 ONLY if exactly representable; errors otherwise. `getF64(self, mode)` — general counterpart that rounds >53-bit mantissas via `roundToScale(mode)`; carry-up renormalize handled.
 - Headline test: `0.1 + 0.2 == 0.3 EXACTLY` (and the inverse killshot: setF64(0.1) → toDecimal → 55-digit decimal expansion of the IEEE754 lie).
 
 ### `src/fft.zig` (2082 lines)

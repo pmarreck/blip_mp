@@ -400,6 +400,100 @@ static void test_fp_round_modes(void) {
 	blip_mp_destroy(m);
 }
 
+static void test_fp_to_string_fixed(void) {
+	// Pad: "3.14" → 4 frac digits → "3.1400"
+	blip_mp_fp_t *x = blip_mp_fp_create();
+	CHECK_OK(blip_mp_fp_set_str(x, "3.14", 4, BLIP_MP_FP_BASE_DECIMAL));
+	char buf[32];
+	size_t need = 0;
+	CHECK_OK(blip_mp_fp_to_string_fixed(x, 4, buf, sizeof buf, &need));
+	CHECK(need == 6, "to_string_fixed need == 6");
+	CHECK(memcmp(buf, "3.1400", need) == 0, "to_string_fixed pads trailing zeros");
+
+	// Banker rounding: "3.149" → 2 frac digits → "3.15"
+	CHECK_OK(blip_mp_fp_set_str(x, "3.149", 5, BLIP_MP_FP_BASE_DECIMAL));
+	CHECK_OK(blip_mp_fp_to_string_fixed(x, 2, buf, sizeof buf, &need));
+	CHECK(need == 4, "rounded need == 4");
+	CHECK(memcmp(buf, "3.15", need) == 0, "to_string_fixed rounds half-to-even");
+
+	// Banker tie at 2.5 → 0 frac digits → "2"
+	CHECK_OK(blip_mp_fp_set_str(x, "2.5", 3, BLIP_MP_FP_BASE_DECIMAL));
+	CHECK_OK(blip_mp_fp_to_string_fixed(x, 0, buf, sizeof buf, &need));
+	CHECK(need == 1, "tie → 0 frac → need == 1");
+	CHECK(buf[0] == '2', "banker rounds 2.5 → 2 (no decimal point)");
+
+	// Zero with frac_digits → "0.000"
+	CHECK_OK(blip_mp_fp_set_i64(x, 0, 0, BLIP_MP_FP_BASE_DECIMAL));
+	CHECK_OK(blip_mp_fp_to_string_fixed(x, 3, buf, sizeof buf, &need));
+	CHECK(need == 5, "zero with frac_digits=3 need == 5");
+	CHECK(memcmp(buf, "0.000", need) == 0, "zero pads to 0.000");
+
+	blip_mp_fp_destroy(x);
+}
+
+static void test_fp_to_string_scientific(void) {
+	blip_mp_fp_t *x = blip_mp_fp_create();
+	char buf[32];
+	size_t need = 0;
+
+	// 3.14 → "3.14e0"
+	CHECK_OK(blip_mp_fp_set_str(x, "3.14", 4, BLIP_MP_FP_BASE_DECIMAL));
+	CHECK_OK(blip_mp_fp_to_string_scientific(x, buf, sizeof buf, &need));
+	CHECK(need == 6, "3.14 sci need == 6");
+	CHECK(memcmp(buf, "3.14e0", need) == 0, "3.14 → 3.14e0");
+
+	// 1500 → "1.5e3"
+	CHECK_OK(blip_mp_fp_set_i64(x, 1500, 0, BLIP_MP_FP_BASE_DECIMAL));
+	CHECK_OK(blip_mp_fp_to_string_scientific(x, buf, sizeof buf, &need));
+	CHECK(need == 5, "1500 sci need == 5");
+	CHECK(memcmp(buf, "1.5e3", need) == 0, "1500 → 1.5e3");
+
+	// -0.025 → "-2.5e-2"
+	CHECK_OK(blip_mp_fp_set_str(x, "-0.025", 6, BLIP_MP_FP_BASE_DECIMAL));
+	CHECK_OK(blip_mp_fp_to_string_scientific(x, buf, sizeof buf, &need));
+	CHECK(need == 7, "-0.025 sci need == 7");
+	CHECK(memcmp(buf, "-2.5e-2", need) == 0, "-0.025 → -2.5e-2");
+
+	// Binary 0.75 (= 3 × 2^-2) → "1.1p-1"
+	CHECK_OK(blip_mp_fp_set_i64(x, 3, -2, BLIP_MP_FP_BASE_BINARY));
+	CHECK_OK(blip_mp_fp_to_string_scientific(x, buf, sizeof buf, &need));
+	CHECK(need == 6, "binary 0.75 sci need == 6");
+	CHECK(memcmp(buf, "1.1p-1", need) == 0, "0.75_b → 1.1p-1");
+
+	// Zero → "0"
+	CHECK_OK(blip_mp_fp_set_i64(x, 0, 0, BLIP_MP_FP_BASE_DECIMAL));
+	CHECK_OK(blip_mp_fp_to_string_scientific(x, buf, sizeof buf, &need));
+	CHECK(need == 1, "zero sci need == 1");
+	CHECK(buf[0] == '0', "zero → 0");
+
+	blip_mp_fp_destroy(x);
+}
+
+static void test_fp_get_f64_with_mode(void) {
+	blip_mp_fp_t *x = blip_mp_fp_create();
+	double got = 0.0;
+
+	// Exact value: 0.25 → with .exact_or_error → 0.25
+	CHECK_OK(blip_mp_fp_set_rational_decimal(x, 1, 4));
+	CHECK_OK(blip_mp_fp_get_f64(x, BLIP_MP_FP_ROUND_EXACT_OR_ERROR, &got));
+	CHECK(got == 0.25, "exact_or_error: 1/4 → 0.25");
+
+	// 2^53 + 1 with .half_to_even → 2^53 (banker tie picks even)
+	CHECK_OK(blip_mp_fp_set_i64(x, ((int64_t)1 << 53) | 1, 0, BLIP_MP_FP_BASE_BINARY));
+	CHECK_OK(blip_mp_fp_get_f64(x, BLIP_MP_FP_ROUND_HALF_TO_EVEN, &got));
+	CHECK(got == (double)((int64_t)1 << 53), "banker: 2^53+1 → 2^53");
+
+	// Same input with .exact_or_error → NOT_REPRESENTABLE
+	int rc = blip_mp_fp_get_f64(x, BLIP_MP_FP_ROUND_EXACT_OR_ERROR, &got);
+	CHECK(rc == BLIP_MP_ERR_NOT_REPRESENTABLE, "exact_or_error on >53 bits → NOT_REPRESENTABLE");
+
+	// Same input with .toward_pos_inf → 2^53 + 2
+	CHECK_OK(blip_mp_fp_get_f64(x, BLIP_MP_FP_ROUND_TOWARD_POS_INF, &got));
+	CHECK(got == (double)(((int64_t)1 << 53) + 2), "toward_pos_inf: 2^53+1 → 2^53+2");
+
+	blip_mp_fp_destroy(x);
+}
+
 int main(void) {
 	test_lifecycle();
 	test_set_get_i64();
@@ -415,6 +509,9 @@ int main(void) {
 	test_fp_div_exact_or_error();
 	test_fp_setf64_killshot();
 	test_fp_round_modes();
+	test_fp_to_string_fixed();
+	test_fp_to_string_scientific();
+	test_fp_get_f64_with_mode();
 
 	if (failures == 0) {
 		printf("c_smoke: all checks passed\n");

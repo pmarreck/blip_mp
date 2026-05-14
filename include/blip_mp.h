@@ -325,6 +325,31 @@ int blip_mp_fp_to_string_canonical(const blip_mp_fp_t *fp,
                                    size_t buf_len,
                                    size_t *required);
 
+// Format with EXACTLY `frac_digits` digits after the radix point. Pads with
+// trailing zeros if canonical form has fewer; rounds (banker's / half-to-even)
+// if more. Honors sign.
+int blip_mp_fp_to_string_fixed(const blip_mp_fp_t *fp,
+                               uint32_t frac_digits,
+                               char *buf,
+                               size_t buf_len,
+                               size_t *required);
+
+// Format in scientific notation. Decimal: '[-]M.MMMeE'. Binary: '[-]M.MMMpE'
+// (C99 hex-float style — but with binary digits, not hex). Single-digit
+// mantissas omit the radix point ('5e0' not '5.e0'). Zero renders as '0'.
+int blip_mp_fp_to_string_scientific(const blip_mp_fp_t *fp,
+                                    char *buf,
+                                    size_t buf_len,
+                                    size_t *required);
+
+// getF64 with explicit rounding mode for >53-bit mantissas. `mode` is one of
+// BLIP_MP_FP_ROUND_*. Differs from get_f64_exact in that >53-bit significands
+// are rounded rather than rejected. Errors:
+//   NON_TERMINATING — decimal with no terminating binary expansion
+//   NOT_REPRESENTABLE — magnitude exceeds f64 range, OR
+//                       mode == EXACT_OR_ERROR with >53-bit mantissa
+int blip_mp_fp_get_f64(const blip_mp_fp_t *fp, int mode, double *out);
+
 // --- Error codes -------------------------------------------------------
 
 #define BLIP_MP_OK                       0

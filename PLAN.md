@@ -308,17 +308,18 @@ Mirrors blip_mp's "variable-length self-describing storage" philosophy: each val
 
 ### M14-7 — String I/O
 - [x] `toStringCanonical(allocator, a)` — DONE 2026-05-08
-- [ ] `toStringFixed(allocator, a, frac_digits)` — pad/truncate fractional part to fixed width (deferred — canonical covers the demo headline)
-- [ ] `toStringScientific(allocator, a)` — "1.234e-5" form (deferred)
+- [x] `toStringFixed(allocator, a, frac_digits)` — DONE 2026-05-04 EST. Pads with trailing zeros if canonical has fewer; rounds (banker / half-to-even) if more. Honors sign + zero special-case. 9 inline tests.
+- [x] `toStringScientific(allocator, a)` — DONE 2026-05-04 EST. Decimal '[-]M.MMMeE'; binary '[-]M.MMMpE' (C99 hex-float style with binary digits, not hex). Single-digit mantissas omit the radix point. 8 inline tests.
 
 ### M14-8 — IEEE754 interop
 - [x] `setF64(self, v)` — DONE 2026-05-13. NaN/±∞ → NotRepresentable; ±0 → zero (no signed zero).
 - [x] `getF64Exact(self)` — DONE 2026-05-14. Errors NotRepresentable / NonTerminating rather than silently rounding. Round-trip with setF64 verified across 12 sample values.
-- [ ] `getF64(self, mode: RoundMode)` — accepts a rounding mode for inexact cases (deferred — caller can compose roundToScale + getF64Exact for now)
+- [x] `getF64(self, mode: RoundMode)` — DONE 2026-05-04 EST. Rounds >53-bit mantissas via roundToScale at chosen mode; carry-up renormalization handled. mode == .exact_or_error short-circuits to getF64Exact. Decimal-with-no-terminating-binary still errors NonTerminating (caller chose decimal). 8 inline tests.
 - [x] **KILLSHOT TEST**: setF64(0.1) → toDecimal → "0.1000000000000000055511151231257827021181583404541015625" ✅
 
 ### M14-9 — C FFI surface
 - [x] DONE 2026-05-14. 26 export fns covering all of M14-1 through M14-8 (lifecycle, construction, queries, canonicalize, cmp/eq, add/sub/mul, divExact/Precision, toBinary/Decimal, roundToScale/Mp, toStringCanonical, getF64Exact). 4 new c_smoke test functions exercise the FFI end-to-end.
+- [x] DONE 2026-05-04 EST. 3 additional exports for M14-7b/c + M14-8 polish: `blip_mp_fp_to_string_fixed`, `blip_mp_fp_to_string_scientific`, `blip_mp_fp_get_f64`. 3 new c_smoke test fns covering each.
 
 ### M14-10 — GMP comparison (still pending)
 - [ ] mpf_t / mpq_t cross-validation in `tests/integration/cross_check.zig`. Substantial setup — needs gmp_bench.c extension to build mpq_class / mpf_class fixtures and call them via the cross-check binary. Defer until after the deferred M14-7/8 items.
