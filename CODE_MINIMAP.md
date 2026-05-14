@@ -122,6 +122,49 @@ Large-number arithmetic operating directly on BLIP payload bytes — no auxiliar
 - `FFT_THRESHOLD: usize = 99999` (FFT gated off in production; M6-4-E.3 inline asm needed to flip)
 - `FftScratch` thread-local cache + `getFftScratch` / `releaseFftScratch`
 
+### `src/bitwise.zig` (M12-A1)
+GMP-compatible bitwise ops over Mp's two's-complement BLIP payload: `bitwiseAnd / bitwiseOr / bitwiseXor / bitwiseNot / shl / shr`. Each runs a byte-level loop over `max(a.payload.len, b.payload.len)` with `tier3.signExtByte` supplying the implicit infinite-extension byte. `shr` is arithmetic right shift, which is floor division in two's-complement (no explicit floor correction needed). Result canonicalises via `canonicalLen` before re-emit through `installPayload` → `tier3.writeHeader` → `Mp.setBytes`.
+
+### `src/sign.zig` (M12-A2)
+`neg / abs / fitsI64 / fitsU64 / fitsI32 / fitsU32`. Negation via add-1-then-not equivalent; abs branches on `cachedSign`. The `fits*` predicates are pure (no allocator) — compare bitLen + sign to the target type's range.
+
+### `src/scan.zig` (M12-A6)
+`popcount / scan0 / scan1` — Hamming weight + first-bit search. Matches GMP `mpz_popcount` / `mpz_scan0` / `mpz_scan1` semantics. Negatives return `usize.max` for popcount (infinite 1-bits in two's-complement). Inner loop reads u64 chunks via `readInt` then `@popCount`/`@ctz`/`@clz`. scan0 on a positive looking past its bitLen finds the first 0 of the implicit-zero tail.
+
+### `src/gcd.zig` (M12-A4)
+Classical Euclidean `gcd(a, b)` extracted as a free function (Mp.invModClassical has the same loop inline for the Bezout track). `lcm(a, b) = |a/gcd*b|`. Both always return non-negative; gcd(0,0)=0, lcm(0,x)=0.
+
+### `src/random_mp.zig` (M12-A5)
+`setRandomBits(rng, bits)` — fills (bits+7)/8 bytes from `std.Random`, masks high bits past `bits`, prepends 0x00 if needed to encode positive. `setRandomBelow(rng, n)` — rejection sampling: draw n.bitLen() bits, retry if ≥ n.
+
+### `src/string_io.zig` (M12-A3)
+`setStr(slice, base)` / `toString(allocator, base)` for bases 2 / 8 / 10 / 16. Power-of-2 bases use bit extraction; base-10 toString chunks via `10^19` divMod for u64-fast inner loop. Negative numbers get a leading `-`. Errors: `EmptyString / InvalidDigit / UnsupportedBase`.
+
+### `src/primes.zig` (M13-B1)
+Miller-Rabin probabilistic primality. `isProbablyPrime(rng, witnesses)` — sieve trial-divides by first 54 primes (< 256) for fast composite rejection, then `witnesses` rounds of Miller-Rabin using `powm` from M7. `nextPrime(out, n)` — scan with 20 internal witnesses. Carmichael 561 / 1729 / 2465 / 6601 / 10585 all correctly flagged composite.
+
+### `src/roots.zig` (M13-B2)
+`isqrt / isqrtRem / iroot / isPerfectSquare` via Newton iteration. Initial estimate from bitLen(n). Halts when iterates stop decreasing. Errors `NegativeOperand` for isqrt(n<0), `ZeroExponent` for iroot(_, 0). Odd-k roots of negative inputs are allowed (return negative root).
+
+### `src/symbols.zig` (M13-B3)
+`jacobi(a, n) / legendre(a, p) / kronecker(a, n)`. Quadratic reciprocity recursion using bit-tricks for the (2/n) factor and (-1)^((a-1)(n-1)/4) for swap-flip. Kronecker generalises to all n (incl. negative, 0, 2). Result ∈ {-1, 0, +1}.
+
+### `src/combinatorial.zig` (M13-B4)
+`factorial(out, n: u32)` — straightforward product loop. `binomial(out, n, k)` — symmetric reduction (use min(k, n-k)), repeated mul/div pattern. `fibonacci(out, n)` — fast-doubling identity: F(2k) = F(k)·(2·F(k+1) − F(k)), F(2k+1) = F(k)² + F(k+1)². Verified against fib(100) = 354224848179261915075.
+
+### `src/fp.zig` (M14 — arbitrary-precision fixed-point, "the IEEE754 disruption")
+Exact arbitrary-precision fixed-point on top of Mp. **No NaN, no ±∞, no signed zero, no denormals, no silent rounding** — every op succeeds bit-exactly, takes a caller-supplied precision budget, or errors loudly.
+- `Fp = struct { mantissa: Mp, scale: i32, base: Base { binary=2, decimal=10 } }` — dynamic precision per-value, mirroring blip_mp's variable-length-self-describing-storage philosophy.
+- Construction: `setI64 / setRationalDecimal / setRationalBinary / setStr / setF64`. setF64 bit-decodes IEEE754 (NaN/±∞ → NotRepresentable; ±0 collapses).
+- Comparison: `canonicalize / cmp / eq` — scale-aligned compare; errors `MixedBases` on cross-base.
+- Arithmetic: `add / sub / mul`. mul is exact-by-construction (mantissas multiply, scales sum).
+- Division: `divExact` (exact-or-error), `divPrecision` (caller-supplied digit budget, returns bool exact), `divQR` (truncating-int quotient + exact reconstructible remainder).
+- Cross-base: `toDecimal` (always exact), `toBinary` (errors NonTerminating when needed — e.g. 0.1₁₀ has no terminating binary form).
+- Rounding: `roundToScale(target_scale, mode)` + `roundToMp(mode)` with 8 explicit modes (`.exact_or_error / .toward_zero / .toward_pos_inf / .toward_neg_inf / .half_up / .half_down / .half_to_even / .half_to_odd`).
+- Output: `toStringCanonical(allocator)` — splice radix point into Mp.toString output; produces `"0.3"`, `"0.025"`, `"1500"`, etc.
+- IEEE754: `getF64Exact` — encode back to f64 ONLY if exactly representable; errors otherwise.
+- Headline test: `0.1 + 0.2 == 0.3 EXACTLY` (and the inverse killshot: setF64(0.1) → toDecimal → 55-digit decimal expansion of the IEEE754 lie).
+
 ### `src/fft.zig` (2082 lines)
 Pure-Zig FFT mul stack (M6-3 + M6-4). Currently gated off in production but correctness-validated at every level.
 
@@ -153,13 +196,13 @@ Pure-Zig FFT mul stack (M6-3 + M6-4). Currently gated off in production but corr
 - `mulMagnitudesCRT` — two-prime variant for ≥ 56K-bit operand sizes (M6-3.14)
 - `MAX_FFT_COMBINED_LEN`, `MAX_FFT_CRT_COMBINED_LEN` — single/two-prime caps
 
-### `src/c_api.zig` (172 lines)
-C FFI surface (M8). `extern fn` exports wrap Mp ops with libc-allocator handle lifecycle. `mapError` translates Zig error sets to C error codes. `comptime { _ = ...; }` block defeats symbol-stripping in ReleaseFast static lib.
+### `src/c_api.zig`
+C FFI surface (M8 + M12/M13 sweep + M14-9 Fp sweep). `extern fn` exports wrap every public op with libc-allocator handle lifecycle. `mapError` translates the full Zig error union (`SetError | ArithError | StringError | SymbolError | RootError | FpError`) into ~11 integer error codes. Opaque handles: `blip_mp_t` (Mp), `blip_mp_rng_t` (DefaultPrng), `blip_mp_fp_t` (Fp). `comptime { _ = ...; }` retain block defeats ReleaseFast symbol-stripping in the static lib. Full surface: ~90 exports total.
 
 ## include/
 
-### `include/blip_mp.h` (110 lines)
-Public C API. Opaque `blip_mp_t` handle. Lifecycle (create/destroy), setters/getters (set_i64/get_i64/set_u64/get_u64/set_bytes/byte_len/bytes), predicates (cmp/sign/is_zero), bit access (bit_at/bit_len), arithmetic (add/sub/mul/div/mod/div_mod), modular (powm/inv_mod). Error codes: OK, DIVISION_BY_ZERO, OUT_OF_MEMORY, NOT_IMPLEMENTED, INVALID_INPUT, OUT_OF_RANGE, NO_INVERSE.
+### `include/blip_mp.h`
+Public C API. Three opaque handles (`blip_mp_t`, `blip_mp_rng_t`, `blip_mp_fp_t`). Surface: integer lifecycle / set / get / arithmetic / modular (M8 baseline); bitwise / sign / scan / gcd / random / string I/O / primes / roots / symbols / combinatorial (M12 + M13); full Fp arithmetic + cross-base + rounding + format + IEEE754 interop (M14-9). Worked example block at top of the Fp section showing the `0.1 + 0.2 == "0.3"` demo in pure C. 11 error codes: OK, DIVISION_BY_ZERO, OUT_OF_MEMORY, NOT_IMPLEMENTED, INVALID_INPUT, OUT_OF_RANGE, NO_INVERSE, NEGATIVE_OPERAND, BUFFER_TOO_SMALL, MIXED_BASES, NON_TERMINATING, NOT_REPRESENTABLE.
 
 ## tests/
 

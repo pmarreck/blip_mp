@@ -276,48 +276,52 @@ Mirrors blip_mp's "variable-length self-describing storage" philosophy: each val
 **Foundational rule: no silent precision loss.** Division takes a precision budget (max scale digits to compute) and either errors on inexact-overflow OR returns `(quotient, remainder)` so the caller sees the exact tail. Calling code makes every rounding decision explicit.
 
 ### M14-1 — Type & lifecycle  →  src/fp.zig
-- [ ] `Fp` struct + `init(allocator) Fp` + `deinit()`
-- [ ] `setI64(v, scale, base)` — set from raw mantissa+scale
-- [ ] `setRationalDecimal(num, den)` — `2/5 → 0.4 base=10 scale=-1`; error if exact decimal expansion is non-terminating (i.e., den has prime factors other than 2 and 5)
-- [ ] `setRationalBinary(num, den)` — same but for base=2 (den's only prime factor must be 2)
-- [ ] `setStr(s)` — parse `"3.14"` (auto-detect base), `"-0.0001"`, `"1e-9"`, `"0xFF.A0"` (hex fp), etc.
+- [x] `Fp` struct + `init(allocator) Fp` + `deinit()` — DONE 2026-05-08
+- [x] `setI64(v, scale, base)` — DONE 2026-05-08
+- [x] `setRationalDecimal(num, den)` — DONE 2026-05-08 (errors NonTerminating for primes ∉ {2,5})
+- [x] `setRationalBinary(num, den)` — DONE 2026-05-08 (errors NonTerminating for primes ≠ 2)
+- [x] `setStr(s, base)` — DONE 2026-05-08 (parses "3.14", "-0.5", ".5", "100.", etc.)
 
 ### M14-2 — Comparison + canonical form
-- [ ] `cmp(a, b)` — align scales (pick larger), compare mantissas. Same-base only.
-- [ ] `eq(a, b)` — true exact equality (no -0.0 == 0.0 nonsense; mantissa+scale must match in canonical form)
-- [ ] `canonicalize(self)` — strip trailing zeros from mantissa AND from fractional scale; e.g., `12.300 base=10 scale=-3` → `123 base=10 scale=-1`. Eq depends on this.
+- [x] `cmp(a, b)` — DONE 2026-05-08 (errors MixedBases on cross-base)
+- [x] `eq(a, b)` — DONE 2026-05-08
+- [x] `canonicalize(self)` — DONE 2026-05-08
 
 ### M14-3 — Add / sub / mul (the easy three)
-- [ ] `add(out, a, b)` — operands must share a base. Align scales (shift the smaller-scale operand up by `Δscale` × `base^Δscale` mul on its mantissa). Add mantissas. Output scale = min(a.scale, b.scale).
-- [ ] `sub(out, a, b)` — same alignment, subtract.
-- [ ] `mul(out, a, b)` — multiply mantissas, sum scales. **Exact, no precision loss possible.**
+- [x] `add(out, a, b)` — DONE 2026-05-08
+- [x] `sub(out, a, b)` — DONE 2026-05-08
+- [x] `mul(out, a, b)` — DONE 2026-05-08 (exact-by-construction, no precision loss)
+- [x] **HEADLINE TEST**: 0.1 + 0.2 == 0.3 EXACTLY ✅
 
 ### M14-4 — Division (the hard one)
-- [ ] `divExact(out, a, b)` — succeeds only if a/b has a terminating expansion in `base`. Otherwise error.NonTerminatingExpansion. Detection: factor b/gcd(a,b); for base=10 the remaining cofactor must be 2^x · 5^y; for base=2 it must be 2^x. Computes the result with no truncation.
-- [ ] `divPrecision(out, a, b, max_scale_digits)` — gives the caller a precision budget. Result is exact within that budget; the function reports whether the result IS exact via the return value or out-param. No silent rounding past the budget.
-- [ ] `divQR(quot, rem, a, b)` — euclidean integer-style: rem has the same scale as the smaller operand and is the **exact** leftover. Reconstruction `quot * b + rem == a` is bit-exact.
+- [x] `divExact(out, a, b)` — DONE 2026-05-08
+- [x] `divPrecision(out, a, b, max_scale_digits)` — DONE 2026-05-08 (returns bool exact)
+- [x] `divQR(quot, rem, a, b)` — DONE 2026-05-14 (reconstruction bit-exact)
 
-### M14-5 — Cross-base conversions (exit the binary/decimal silo)
-- [ ] `toBinary(out, a)` — base=10 → base=2. Errors on non-terminating (1/3, 0.1, etc.). Forces the caller to acknowledge this is where lossiness would creep in if allowed.
-- [ ] `toDecimal(out, a)` — base=2 → base=10. Always exact (powers of 2 always have finite decimal expansion).
+### M14-5 — Cross-base conversions
+- [x] `toBinary(out, a)` — DONE 2026-05-13 (errors NonTerminating on 0.1₁₀ etc.)
+- [x] `toDecimal(out, a)` — DONE 2026-05-13 (always exact)
 
-### M14-6 — Round / floor / ceil / trunc (explicit choices, never default)
-- [ ] `roundToScale(out, a, target_scale, mode)` — modes: `.exact_or_error`, `.banker`, `.half_up`, `.half_down`, `.toward_zero`, `.toward_pos_inf`, `.toward_neg_inf`. Caller picks; no default.
-- [ ] `roundToMp(out, a, mode)` — round to the underlying `Mp` (drop the fractional part).
+### M14-6 — Round / floor / ceil / trunc
+- [x] `roundToScale(out, a, target_scale, mode)` — DONE 2026-05-13. 8 modes: exact_or_error / toward_zero / toward_pos_inf / toward_neg_inf / half_up / half_down / half_to_even (banker) / half_to_odd
+- [x] `roundToMp(out, a, mode)` — DONE 2026-05-13
 
 ### M14-7 — String I/O
-- [ ] `toString(allocator, a, fmt)` — fmt picks `.fixed("%.6f")`-like vs `.scientific("%e")`-like vs `.canonical` (no superfluous zeros). Hex output for base=2.
-- [ ] Round-trip across all three for {0, ±1, very-small fractions, very-large mantissas, scale extremes near ±i32.maxInt}
+- [x] `toStringCanonical(allocator, a)` — DONE 2026-05-08
+- [ ] `toStringFixed(allocator, a, frac_digits)` — pad/truncate fractional part to fixed width (deferred — canonical covers the demo headline)
+- [ ] `toStringScientific(allocator, a)` — "1.234e-5" form (deferred)
 
-### M14-8 — IEEE754 interop (the ugly necessary)
-- [ ] `setF64(self, v)` — accept an f64, decode bit-exact to base=2 dyadic rational. Decodes the IEEE754 mantissa+exponent; errors on NaN/±∞ (we don't represent them). Subnormals OK.
-- [ ] `getF64(self)` — round to nearest f64 (or error on non-representable). User must opt-in to IEEE754's lossiness.
+### M14-8 — IEEE754 interop
+- [x] `setF64(self, v)` — DONE 2026-05-13. NaN/±∞ → NotRepresentable; ±0 → zero (no signed zero).
+- [x] `getF64Exact(self)` — DONE 2026-05-14. Errors NotRepresentable / NonTerminating rather than silently rounding. Round-trip with setF64 verified across 12 sample values.
+- [ ] `getF64(self, mode: RoundMode)` — accepts a rounding mode for inexact cases (deferred — caller can compose roundToScale + getF64Exact for now)
+- [x] **KILLSHOT TEST**: setF64(0.1) → toDecimal → "0.1000000000000000055511151231257827021181583404541015625" ✅
 
 ### M14-9 — C FFI surface
-- [ ] All M14-1..M14-7 ops exported via `src/c_api.zig` + `include/blip_mp.h`. Mirror the M12/M13 pattern.
+- [x] DONE 2026-05-14. 26 export fns covering all of M14-1 through M14-8 (lifecycle, construction, queries, canonicalize, cmp/eq, add/sub/mul, divExact/Precision, toBinary/Decimal, roundToScale/Mp, toStringCanonical, getF64Exact). 4 new c_smoke test functions exercise the FFI end-to-end.
 
-### M14-10 — GMP comparison (where applicable)
-- [ ] mpf_t / mpq_t are GMP's float / rational types. Add cross-validation tests in `tests/integration/cross_check.zig` against `mpq_class` for the exact operations and `mpf_class` for binary fixed-point. `Fp` is *more* precise than `mpf_t` so the comparison is "do we agree at mpf_t's precision".
+### M14-10 — GMP comparison (still pending)
+- [ ] mpf_t / mpq_t cross-validation in `tests/integration/cross_check.zig`. Substantial setup — needs gmp_bench.c extension to build mpq_class / mpf_class fixtures and call them via the cross-check binary. Defer until after the deferred M14-7/8 items.
 
 ### Test queueing convention
 Every M14-N item lands as: (a) failing test added that exercises the API as the spec demands, (b) `error.SkipZigTest` placeholder while not yet implemented (test is in the suite as a known-skipped TODO), (c) implementation lands, (d) skip removed, (e) test passes. This keeps the suite green per project policy while making the queued behaviors visible in the test run.
