@@ -160,6 +160,93 @@ pub const Fp = struct {
 		return @bitCast(sign_bit | (stored_exp << 52) | stored_mant);
 	}
 
+	/// Encode self as IEEE754 double, rounding per `mode` if not exactly
+	/// representable in 53 bits. Differs from `getF64Exact` in that >53-bit
+	/// significands are rounded (with the caller's chosen mode) rather than
+	/// rejected. Errors:
+	///   error.NonTerminatingExpansion — original is decimal AND mode is
+	///     `.exact_or_error` AND no terminating binary form exists.
+	///     (Other modes silently round through the binary expansion.)
+	///   error.NotRepresentable — magnitude exceeds f64's normal range
+	///     (E > 1023 after rounding) or, for `.exact_or_error` mode,
+	///     mantissa exceeds 53 bits.
+	///
+	/// Algorithm:
+	///   1. Convert to base=2 (toBinary may error NonTerminating).
+	///   2. canonicalize.
+	///   3. If bitLen ≤ 53 and in range, encode directly (delegated).
+	///   4. Else round mantissa down to 53 bits using
+	///      roundToScale(target_scale = scale + (bitLen - 53), mode).
+	///      A carry that pushes bitLen to 54 → shift right 1, exp += 1.
+	///   5. Encode the renormalized result.
+	pub fn getF64(self: *const Fp, mode: RoundMode) FpError!f64 {
+		// Exact-or-error mode: reuse getF64Exact verbatim — same semantics
+		// (NonTerminating on decimal-with-no-terminating-binary, NotRepresentable
+		// on >53 bits). Avoids accidentally smuggling rounding under the
+		// "no rounding" mode.
+		if (mode == .exact_or_error) return self.getF64Exact();
+		if (self.isZero()) return 0.0;
+		const allocator = self.mantissa.allocator;
+		const blip_mp_root = @import("blip_mp.zig");
+		// Step 1+2: bring to canonical base=2.
+		var binary = Fp.init(allocator);
+		defer binary.deinit();
+		try toBinary(&binary, self);
+		try binary.canonicalize();
+		var mag = Mp.init(allocator);
+		defer mag.deinit();
+		try blip_mp_root.sign.abs(&mag, &binary.mantissa);
+		const bl: usize = mag.bitLen();
+		// Step 3: if already ≤ 53 bits, no rounding needed — delegate.
+		if (bl <= 53) {
+			const E_check: i64 = @as(i64, binary.scale) + @as(i64, @intCast(bl)) - 1;
+			if (E_check <= 1023) return binary.getF64Exact();
+			return error.NotRepresentable;
+		}
+		// Step 4: drop (bl - 53) low bits of |mantissa| with chosen rounding.
+		// roundToScale operates on the signed mantissa directly — easier than
+		// re-deriving the rounding here.
+		const drop: i32 = @intCast(bl - 53);
+		const new_target: i32 = binary.scale + drop;
+		var rounded = Fp.init(allocator);
+		defer rounded.deinit();
+		try roundToScale(&rounded, &binary, new_target, mode);
+		try rounded.canonicalize();
+		// Re-derive bitLen of rounded magnitude — the carry from rounding
+		// could have promoted 53 → 54 bits (e.g. all-ones rounded up).
+		var rmag = Mp.init(allocator);
+		defer rmag.deinit();
+		try blip_mp_root.sign.abs(&rmag, &rounded.mantissa);
+		var rbl: usize = rmag.bitLen();
+		if (rbl == 0) return 0.0; // rounded all the way to zero (very subnormal)
+		if (rbl > 53) {
+			// Carry pushed past 53 bits — strip one low bit and bump scale.
+			// Since we just rounded to a multiple of 2^new_target, the low bit
+			// must be 0; canonicalize already handled this iff the value's
+			// 2-adic valuation aligns. Defensive: shift right by (rbl - 53)
+			// and bump scale by the same.
+			const extra: u32 = @intCast(rbl - 53);
+			try shrInPlace(&rmag, extra);
+			const new_scale_i64: i64 = @as(i64, rounded.scale) + @as(i64, extra);
+			if (new_scale_i64 > std.math.maxInt(i32)) return error.NotRepresentable;
+			rounded.scale = @intCast(new_scale_i64);
+			rbl = rmag.bitLen();
+			// Re-apply sign for encoding consistency (we'll use rmag below).
+			if (rounded.mantissa.cachedSign() < 0) {
+				var negated = Mp.init(allocator);
+				defer negated.deinit();
+				try blip_mp_root.sign.neg(&negated, &rmag);
+				try copyInto(&rounded.mantissa, &negated);
+			} else {
+				try copyInto(&rounded.mantissa, &rmag);
+			}
+		}
+		// Step 5: encode rounded value via getF64Exact (now ≤ 53 bits).
+		const E: i64 = @as(i64, rounded.scale) + @as(i64, @intCast(rbl)) - 1;
+		if (E > 1023) return error.NotRepresentable;
+		return rounded.getF64Exact();
+	}
+
 	/// Parse `s` as a fixed-point literal in `base`. Accepts optional leading
 	/// '-', optional fractional part with '.' separator. Bases 2/8/10/16
 	/// supported (delegated to Mp.setStr). The radix point is splice-only —
@@ -944,6 +1031,109 @@ pub fn toStringCanonical(allocator: std.mem.Allocator, x: *const Fp) FpError![]u
 		@memcpy(out[pos..], mag_str);
 		return out;
 	}
+}
+
+/// Format `x` with EXACTLY `frac_digits` digits after the radix point. Pads
+/// with trailing zeros if the canonical form has fewer; rounds (banker's /
+/// half-to-even) if more. Honors sign. With `frac_digits == 0`, no decimal
+/// point is written.
+///
+/// Algorithm: roundToScale(target_scale = -frac_digits, .half_to_even) →
+/// the result has scale = -frac_digits exactly (no canonicalize), so
+/// toStringCanonical naturally renders the right number of fractional
+/// digits — except when mantissa rounds to zero, in which case canonical
+/// returns "0" and we pad here.
+pub fn toStringFixed(allocator: std.mem.Allocator, x: *const Fp, frac_digits: u32) FpError![]u8 {
+	if (frac_digits > std.math.maxInt(i32)) return error.OutputBufferTooSmall;
+	const target_scale: i32 = -@as(i32, @intCast(frac_digits));
+	var rounded = Fp.init(allocator);
+	defer rounded.deinit();
+	try roundToScale(&rounded, x, target_scale, .half_to_even);
+	// Zero mantissa: canonical returns just "0" — manually build "0.000…".
+	if (rounded.mantissa.cachedSign() == 0) {
+		if (frac_digits == 0) {
+			const out = try allocator.alloc(u8, 1);
+			out[0] = '0';
+			return out;
+		}
+		const fd: usize = @intCast(frac_digits);
+		const out = try allocator.alloc(u8, 2 + fd);
+		out[0] = '0';
+		out[1] = '.';
+		@memset(out[2..], '0');
+		return out;
+	}
+	// Non-zero: rounded.scale == target_scale, so toStringCanonical gives
+	// exactly frac_digits fractional digits.
+	return toStringCanonical(allocator, &rounded);
+}
+
+/// Format `x` in scientific notation: `[-]M.MMMeE` for decimal, `[-]M.MMMpE`
+/// for binary (C99 hex-float style — but with binary digits, not hex).
+/// Mantissa side always has exactly one significant digit before the point.
+/// If the mantissa magnitude is a single digit, the radix point is omitted
+/// ("5e0" not "5.e0"). Zero renders as "0".
+///
+/// Algorithm: canonicalize a working copy, render the magnitude in `base`,
+/// compute exponent = scale + (digit_count - 1), splice in radix point after
+/// the leading digit.
+pub fn toStringScientific(allocator: std.mem.Allocator, x: *const Fp) FpError![]u8 {
+	if (x.mantissa.cachedSign() == 0) {
+		const out = try allocator.alloc(u8, 1);
+		out[0] = '0';
+		return out;
+	}
+	const blip_mp_root = @import("blip_mp.zig");
+	// Work on a canonicalized copy so trailing-zero stripping pulls scale
+	// up the way "1.5e3" expects (1500 → 15 × 10^2 → exp=3).
+	var work = Fp.init(allocator);
+	defer work.deinit();
+	try copyInto(&work.mantissa, &x.mantissa);
+	work.scale = x.scale;
+	work.base = x.base;
+	try work.canonicalize();
+	// Render magnitude.
+	var mag = Mp.init(allocator);
+	defer mag.deinit();
+	try blip_mp_root.sign.abs(&mag, &work.mantissa);
+	const radix: u8 = @intFromEnum(work.base);
+	const mag_str = try blip_mp_root.string_io.toString(&mag, allocator, radix);
+	defer allocator.free(mag_str);
+	const num_digits: i64 = @intCast(mag_str.len);
+	const exp_val: i64 = @as(i64, work.scale) + num_digits - 1;
+	// Format the exponent — sign is implied by leading '-' from std.fmt.
+	const exp_buf = try std.fmt.allocPrint(allocator, "{d}", .{exp_val});
+	defer allocator.free(exp_buf);
+	const exp_char: u8 = switch (work.base) {
+		.decimal => 'e',
+		.binary => 'p',
+	};
+	const negative = work.mantissa.cachedSign() < 0;
+	const sign_len: usize = if (negative) 1 else 0;
+	// Layout: [-]D[.DDD…]<e|p><exp>
+	// If num_digits == 1, no '.' or fractional digits.
+	const has_frac = mag_str.len > 1;
+	const frac_len: usize = if (has_frac) mag_str.len - 1 else 0;
+	const dot_len: usize = if (has_frac) 1 else 0;
+	const total_len = sign_len + 1 + dot_len + frac_len + 1 + exp_buf.len;
+	const out = try allocator.alloc(u8, total_len);
+	var pos: usize = 0;
+	if (negative) {
+		out[0] = '-';
+		pos = 1;
+	}
+	out[pos] = mag_str[0];
+	pos += 1;
+	if (has_frac) {
+		out[pos] = '.';
+		pos += 1;
+		@memcpy(out[pos .. pos + frac_len], mag_str[1..]);
+		pos += frac_len;
+	}
+	out[pos] = exp_char;
+	pos += 1;
+	@memcpy(out[pos .. pos + exp_buf.len], exp_buf);
+	return out;
 }
 
 /// out = a * b. Exact-by-construction: mantissas multiply, scales sum.
@@ -2506,4 +2696,272 @@ test "M14-8: getF64Exact recovers a decimal value that DOES have an exact binary
 	defer x.deinit();
 	try x.setRationalDecimal(1, 4); // 0.25 — exact in both bases
 	try testing.expectEqual(@as(f64, 0.25), try x.getF64Exact());
+}
+
+// ── M14-7b: toStringFixed ──────────────────────────────────────────────────
+
+test "M14-7b: toStringFixed pads canonical with trailing zeros (3.14, 4) → \"3.1400\"" {
+	const a = testing.allocator;
+	var x = Fp.init(a);
+	defer x.deinit();
+	try x.setStr("3.14", .decimal);
+	const s = try toStringFixed(a, &x, 4);
+	defer a.free(s);
+	try testing.expectEqualStrings("3.1400", s);
+}
+
+test "M14-7b: toStringFixed with frac_digits matching scale (0.1, 2) → \"0.10\"" {
+	const a = testing.allocator;
+	var x = Fp.init(a);
+	defer x.deinit();
+	try x.setStr("0.1", .decimal);
+	const s = try toStringFixed(a, &x, 2);
+	defer a.free(s);
+	try testing.expectEqualStrings("0.10", s);
+}
+
+test "M14-7b: toStringFixed truncates with banker's rounding (3.149, 2) → \"3.15\"" {
+	const a = testing.allocator;
+	var x = Fp.init(a);
+	defer x.deinit();
+	try x.setStr("3.149", .decimal);
+	const s = try toStringFixed(a, &x, 2);
+	defer a.free(s);
+	try testing.expectEqualStrings("3.15", s);
+}
+
+test "M14-7b: toStringFixed banker tie-to-even (2.5, 0) → \"2\" (no decimal point)" {
+	const a = testing.allocator;
+	var x = Fp.init(a);
+	defer x.deinit();
+	try x.setStr("2.5", .decimal);
+	const s = try toStringFixed(a, &x, 0);
+	defer a.free(s);
+	try testing.expectEqualStrings("2", s);
+}
+
+test "M14-7b: toStringFixed banker on negative tie (-0.125, 2) → \"-0.12\"" {
+	const a = testing.allocator;
+	var x = Fp.init(a);
+	defer x.deinit();
+	try x.setStr("-0.125", .decimal);
+	const s = try toStringFixed(a, &x, 2);
+	defer a.free(s);
+	try testing.expectEqualStrings("-0.12", s);
+}
+
+test "M14-7b: toStringFixed of zero pads with zeros (0, 3) → \"0.000\"" {
+	const a = testing.allocator;
+	var x = Fp.init(a);
+	defer x.deinit();
+	try x.setI64(0, 0, .decimal);
+	const s = try toStringFixed(a, &x, 3);
+	defer a.free(s);
+	try testing.expectEqualStrings("0.000", s);
+}
+
+test "M14-7b: toStringFixed of zero with frac_digits=0 → \"0\"" {
+	const a = testing.allocator;
+	var x = Fp.init(a);
+	defer x.deinit();
+	try x.setI64(0, 0, .decimal);
+	const s = try toStringFixed(a, &x, 0);
+	defer a.free(s);
+	try testing.expectEqualStrings("0", s);
+}
+
+test "M14-7b: toStringFixed of integer (42, 2) → \"42.00\"" {
+	const a = testing.allocator;
+	var x = Fp.init(a);
+	defer x.deinit();
+	try x.setI64(42, 0, .decimal);
+	const s = try toStringFixed(a, &x, 2);
+	defer a.free(s);
+	try testing.expectEqualStrings("42.00", s);
+}
+
+test "M14-7b: toStringFixed in binary base (0.5_b, 3) → \"0.100\"" {
+	const a = testing.allocator;
+	var x = Fp.init(a);
+	defer x.deinit();
+	try x.setStr("0.1", .binary); // 1 × 2^-1
+	const s = try toStringFixed(a, &x, 3);
+	defer a.free(s);
+	try testing.expectEqualStrings("0.100", s);
+}
+
+// ── M14-7c: toStringScientific ─────────────────────────────────────────────
+
+test "M14-7c: toStringScientific decimal 3.14 → \"3.14e0\"" {
+	const a = testing.allocator;
+	var x = Fp.init(a);
+	defer x.deinit();
+	try x.setStr("3.14", .decimal);
+	const s = try toStringScientific(a, &x);
+	defer a.free(s);
+	try testing.expectEqualStrings("3.14e0", s);
+}
+
+test "M14-7c: toStringScientific decimal 0.001 → \"1e-3\" (no fractional digits)" {
+	const a = testing.allocator;
+	var x = Fp.init(a);
+	defer x.deinit();
+	try x.setStr("0.001", .decimal);
+	const s = try toStringScientific(a, &x);
+	defer a.free(s);
+	try testing.expectEqualStrings("1e-3", s);
+}
+
+test "M14-7c: toStringScientific decimal 1500 → \"1.5e3\" (canonical strips trailing zeros)" {
+	const a = testing.allocator;
+	var x = Fp.init(a);
+	defer x.deinit();
+	try x.setI64(1500, 0, .decimal);
+	const s = try toStringScientific(a, &x);
+	defer a.free(s);
+	try testing.expectEqualStrings("1.5e3", s);
+}
+
+test "M14-7c: toStringScientific decimal -0.025 → \"-2.5e-2\"" {
+	const a = testing.allocator;
+	var x = Fp.init(a);
+	defer x.deinit();
+	try x.setStr("-0.025", .decimal);
+	const s = try toStringScientific(a, &x);
+	defer a.free(s);
+	try testing.expectEqualStrings("-2.5e-2", s);
+}
+
+test "M14-7c: toStringScientific zero → \"0\"" {
+	const a = testing.allocator;
+	var x = Fp.init(a);
+	defer x.deinit();
+	try x.setI64(0, 0, .decimal);
+	const s = try toStringScientific(a, &x);
+	defer a.free(s);
+	try testing.expectEqualStrings("0", s);
+}
+
+test "M14-7c: toStringScientific decimal single digit 5 → \"5e0\"" {
+	const a = testing.allocator;
+	var x = Fp.init(a);
+	defer x.deinit();
+	try x.setI64(5, 0, .decimal);
+	const s = try toStringScientific(a, &x);
+	defer a.free(s);
+	try testing.expectEqualStrings("5e0", s);
+}
+
+test "M14-7c: toStringScientific binary 0.75 = 3 × 2^-2 → \"1.1p-1\"" {
+	const a = testing.allocator;
+	var x = Fp.init(a);
+	defer x.deinit();
+	try x.setI64(3, -2, .binary);
+	const s = try toStringScientific(a, &x);
+	defer a.free(s);
+	try testing.expectEqualStrings("1.1p-1", s);
+}
+
+test "M14-7c: toStringScientific binary 1 → \"1p0\"" {
+	const a = testing.allocator;
+	var x = Fp.init(a);
+	defer x.deinit();
+	try x.setI64(1, 0, .binary);
+	const s = try toStringScientific(a, &x);
+	defer a.free(s);
+	try testing.expectEqualStrings("1p0", s);
+}
+
+// ── M14-8: getF64(mode) ────────────────────────────────────────────────────
+
+test "M14-8: getF64(.exact_or_error) on exact value matches getF64Exact" {
+	const a = testing.allocator;
+	var x = Fp.init(a);
+	defer x.deinit();
+	try x.setRationalDecimal(1, 4); // 0.25
+	try testing.expectEqual(@as(f64, 0.25), try x.getF64(.exact_or_error));
+}
+
+test "M14-8: getF64(.exact_or_error) on >53-bit value errors NotRepresentable (matches getF64Exact)" {
+	const a = testing.allocator;
+	var x = Fp.init(a);
+	defer x.deinit();
+	try x.setI64(@as(i64, 1) << 53 | 1, 0, .binary); // 2^53 + 1
+	try testing.expectError(error.NotRepresentable, x.getF64(.exact_or_error));
+}
+
+test "M14-8: getF64(.half_to_even) rounds 2^53 + 1 → 2^53 (banker tie picks even)" {
+	const a = testing.allocator;
+	var x = Fp.init(a);
+	defer x.deinit();
+	try x.setI64(@as(i64, 1) << 53 | 1, 0, .binary); // 2^53 + 1
+	// Nearest f64 below: 2^53. Above: 2^53 + 2 (gap is 2 at this magnitude).
+	// 2^53 + 1 is exactly halfway. Banker rounds to even → 2^53.
+	const got = try x.getF64(.half_to_even);
+	try testing.expectEqual(@as(f64, @floatFromInt(@as(i64, 1) << 53)), got);
+}
+
+test "M14-8: getF64(.half_to_even) rounds 2^53 + 3 → 2^53 + 4 (banker tie picks even)" {
+	const a = testing.allocator;
+	var x = Fp.init(a);
+	defer x.deinit();
+	try x.setI64(@as(i64, 1) << 53 | 3, 0, .binary); // 2^53 + 3
+	// Nearest f64 below: 2^53 + 2. Above: 2^53 + 4. 2^53+3 is halfway.
+	// Banker → even → 2^53 + 4.
+	const got = try x.getF64(.half_to_even);
+	try testing.expectEqual(@as(f64, @floatFromInt((@as(i64, 1) << 53) + 4)), got);
+}
+
+test "M14-8: getF64(.toward_zero) on 2^53 + 1 → 2^53" {
+	const a = testing.allocator;
+	var x = Fp.init(a);
+	defer x.deinit();
+	try x.setI64(@as(i64, 1) << 53 | 1, 0, .binary);
+	const got = try x.getF64(.toward_zero);
+	try testing.expectEqual(@as(f64, @floatFromInt(@as(i64, 1) << 53)), got);
+}
+
+test "M14-8: getF64(.toward_pos_inf) on 2^53 + 1 → 2^53 + 2" {
+	const a = testing.allocator;
+	var x = Fp.init(a);
+	defer x.deinit();
+	try x.setI64(@as(i64, 1) << 53 | 1, 0, .binary);
+	const got = try x.getF64(.toward_pos_inf);
+	try testing.expectEqual(@as(f64, @floatFromInt((@as(i64, 1) << 53) + 2)), got);
+}
+
+test "M14-8: getF64(any mode) on decimal-with-no-terminating-binary still errors NonTerminating" {
+	// Per spec: toBinary errors before rounding kicks in. The brief calls
+	// this out explicitly — the caller chose decimal; we don't smuggle a
+	// silent decimal→binary truncation under the hood.
+	const a = testing.allocator;
+	var x = Fp.init(a);
+	defer x.deinit();
+	try x.setRationalDecimal(1, 10); // 0.1₁₀
+	try testing.expectError(error.NonTerminatingExpansion, x.getF64(.half_to_even));
+	try testing.expectError(error.NonTerminatingExpansion, x.getF64(.toward_zero));
+}
+
+test "M14-8: getF64(.half_to_even) carry-up case: 2^54 - 1 → 2^54" {
+	const a = testing.allocator;
+	var x = Fp.init(a);
+	defer x.deinit();
+	// 2^54 - 1 = 0x3FFFFFFFFFFFFF — 54 bits all set.
+	try x.setI64((@as(i64, 1) << 54) - 1, 0, .binary);
+	// Half-to-even: drop bit 0 (which is 1), tie? No — we drop 1 bit only,
+	// and the dropped value is exactly half. quot's low bit is 1 (odd) before
+	// rounding; banker bumps to even → 2^53. Then carry: 2^53 + 1 then
+	// renormalized? Actually quot = (2^54 - 1) >> 1 = 2^53 - 1 (odd, banker
+	// bumps), → 2^53. So result = 2^53 × 2 = 2^54.
+	const got = try x.getF64(.half_to_even);
+	try testing.expectEqual(@as(f64, @floatFromInt(@as(i64, 1) << 54)), got);
+}
+
+test "M14-8: getF64(.half_to_even) on negative 2^53 + 1 → -(2^53)" {
+	const a = testing.allocator;
+	var x = Fp.init(a);
+	defer x.deinit();
+	try x.setI64(-(@as(i64, 1) << 53 | 1), 0, .binary);
+	const got = try x.getF64(.half_to_even);
+	try testing.expectEqual(@as(f64, -@as(f64, @floatFromInt(@as(i64, 1) << 53))), got);
 }
