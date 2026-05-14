@@ -634,6 +634,160 @@ pub fn toBinary(out: *Fp, x: *const Fp) FpError!void {
 	out.base = .binary;
 }
 
+pub const RoundMode = enum {
+	exact_or_error,    // refuse to lose info; error.NonTerminatingExpansion otherwise
+	toward_zero,       // truncate magnitude (drop discarded digits)
+	toward_pos_inf,    // ceiling: +1 magnitude on positives if any discarded digit nonzero
+	toward_neg_inf,    // floor:   +1 magnitude on negatives if any discarded digit nonzero
+	half_up,           // ties go away from zero
+	half_down,         // ties go toward zero
+	half_to_even,      // banker's: ties prefer even quot
+	half_to_odd,       // ties prefer odd quot
+};
+
+/// Round `a` to a target scale exponent. delta = target_scale - a.scale:
+///   delta < 0  → no info loss; lift mantissa by base^|delta|.
+///   delta > 0  → divide mantissa by base^delta; rounding mode dictates
+///                what to do with the remainder.
+///   delta == 0 → copy.
+pub fn roundToScale(out: *Fp, a: *const Fp, target_scale: i32, mode: RoundMode) FpError!void {
+	const allocator = out.mantissa.allocator;
+	const blip_mp_root = @import("blip_mp.zig");
+	if (target_scale == a.scale) {
+		try copyInto(&out.mantissa, &a.mantissa);
+		out.scale = a.scale;
+		out.base = a.base;
+		return;
+	}
+	if (target_scale < a.scale) {
+		// Gain precision — multiply by base^(a.scale - target_scale). Exact.
+		const k: u32 = @intCast(a.scale - target_scale);
+		try copyInto(&out.mantissa, &a.mantissa);
+		try liftMantissa(&out.mantissa, a.base, k);
+		out.scale = target_scale;
+		out.base = a.base;
+		return;
+	}
+	// target_scale > a.scale — discard low digits with chosen rounding.
+	const delta: u32 = @intCast(target_scale - a.scale);
+	// Build divisor = base^delta.
+	var divisor = Mp.init(allocator);
+	defer divisor.deinit();
+	switch (a.base) {
+		.binary => {
+			try divisor.setI64(1);
+			var lifted = Mp.init(allocator);
+			defer lifted.deinit();
+			try blip_mp_root.bitwise.shl(&lifted, &divisor, delta);
+			try copyInto(&divisor, &lifted);
+		},
+		.decimal => {
+			try divisor.setI64(1);
+			var ten = Mp.init(allocator);
+			defer ten.deinit();
+			try ten.setI64(10);
+			var i: u32 = 0;
+			while (i < delta) : (i += 1) {
+				var tmp = Mp.init(allocator);
+				defer tmp.deinit();
+				try tmp.mul(&divisor, &ten);
+				try copyInto(&divisor, &tmp);
+			}
+		},
+	}
+	// Operate on |mantissa|; track sign separately so rounding semantics are clear.
+	const negative = a.mantissa.cachedSign() < 0;
+	var abs_m = Mp.init(allocator);
+	defer abs_m.deinit();
+	try blip_mp_root.sign.abs(&abs_m, &a.mantissa);
+	var quot = Mp.init(allocator);
+	defer quot.deinit();
+	var rem = Mp.init(allocator);
+	defer rem.deinit();
+	try Mp.divMod(&quot, &rem, &abs_m, &divisor);
+	const rem_zero = rem.cachedSign() == 0;
+	// Rounding decision: should we add 1 to the magnitude of quot?
+	var bump: bool = false;
+	switch (mode) {
+		.exact_or_error => {
+			if (!rem_zero) return error.NonTerminatingExpansion;
+		},
+		.toward_zero => {},
+		.toward_pos_inf => {
+			if (!rem_zero and !negative) bump = true;
+		},
+		.toward_neg_inf => {
+			if (!rem_zero and negative) bump = true;
+		},
+		.half_up => {
+			// 2*rem >= divisor → bump magnitude (ties round away from zero)
+			var two_rem = Mp.init(allocator);
+			defer two_rem.deinit();
+			var two = Mp.init(allocator);
+			defer two.deinit();
+			try two.setI64(2);
+			try two_rem.mul(&rem, &two);
+			if (two_rem.cmp(&divisor) != .lt) bump = true;
+		},
+		.half_down => {
+			// 2*rem > divisor → bump (ties truncate toward zero)
+			var two_rem = Mp.init(allocator);
+			defer two_rem.deinit();
+			var two = Mp.init(allocator);
+			defer two.deinit();
+			try two.setI64(2);
+			try two_rem.mul(&rem, &two);
+			if (two_rem.cmp(&divisor) == .gt) bump = true;
+		},
+		.half_to_even, .half_to_odd => {
+			var two_rem = Mp.init(allocator);
+			defer two_rem.deinit();
+			var two = Mp.init(allocator);
+			defer two.deinit();
+			try two.setI64(2);
+			try two_rem.mul(&rem, &two);
+			const cmp_res = two_rem.cmp(&divisor);
+			if (cmp_res == .gt) {
+				bump = true;
+			} else if (cmp_res == .eq) {
+				// Tie: bump iff quot's parity opposes the target parity.
+				const quot_low = blip_mp_root.scan.scan1(&quot, 0);
+				const quot_is_odd = quot_low == 0 and quot.cachedSign() != 0;
+				if (mode == .half_to_even and quot_is_odd) bump = true;
+				if (mode == .half_to_odd and !quot_is_odd) bump = true;
+			}
+		},
+	}
+	if (bump) {
+		var one = Mp.init(allocator);
+		defer one.deinit();
+		try one.setI64(1);
+		var bumped = Mp.init(allocator);
+		defer bumped.deinit();
+		try bumped.add(&quot, &one);
+		try copyInto(&quot, &bumped);
+	}
+	if (negative) {
+		var negated = Mp.init(allocator);
+		defer negated.deinit();
+		try blip_mp_root.sign.neg(&negated, &quot);
+		try copyInto(&out.mantissa, &negated);
+	} else {
+		try copyInto(&out.mantissa, &quot);
+	}
+	out.scale = target_scale;
+	out.base = a.base;
+}
+
+/// Round `a` to an integer Mp via roundToScale at scale=0, then peel off
+/// the mantissa. Mode applies to the discarded fractional digits.
+pub fn roundToMp(out: *Mp, a: *const Fp, mode: RoundMode) FpError!void {
+	var rounded = Fp.init(a.mantissa.allocator);
+	defer rounded.deinit();
+	try roundToScale(&rounded, a, 0, mode);
+	try copyInto(out, &rounded.mantissa);
+}
+
 /// Format `x` in its native base as a canonical decimal/binary/hex string:
 /// no scientific notation, no superfluous zeros (assumes the input is
 /// already canonicalized — call `canonicalize` first if unsure).
@@ -1781,11 +1935,171 @@ test "M14-5: toBinary of decimal integer 25 → 25 × 2^0 (always exact for inte
 }
 
 test "M14-6: roundToScale(.exact_or_error) errors when target scale would lose info" {
-	return error.SkipZigTest; // M14-6 round not yet implemented
+	const a = testing.allocator;
+	var x = Fp.init(a);
+	defer x.deinit();
+	var r = Fp.init(a);
+	defer r.deinit();
+	try x.setStr("3.14", .decimal); // mant=314 scale=-2
+	try testing.expectError(error.NonTerminatingExpansion, roundToScale(&r, &x, -1, .exact_or_error));
 }
 
-test "M14-6: roundToScale(.banker) round-half-to-even on 0.5 boundary" {
-	return error.SkipZigTest; // M14-6 round not yet implemented
+test "M14-6: roundToScale(.exact_or_error) succeeds when no info would be lost" {
+	const a = testing.allocator;
+	var x = Fp.init(a);
+	defer x.deinit();
+	var r = Fp.init(a);
+	defer r.deinit();
+	try x.setStr("3.10", .decimal); // mant=310 scale=-2
+	try roundToScale(&r, &x, -1, .exact_or_error);
+	try testing.expectEqual(@as(i64, 31), try r.mantissa.getI64());
+	try testing.expectEqual(@as(i32, -1), r.scale);
+}
+
+test "M14-6: roundToScale extends precision when target_scale < a.scale (always exact)" {
+	const a = testing.allocator;
+	var x = Fp.init(a);
+	defer x.deinit();
+	var r = Fp.init(a);
+	defer r.deinit();
+	try x.setStr("3.14", .decimal); // scale=-2
+	try roundToScale(&r, &x, -4, .exact_or_error); // gain 2 digits
+	try testing.expectEqual(@as(i64, 31400), try r.mantissa.getI64());
+	try testing.expectEqual(@as(i32, -4), r.scale);
+}
+
+test "M14-6: roundToScale(.toward_zero) truncates magnitude — positives" {
+	const a = testing.allocator;
+	var x = Fp.init(a);
+	defer x.deinit();
+	var r = Fp.init(a);
+	defer r.deinit();
+	try x.setStr("3.19", .decimal);
+	try roundToScale(&r, &x, -1, .toward_zero);
+	try testing.expectEqual(@as(i64, 31), try r.mantissa.getI64());
+	try testing.expectEqual(@as(i32, -1), r.scale);
+}
+
+test "M14-6: roundToScale(.toward_zero) truncates magnitude — negatives" {
+	const a = testing.allocator;
+	var x = Fp.init(a);
+	defer x.deinit();
+	var r = Fp.init(a);
+	defer r.deinit();
+	try x.setStr("-3.19", .decimal);
+	try roundToScale(&r, &x, -1, .toward_zero);
+	try testing.expectEqual(@as(i64, -31), try r.mantissa.getI64());
+}
+
+test "M14-6: roundToScale(.toward_pos_inf) — ceiling, positives go up" {
+	const a = testing.allocator;
+	var x = Fp.init(a);
+	defer x.deinit();
+	var r = Fp.init(a);
+	defer r.deinit();
+	try x.setStr("3.11", .decimal);
+	try roundToScale(&r, &x, -1, .toward_pos_inf);
+	try testing.expectEqual(@as(i64, 32), try r.mantissa.getI64());
+	// negatives: ceiling of -3.19 at scale -1 == -3.1 (toward zero from below)
+	try x.setStr("-3.19", .decimal);
+	try roundToScale(&r, &x, -1, .toward_pos_inf);
+	try testing.expectEqual(@as(i64, -31), try r.mantissa.getI64());
+}
+
+test "M14-6: roundToScale(.toward_neg_inf) — floor, negatives go down" {
+	const a = testing.allocator;
+	var x = Fp.init(a);
+	defer x.deinit();
+	var r = Fp.init(a);
+	defer r.deinit();
+	try x.setStr("-3.11", .decimal);
+	try roundToScale(&r, &x, -1, .toward_neg_inf);
+	try testing.expectEqual(@as(i64, -32), try r.mantissa.getI64());
+	try x.setStr("3.19", .decimal);
+	try roundToScale(&r, &x, -1, .toward_neg_inf);
+	try testing.expectEqual(@as(i64, 31), try r.mantissa.getI64());
+}
+
+test "M14-6: roundToScale(.half_up) — ties round away from zero" {
+	const a = testing.allocator;
+	var x = Fp.init(a);
+	defer x.deinit();
+	var r = Fp.init(a);
+	defer r.deinit();
+	// 2.5 → 3
+	try x.setStr("2.5", .decimal);
+	try roundToScale(&r, &x, 0, .half_up);
+	try testing.expectEqual(@as(i64, 3), try r.mantissa.getI64());
+	// -2.5 → -3 (away from zero)
+	try x.setStr("-2.5", .decimal);
+	try roundToScale(&r, &x, 0, .half_up);
+	try testing.expectEqual(@as(i64, -3), try r.mantissa.getI64());
+	// 2.4 → 2 (under tie threshold)
+	try x.setStr("2.4", .decimal);
+	try roundToScale(&r, &x, 0, .half_up);
+	try testing.expectEqual(@as(i64, 2), try r.mantissa.getI64());
+	// 2.6 → 3
+	try x.setStr("2.6", .decimal);
+	try roundToScale(&r, &x, 0, .half_up);
+	try testing.expectEqual(@as(i64, 3), try r.mantissa.getI64());
+}
+
+test "M14-6: roundToScale(.half_to_even) banker's rounding — ties go to even" {
+	const a = testing.allocator;
+	var x = Fp.init(a);
+	defer x.deinit();
+	var r = Fp.init(a);
+	defer r.deinit();
+	// 2.5 → 2 (2 is even)
+	try x.setStr("2.5", .decimal);
+	try roundToScale(&r, &x, 0, .half_to_even);
+	try testing.expectEqual(@as(i64, 2), try r.mantissa.getI64());
+	// 3.5 → 4 (4 is even)
+	try x.setStr("3.5", .decimal);
+	try roundToScale(&r, &x, 0, .half_to_even);
+	try testing.expectEqual(@as(i64, 4), try r.mantissa.getI64());
+	// -2.5 → -2 (mag 2 is even)
+	try x.setStr("-2.5", .decimal);
+	try roundToScale(&r, &x, 0, .half_to_even);
+	try testing.expectEqual(@as(i64, -2), try r.mantissa.getI64());
+	// 2.51 → 3 (over the tie threshold)
+	try x.setStr("2.51", .decimal);
+	try roundToScale(&r, &x, 0, .half_to_even);
+	try testing.expectEqual(@as(i64, 3), try r.mantissa.getI64());
+}
+
+test "M14-6: roundToScale binary base — 0.111₂ rounded to scale -1 (.half_up) = 0.1₂ × 2^0 boundary" {
+	const a = testing.allocator;
+	var x = Fp.init(a);
+	defer x.deinit();
+	var r = Fp.init(a);
+	defer r.deinit();
+	// 0.111 binary = 7 × 2^-3 = 0.875 dec
+	try x.setI64(7, -3, .binary);
+	try roundToScale(&r, &x, -1, .half_up);
+	// 7 / 4 = (1, 3); 2*3 = 6 > 4 → round up → 2 mag.
+	// Result: 2 × 2^-1 = 1.0 dec.
+	try testing.expectEqual(@as(i64, 2), try r.mantissa.getI64());
+	try testing.expectEqual(@as(i32, -1), r.scale);
+}
+
+test "M14-6: roundToMp drops fractional part — π → 3 (toward_zero)" {
+	const a = testing.allocator;
+	var x = Fp.init(a);
+	defer x.deinit();
+	var r = Mp.init(a);
+	defer r.deinit();
+	try x.setStr("3.14159", .decimal);
+	try roundToMp(&r, &x, .toward_zero);
+	try testing.expectEqual(@as(i64, 3), try r.getI64());
+	// Half-up rounds up: 3.5 → 4
+	try x.setStr("3.5", .decimal);
+	try roundToMp(&r, &x, .half_up);
+	try testing.expectEqual(@as(i64, 4), try r.getI64());
+	// Banker on 2.5 → 2
+	try x.setStr("2.5", .decimal);
+	try roundToMp(&r, &x, .half_to_even);
+	try testing.expectEqual(@as(i64, 2), try r.getI64());
 }
 
 test "M14-7: toStringCanonical of 0 → \"0\"" {
