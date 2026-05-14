@@ -999,6 +999,106 @@ pub fn nttStockhamVec(a: []u64, scratch: []u64, twiddles: []const u64) void {
 	}
 }
 
+/// **M6-4-E.3 (2026-05-14) — NEGATIVE EMPIRICAL RESULT.** Stockham +
+/// Montgomery hybrid. The HYPOTHESIS was that combining Stockham (which
+/// eliminates the bit-reversal pass) with Montgomery (which avoids the
+/// `umulh` dependency in the inner mul) would compound to a 13–15% net
+/// speedup over `nttStockhamVec`, hitting the M6-4-E.3 PLAN.md target
+/// without writing inline asm.
+///
+/// Microbench reality on M-series:
+///   N=8192:    nttStockhamMontVec 37050 ns vs nttStockhamVec 33235 ns → 0.90× (10% SLOWER)
+///   N=32768:   nttStockhamMontVec 180515 ns vs nttStockhamVec 167765 ns → 0.93× (7% SLOWER)
+///
+/// Why the hybrid fails: although `montMul_x2` is ~10% faster per-call
+/// than `mulModP_x2` (microbench: 0.720 vs 0.799 ns/op), the full-NTT-pass
+/// inner loop is bound by L1 load/store traffic at these working sizes —
+/// not mul throughput. The per-mul advantage is invisible against the
+/// memory-bandwidth ceiling. AND the lane-extract / scalar-mul / lane-reinsert
+/// pattern in `mulModP_x2` pairs better with the surrounding NEON adds than
+/// `montMul_x2`'s mostly-vector reduction (which competes with addModP_x2 /
+/// subModP_x2 for NEON pipe issue slots).
+///
+/// Conclusion: kept as a building block + correctness-validated reference
+/// for future architectures (e.g., x86_64 Zen 4 where the Apple-specific
+/// "dual scalar pipe + crowded NEON" analysis doesn't apply). NOT routed
+/// into `mulMagnitudes` production path — `nttStockhamVec` remains the
+/// winner on M-series.
+///
+/// Inputs MUST be in Montgomery form (caller converts via `toMont` before
+/// the NTT and `fromMont` after the inverse). Twiddles must also be Mont-form.
+///
+/// Algorithm and memory layout are identical to `nttStockhamVec` — only the
+/// inner mul switches from scalar `% P` to `montMul_x2`. add/sub are linear
+/// under Montgomery (Mont(a+b) = Mont(a) + Mont(b)) so addModP_x2 / subModP_x2
+/// are unchanged.
+pub fn nttStockhamMontVec(a: []u64, scratch: []u64, twiddles_m: []const u64) void {
+	const n = a.len;
+	if (n <= 1) return;
+	std.debug.assert(n & (n - 1) == 0);
+	std.debug.assert(scratch.len == n);
+	std.debug.assert(twiddles_m.len >= n / 2);
+
+	const half_n = n >> 1;
+	var src: []u64 = a;
+	var dst: []u64 = scratch;
+
+	var m: usize = 2;
+	while (m <= n) : (m <<= 1) {
+		const m2 = m >> 1;
+		const stride = n / m;
+		if (m2 == 1) {
+			// Scalar fallback at the smallest level.
+			var q: usize = 0;
+			while (q < n) : (q += m) {
+				const q_idx = q / m;
+				const src_base = q_idx * m2;
+				const w = twiddles_m[0]; // Mont(1) = ONE_MOD_P
+				const x = src[src_base];
+				const y = src[src_base + half_n];
+				const t = montMul(y, w);
+				dst[q] = addModP(x, t);
+				dst[q + 1] = subModP(x, t);
+			}
+		} else {
+			var q: usize = 0;
+			while (q < n) : (q += m) {
+				const q_idx = q / m;
+				const src_base = q_idx * m2;
+				var j: usize = 0;
+				while (j < m2) : (j += 2) {
+					const w_pair: @Vector(2, u64) = .{
+						twiddles_m[j * stride],
+						twiddles_m[(j + 1) * stride],
+					};
+					const x_pair: @Vector(2, u64) = .{
+						src[src_base + j],
+						src[src_base + j + 1],
+					};
+					const y_pair: @Vector(2, u64) = .{
+						src[src_base + j + half_n],
+						src[src_base + j + 1 + half_n],
+					};
+					const t_pair = montMul_x2(y_pair, w_pair);
+					const new_lo = addModP_x2(x_pair, t_pair);
+					const new_hi = subModP_x2(x_pair, t_pair);
+					dst[q + j] = new_lo[0];
+					dst[q + j + 1] = new_lo[1];
+					dst[q + j + m2] = new_hi[0];
+					dst[q + j + 1 + m2] = new_hi[1];
+				}
+			}
+		}
+		const tmp = src;
+		src = dst;
+		dst = tmp;
+	}
+
+	if (src.ptr != a.ptr) {
+		@memcpy(a, src);
+	}
+}
+
 // ── Radix-4 NTT (M6-4-D) ───────────────────────────────────────────────────
 //
 // Cooley-Tukey radix-4 in-place NTT, expressed as a *fused pair of radix-2
@@ -1789,6 +1889,50 @@ test "nttWithTwiddlesMontVec: matches nttWithTwiddles after Mont conversion acro
 		nttWithTwiddlesMontVec(a_vec, tw_m);
 
 		// Convert vec output back from Mont and compare lanewise.
+		for (a_vec, a_scalar) |xm, x_expected| {
+			try testing.expectEqual(x_expected, fromMont(xm));
+		}
+	}
+}
+
+test "nttStockhamMontVec: matches nttStockham after Mont conversion across sizes" {
+	// Mont+Stockham hybrid (M6-4-E.3). Bit-exact equivalent of nttStockham
+	// after Mont round-trip. If this passes, the hybrid is safe to wire into
+	// mulMagnitudes' production path (with toMont/fromMont at the boundaries).
+	const sizes = [_]usize{ 2, 4, 8, 16, 64, 256, 1024, 4096, 8192 };
+	for (sizes) |n| {
+		const a_scalar = try testing.allocator.alloc(u64, n);
+		defer testing.allocator.free(a_scalar);
+		const sc_scalar = try testing.allocator.alloc(u64, n);
+		defer testing.allocator.free(sc_scalar);
+		const a_vec = try testing.allocator.alloc(u64, n);
+		defer testing.allocator.free(a_vec);
+		const sc_vec = try testing.allocator.alloc(u64, n);
+		defer testing.allocator.free(sc_vec);
+		const tw = try testing.allocator.alloc(u64, n / 2);
+		defer testing.allocator.free(tw);
+		const tw_m = try testing.allocator.alloc(u64, n / 2);
+		defer testing.allocator.free(tw_m);
+
+		var prng = std.Random.DefaultPrng.init(0xC0FFEE_FACE_BEEF ^ n);
+		const rand = prng.random();
+		for (a_scalar) |*x| x.* = rand.uintLessThan(u64, P);
+		for (a_vec, a_scalar) |*xm, x| xm.* = toMont(x);
+
+		const omega_n = nthRootOfUnity(n);
+		if (tw.len > 0) {
+			tw[0] = 1;
+			tw_m[0] = ONE_MOD_P;
+		}
+		var j: usize = 1;
+		while (j < tw.len) : (j += 1) {
+			tw[j] = mulModP(tw[j - 1], omega_n);
+			tw_m[j] = toMont(tw[j]);
+		}
+
+		nttStockham(a_scalar, sc_scalar, tw);
+		nttStockhamMontVec(a_vec, sc_vec, tw_m);
+
 		for (a_vec, a_scalar) |xm, x_expected| {
 			try testing.expectEqual(x_expected, fromMont(xm));
 		}
