@@ -26,6 +26,9 @@ pub const BLIP_MP_ERR_OUT_OF_RANGE: c_int = 5;
 pub const BLIP_MP_ERR_NO_INVERSE: c_int = 6;
 pub const BLIP_MP_ERR_NEGATIVE_OPERAND: c_int = 7;
 pub const BLIP_MP_ERR_BUFFER_TOO_SMALL: c_int = 8;
+pub const BLIP_MP_ERR_MIXED_BASES: c_int = 9;
+pub const BLIP_MP_ERR_NON_TERMINATING: c_int = 10;
+pub const BLIP_MP_ERR_NOT_REPRESENTABLE: c_int = 11;
 
 /// Translate a Zig error from any of `Mp`'s error sets into the C code
 /// surface. Centralised so every export uses the same mapping rules.
@@ -40,6 +43,9 @@ fn mapError(err: anyerror) c_int {
 		error.BufferTooSmall, error.UnexpectedEndOfInput, error.OverlongEncoding => BLIP_MP_ERR_INVALID_INPUT,
 		error.EmptyString, error.InvalidDigit, error.UnsupportedBase => BLIP_MP_ERR_INVALID_INPUT,
 		error.ZeroExponent, error.ModulusMustBeOddPositive => BLIP_MP_ERR_INVALID_INPUT,
+		error.MixedBases => BLIP_MP_ERR_MIXED_BASES,
+		error.NonTerminatingExpansion => BLIP_MP_ERR_NON_TERMINATING,
+		error.NotRepresentable => BLIP_MP_ERR_NOT_REPRESENTABLE,
 		else => BLIP_MP_ERR_INVALID_INPUT,
 	};
 }
@@ -400,6 +406,218 @@ export fn blip_mp_fibonacci(out: *Mp, n: u32) c_int {
 	return BLIP_MP_OK;
 }
 
+// ──────────────────────────────────────────────────────────────────────
+// Fp — exact arbitrary-precision fixed-point (M14)
+// ──────────────────────────────────────────────────────────────────────
+//
+// The IEEE754-disruption type. Each Fp carries (mantissa, scale, base);
+// every operation either succeeds bit-exactly, takes a caller-supplied
+// precision budget, or errors loudly. No NaN, no ±∞, no signed zero,
+// no denormals, no silent rounding.
+
+const Fp = blip_mp.Fp;
+
+// Mirror the Zig Base enum's wire values exactly.
+pub const BLIP_MP_FP_BASE_BINARY: c_int = 2;
+pub const BLIP_MP_FP_BASE_DECIMAL: c_int = 10;
+
+// Round modes — wire values match the Zig enum's ordinals.
+pub const BLIP_MP_FP_ROUND_EXACT_OR_ERROR: c_int = 0;
+pub const BLIP_MP_FP_ROUND_TOWARD_ZERO: c_int = 1;
+pub const BLIP_MP_FP_ROUND_TOWARD_POS_INF: c_int = 2;
+pub const BLIP_MP_FP_ROUND_TOWARD_NEG_INF: c_int = 3;
+pub const BLIP_MP_FP_ROUND_HALF_UP: c_int = 4;
+pub const BLIP_MP_FP_ROUND_HALF_DOWN: c_int = 5;
+pub const BLIP_MP_FP_ROUND_HALF_TO_EVEN: c_int = 6;
+pub const BLIP_MP_FP_ROUND_HALF_TO_ODD: c_int = 7;
+
+fn baseFromC(b: c_int) ?blip_mp.fp.Base {
+	return switch (b) {
+		BLIP_MP_FP_BASE_BINARY => .binary,
+		BLIP_MP_FP_BASE_DECIMAL => .decimal,
+		else => null,
+	};
+}
+
+fn roundFromC(m: c_int) ?blip_mp.fp.RoundMode {
+	if (m < 0 or m > 7) return null;
+	return @enumFromInt(@as(u3, @intCast(m)));
+}
+
+// --- Lifecycle ---------------------------------------------------------
+
+export fn blip_mp_fp_create() ?*Fp {
+	const fp = allocator.create(Fp) catch return null;
+	fp.* = Fp.init(allocator);
+	return fp;
+}
+
+export fn blip_mp_fp_destroy(fp: ?*Fp) void {
+	if (fp) |f| {
+		f.deinit();
+		allocator.destroy(f);
+	}
+}
+
+// --- Construction ------------------------------------------------------
+
+export fn blip_mp_fp_set_i64(fp: *Fp, mantissa: i64, scale: i32, base: c_int) c_int {
+	const b = baseFromC(base) orelse return BLIP_MP_ERR_INVALID_INPUT;
+	fp.setI64(mantissa, scale, b) catch |e| return mapError(e);
+	return BLIP_MP_OK;
+}
+
+export fn blip_mp_fp_set_rational_decimal(fp: *Fp, num: i64, den: i64) c_int {
+	fp.setRationalDecimal(num, den) catch |e| return mapError(e);
+	return BLIP_MP_OK;
+}
+
+export fn blip_mp_fp_set_rational_binary(fp: *Fp, num: i64, den: i64) c_int {
+	fp.setRationalBinary(num, den) catch |e| return mapError(e);
+	return BLIP_MP_OK;
+}
+
+export fn blip_mp_fp_set_str(fp: *Fp, str: [*]const u8, str_len: usize, base: c_int) c_int {
+	const b = baseFromC(base) orelse return BLIP_MP_ERR_INVALID_INPUT;
+	const slice = str[0..str_len];
+	fp.setStr(slice, b) catch |e| return mapError(e);
+	return BLIP_MP_OK;
+}
+
+export fn blip_mp_fp_set_f64(fp: *Fp, v: f64) c_int {
+	fp.setF64(v) catch |e| return mapError(e);
+	return BLIP_MP_OK;
+}
+
+// --- Queries -----------------------------------------------------------
+
+export fn blip_mp_fp_is_zero(fp: *const Fp) c_int {
+	return if (fp.isZero()) 1 else 0;
+}
+
+export fn blip_mp_fp_get_base(fp: *const Fp) c_int {
+	return @intFromEnum(fp.base);
+}
+
+export fn blip_mp_fp_get_scale(fp: *const Fp) i32 {
+	return fp.scale;
+}
+
+/// Borrowed pointer into `fp.mantissa`. Valid until the next mutating
+/// call on `fp`. Caller MUST NOT destroy the returned Mp (it's owned by
+/// the Fp). Caller MAY pass it to read-only `blip_mp_*` operations.
+export fn blip_mp_fp_get_mantissa(fp: *Fp) *blip_mp.Mp {
+	return &fp.mantissa;
+}
+
+// --- Canonical form ----------------------------------------------------
+
+export fn blip_mp_fp_canonicalize(fp: *Fp) c_int {
+	fp.canonicalize() catch |e| return mapError(e);
+	return BLIP_MP_OK;
+}
+
+// --- Comparison --------------------------------------------------------
+
+export fn blip_mp_fp_cmp(a: *const Fp, b: *const Fp, out: *c_int) c_int {
+	const order = blip_mp.fp.cmp(a, b) catch |e| return mapError(e);
+	out.* = switch (order) {
+		.lt => -1,
+		.eq => 0,
+		.gt => 1,
+	};
+	return BLIP_MP_OK;
+}
+
+export fn blip_mp_fp_eq(a: *const Fp, b: *const Fp, out: *c_int) c_int {
+	const eq_val = blip_mp.fp.eq(a, b) catch |e| return mapError(e);
+	out.* = if (eq_val) 1 else 0;
+	return BLIP_MP_OK;
+}
+
+// --- Arithmetic --------------------------------------------------------
+
+export fn blip_mp_fp_add(r: *Fp, a: *const Fp, b: *const Fp) c_int {
+	blip_mp.fp.add(r, a, b) catch |e| return mapError(e);
+	return BLIP_MP_OK;
+}
+
+export fn blip_mp_fp_sub(r: *Fp, a: *const Fp, b: *const Fp) c_int {
+	blip_mp.fp.sub(r, a, b) catch |e| return mapError(e);
+	return BLIP_MP_OK;
+}
+
+export fn blip_mp_fp_mul(r: *Fp, a: *const Fp, b: *const Fp) c_int {
+	blip_mp.fp.mul(r, a, b) catch |e| return mapError(e);
+	return BLIP_MP_OK;
+}
+
+export fn blip_mp_fp_div_exact(r: *Fp, a: *const Fp, b: *const Fp) c_int {
+	blip_mp.fp.divExact(r, a, b) catch |e| return mapError(e);
+	return BLIP_MP_OK;
+}
+
+/// Caller passes `max_scale_digits`. *out_exact is set to 1 if the result
+/// is bit-exact, 0 if it had to truncate. Lossiness never silent.
+export fn blip_mp_fp_div_precision(
+	r: *Fp,
+	a: *const Fp,
+	b: *const Fp,
+	max_scale_digits: u32,
+	out_exact: *c_int,
+) c_int {
+	const exact = blip_mp.fp.divPrecision(r, a, b, max_scale_digits) catch |e| return mapError(e);
+	out_exact.* = if (exact) 1 else 0;
+	return BLIP_MP_OK;
+}
+
+// --- Cross-base conversion --------------------------------------------
+
+export fn blip_mp_fp_to_decimal(out: *Fp, x: *const Fp) c_int {
+	blip_mp.fp.toDecimal(out, x) catch |e| return mapError(e);
+	return BLIP_MP_OK;
+}
+
+export fn blip_mp_fp_to_binary(out: *Fp, x: *const Fp) c_int {
+	blip_mp.fp.toBinary(out, x) catch |e| return mapError(e);
+	return BLIP_MP_OK;
+}
+
+// --- Rounding ----------------------------------------------------------
+
+export fn blip_mp_fp_round_to_scale(out: *Fp, a: *const Fp, target_scale: i32, mode: c_int) c_int {
+	const m = roundFromC(mode) orelse return BLIP_MP_ERR_INVALID_INPUT;
+	blip_mp.fp.roundToScale(out, a, target_scale, m) catch |e| return mapError(e);
+	return BLIP_MP_OK;
+}
+
+export fn blip_mp_fp_round_to_mp(out: *blip_mp.Mp, a: *const Fp, mode: c_int) c_int {
+	const m = roundFromC(mode) orelse return BLIP_MP_ERR_INVALID_INPUT;
+	blip_mp.fp.roundToMp(out, a, m) catch |e| return mapError(e);
+	return BLIP_MP_OK;
+}
+
+// --- String I/O --------------------------------------------------------
+
+/// Format `fp` as a canonical string into the caller's buffer. Writes
+/// the required length to *required (excluding any NUL). If buf_len <
+/// required, returns BUFFER_TOO_SMALL — caller realloc-then-retry pattern.
+/// When buf_len > required, the buffer is NUL-terminated for C convenience.
+export fn blip_mp_fp_to_string_canonical(
+	fp: *const Fp,
+	buf: [*]u8,
+	buf_len: usize,
+	required: *usize,
+) c_int {
+	const s = blip_mp.fp.toStringCanonical(allocator, fp) catch |e| return mapError(e);
+	defer allocator.free(s);
+	required.* = s.len;
+	if (buf_len < s.len) return BLIP_MP_ERR_BUFFER_TOO_SMALL;
+	@memcpy(buf[0..s.len], s);
+	if (buf_len > s.len) buf[s.len] = 0;
+	return BLIP_MP_OK;
+}
+
 // Force the linker to retain every exported symbol when compiled as part
 // of a library (otherwise ReleaseFast may strip unreferenced exports).
 comptime {
@@ -461,4 +679,29 @@ comptime {
 	_ = blip_mp_factorial;
 	_ = blip_mp_binomial;
 	_ = blip_mp_fibonacci;
+	// M14 Fp additions
+	_ = blip_mp_fp_create;
+	_ = blip_mp_fp_destroy;
+	_ = blip_mp_fp_set_i64;
+	_ = blip_mp_fp_set_rational_decimal;
+	_ = blip_mp_fp_set_rational_binary;
+	_ = blip_mp_fp_set_str;
+	_ = blip_mp_fp_set_f64;
+	_ = blip_mp_fp_is_zero;
+	_ = blip_mp_fp_get_base;
+	_ = blip_mp_fp_get_scale;
+	_ = blip_mp_fp_get_mantissa;
+	_ = blip_mp_fp_canonicalize;
+	_ = blip_mp_fp_cmp;
+	_ = blip_mp_fp_eq;
+	_ = blip_mp_fp_add;
+	_ = blip_mp_fp_sub;
+	_ = blip_mp_fp_mul;
+	_ = blip_mp_fp_div_exact;
+	_ = blip_mp_fp_div_precision;
+	_ = blip_mp_fp_to_decimal;
+	_ = blip_mp_fp_to_binary;
+	_ = blip_mp_fp_round_to_scale;
+	_ = blip_mp_fp_round_to_mp;
+	_ = blip_mp_fp_to_string_canonical;
 }

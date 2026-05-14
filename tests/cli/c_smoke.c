@@ -327,6 +327,79 @@ static void test_inv_mod(void) {
 	blip_mp_destroy(r);
 }
 
+static void test_fp_disrupt_ieee754(void) {
+	// The IEEE754 disruption demo — end-to-end via the C FFI.
+	blip_mp_fp_t *x = blip_mp_fp_create();
+	blip_mp_fp_t *y = blip_mp_fp_create();
+	blip_mp_fp_t *r = blip_mp_fp_create();
+	CHECK_OK(blip_mp_fp_set_str(x, "0.1", 3, BLIP_MP_FP_BASE_DECIMAL));
+	CHECK_OK(blip_mp_fp_set_str(y, "0.2", 3, BLIP_MP_FP_BASE_DECIMAL));
+	CHECK_OK(blip_mp_fp_add(r, x, y));
+	CHECK_OK(blip_mp_fp_canonicalize(r));
+	char buf[16];
+	size_t need = 0;
+	CHECK_OK(blip_mp_fp_to_string_canonical(r, buf, sizeof buf, &need));
+	CHECK(need == 3, "0.1 + 0.2 prints as 3-char string");
+	CHECK(buf[0] == '0' && buf[1] == '.' && buf[2] == '3', "0.1 + 0.2 == \"0.3\" via C FFI");
+
+	blip_mp_fp_destroy(x);
+	blip_mp_fp_destroy(y);
+	blip_mp_fp_destroy(r);
+}
+
+static void test_fp_div_exact_or_error(void) {
+	blip_mp_fp_t *a = blip_mp_fp_create();
+	blip_mp_fp_t *b = blip_mp_fp_create();
+	blip_mp_fp_t *r = blip_mp_fp_create();
+	CHECK_OK(blip_mp_fp_set_i64(a, 1, 0, BLIP_MP_FP_BASE_DECIMAL));
+	CHECK_OK(blip_mp_fp_set_i64(b, 4, 0, BLIP_MP_FP_BASE_DECIMAL));
+	CHECK_OK(blip_mp_fp_div_exact(r, a, b));
+	CHECK_OK(blip_mp_fp_set_i64(b, 3, 0, BLIP_MP_FP_BASE_DECIMAL));
+	int rc = blip_mp_fp_div_exact(r, a, b);
+	CHECK(rc == BLIP_MP_ERR_NON_TERMINATING, "1/3 errors NON_TERMINATING via FFI");
+	int exact_flag = 99;
+	CHECK_OK(blip_mp_fp_div_precision(r, a, b, 5, &exact_flag));
+	CHECK(exact_flag == 0, "div_precision reports inexact for 1/3");
+
+	blip_mp_fp_destroy(a);
+	blip_mp_fp_destroy(b);
+	blip_mp_fp_destroy(r);
+}
+
+static void test_fp_setf64_killshot(void) {
+	// setF64(0.1) → toDecimal → string == the famous 55-digit lie.
+	blip_mp_fp_t *x = blip_mp_fp_create();
+	blip_mp_fp_t *d = blip_mp_fp_create();
+	CHECK_OK(blip_mp_fp_set_f64(x, 0.1));
+	CHECK_OK(blip_mp_fp_to_decimal(d, x));
+	CHECK_OK(blip_mp_fp_canonicalize(d));
+	char buf[80];
+	size_t need = 0;
+	CHECK_OK(blip_mp_fp_to_string_canonical(d, buf, sizeof buf, &need));
+	const char *expected = "0.1000000000000000055511151231257827021181583404541015625";
+	CHECK(need == strlen(expected), "0.1f64 prints as expected-length string");
+	CHECK(memcmp(buf, expected, need) == 0, "0.1f64 prints its full bit-exact decimal expansion");
+
+	blip_mp_fp_destroy(x);
+	blip_mp_fp_destroy(d);
+}
+
+static void test_fp_round_modes(void) {
+	blip_mp_fp_t *a = blip_mp_fp_create();
+	blip_mp_t *m = blip_mp_create();
+	CHECK_OK(blip_mp_fp_set_str(a, "2.5", 3, BLIP_MP_FP_BASE_DECIMAL));
+	CHECK_OK(blip_mp_fp_round_to_mp(m, a, BLIP_MP_FP_ROUND_HALF_UP));
+	int64_t v = 0;
+	CHECK_OK(blip_mp_get_i64(m, &v));
+	CHECK(v == 3, "half_up rounds 2.5 → 3");
+	CHECK_OK(blip_mp_fp_round_to_mp(m, a, BLIP_MP_FP_ROUND_HALF_TO_EVEN));
+	CHECK_OK(blip_mp_get_i64(m, &v));
+	CHECK(v == 2, "banker rounds 2.5 → 2 (even)");
+
+	blip_mp_fp_destroy(a);
+	blip_mp_destroy(m);
+}
+
 int main(void) {
 	test_lifecycle();
 	test_set_get_i64();
@@ -338,6 +411,10 @@ int main(void) {
 	test_bytes_roundtrip();
 	test_powm();
 	test_inv_mod();
+	test_fp_disrupt_ieee754();
+	test_fp_div_exact_or_error();
+	test_fp_setf64_killshot();
+	test_fp_round_modes();
 
 	if (failures == 0) {
 		printf("c_smoke: all checks passed\n");
