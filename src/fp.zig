@@ -419,6 +419,44 @@ pub fn divExact(out: *Fp, a: *const Fp, b: *const Fp) (FpError || error{MixedBas
 	out.base = a.base;
 }
 
+/// quot, rem = a / b such that `quot * b + rem == a` EXACTLY.
+/// quot is an integer (scale = 0); rem has the same base as the inputs and
+/// whatever scale falls out of `a - quot*b`. Reconstruction is bit-exact.
+///
+/// quot is computed via roundToMp(a/b_pseudo, .toward_zero) — i.e. the
+/// truncated integer quotient. rem = a - quot * b.
+pub fn divQR(quot: *Fp, rem: *Fp, a: *const Fp, b: *const Fp) (FpError || error{MixedBases})!void {
+	if (a.base != b.base) return error.MixedBases;
+	if (b.mantissa.cachedSign() == 0) return error.DivisionByZero;
+	const allocator = quot.mantissa.allocator;
+	if (a.mantissa.cachedSign() == 0) {
+		try quot.setI64(0, 0, a.base);
+		try rem.setI64(0, 0, a.base);
+		return;
+	}
+	// Step 1: compute the true integer quotient. We need enough fractional
+	// precision to round to integer correctly, then take floor toward zero.
+	// |a / b| ≤ |a.mantissa| / |b.mantissa| × base^(a.scale - b.scale).
+	// One extra digit of precision is enough to make the trunc decision.
+	var pseudo = Fp.init(allocator);
+	defer pseudo.deinit();
+	_ = try divPrecision(&pseudo, a, b, 1);
+	// Step 2: round to integer (Mp), toward zero (truncating-quot semantics).
+	var q_mp = Mp.init(allocator);
+	defer q_mp.deinit();
+	try roundToMp(&q_mp, &pseudo, .toward_zero);
+	// Step 3: install quot as Fp scale=0.
+	try copyInto(&quot.mantissa, &q_mp);
+	quot.scale = 0;
+	quot.base = a.base;
+	// Step 4: rem = a - quot * b. Use the full mul + sub paths so the result
+	// scale lands at min(a.scale, b.scale) and reconstruction is exact.
+	var prod = Fp.init(allocator);
+	defer prod.deinit();
+	try mul(&prod, quot, b);
+	try sub(rem, a, &prod);
+}
+
 /// out = a / b at most `max_scale_digits` more fractional digits than the
 /// dividend already has. Returns true if the result is BIT-EXACT, false if
 /// the function had to truncate. Caller picks how to react to inexactness
@@ -1835,7 +1873,92 @@ test "M14-4: divPrecision binary — 1/3 max=8 truncates" {
 }
 
 test "M14-4: divQR reconstructs: quot * divisor + rem == dividend" {
-	return error.SkipZigTest; // M14-4 divQR not yet implemented
+	const a = testing.allocator;
+	var num = Fp.init(a);
+	defer num.deinit();
+	var den = Fp.init(a);
+	defer den.deinit();
+	var q = Fp.init(a);
+	defer q.deinit();
+	var rem = Fp.init(a);
+	defer rem.deinit();
+	// 22 / 7 = 3 r 1
+	try num.setI64(22, 0, .decimal);
+	try den.setI64(7, 0, .decimal);
+	try divQR(&q, &rem, &num, &den);
+	try testing.expectEqual(@as(i64, 3), try q.mantissa.getI64());
+	try testing.expectEqual(@as(i64, 1), try rem.mantissa.getI64());
+	// Reconstruct: quot * den + rem == num
+	var prod = Fp.init(a);
+	defer prod.deinit();
+	var sum = Fp.init(a);
+	defer sum.deinit();
+	try mul(&prod, &q, &den);
+	try add(&sum, &prod, &rem);
+	try testing.expect(try eq(&sum, &num));
+}
+
+test "M14-4: divQR with fractional dividend — 0.5 / 0.2 = 2 r 0.1" {
+	const a = testing.allocator;
+	var num = Fp.init(a);
+	defer num.deinit();
+	var den = Fp.init(a);
+	defer den.deinit();
+	var q = Fp.init(a);
+	defer q.deinit();
+	var rem = Fp.init(a);
+	defer rem.deinit();
+	try num.setRationalDecimal(1, 2);
+	try den.setRationalDecimal(1, 5);
+	try divQR(&q, &rem, &num, &den);
+	// quotient should be 2 (integer floor of 2.5)
+	try testing.expectEqual(@as(i64, 2), try q.mantissa.getI64());
+	// rem = num - q*den = 0.5 - 2*0.2 = 0.1 — must reconstruct exactly
+	var prod = Fp.init(a);
+	defer prod.deinit();
+	var sum = Fp.init(a);
+	defer sum.deinit();
+	try mul(&prod, &q, &den);
+	try add(&sum, &prod, &rem);
+	try testing.expect(try eq(&sum, &num));
+}
+
+test "M14-4: divQR by zero errors" {
+	const a = testing.allocator;
+	var num = Fp.init(a);
+	defer num.deinit();
+	var den = Fp.init(a);
+	defer den.deinit();
+	var q = Fp.init(a);
+	defer q.deinit();
+	var rem = Fp.init(a);
+	defer rem.deinit();
+	try num.setI64(7, 0, .decimal);
+	try den.setI64(0, 0, .decimal);
+	try testing.expectError(error.DivisionByZero, divQR(&q, &rem, &num, &den));
+}
+
+test "M14-4: divQR negative dividend — -22 / 7 follows truncating-quot semantics" {
+	const a = testing.allocator;
+	var num = Fp.init(a);
+	defer num.deinit();
+	var den = Fp.init(a);
+	defer den.deinit();
+	var q = Fp.init(a);
+	defer q.deinit();
+	var rem = Fp.init(a);
+	defer rem.deinit();
+	try num.setI64(-22, 0, .decimal);
+	try den.setI64(7, 0, .decimal);
+	try divQR(&q, &rem, &num, &den);
+	// Reconstruction must be exact regardless of rounding direction.
+	var prod = Fp.init(a);
+	defer prod.deinit();
+	var sum = Fp.init(a);
+	defer sum.deinit();
+	try mul(&prod, &q, &den);
+	try add(&sum, &prod, &rem);
+	try testing.expect(try eq(&sum, &num));
 }
 
 test "M14-5: toDecimal of base=10 fp is a trivial copy" {
