@@ -67,6 +67,28 @@ extern "c" fn __gmpz_export(
 extern "c" fn __gmpz_get_str(str: ?[*]u8, base: c_int, op: *const mpz_t) [*]u8;
 extern "c" fn __gmpz_sizeinbase(op: *const mpz_t, base: c_int) usize;
 
+// mpq_t (rational): two mpz_t back-to-back: numerator then denominator.
+// GMP keeps mpq_t in canonical form (gcd-reduced, positive denominator).
+const mpq_t = extern struct {
+	_mp_num: mpz_struct,
+	_mp_den: mpz_struct,
+};
+extern "c" fn __gmpq_init(rop: *mpq_t) void;
+extern "c" fn __gmpq_clear(rop: *mpq_t) void;
+extern "c" fn __gmpq_set_si(rop: *mpq_t, op1: c_long, op2: c_ulong) void;
+extern "c" fn __gmpq_canonicalize(rop: *mpq_t) void;
+extern "c" fn __gmpq_add(rop: *mpq_t, op1: *const mpq_t, op2: *const mpq_t) void;
+extern "c" fn __gmpq_sub(rop: *mpq_t, op1: *const mpq_t, op2: *const mpq_t) void;
+extern "c" fn __gmpq_mul(rop: *mpq_t, op1: *const mpq_t, op2: *const mpq_t) void;
+extern "c" fn __gmpq_div(rop: *mpq_t, op1: *const mpq_t, op2: *const mpq_t) void;
+// mpq_numref / mpq_denref are macros in gmp.h. Reach into the struct directly.
+inline fn mpqNum(q: *mpq_t) *mpz_t {
+	return @ptrCast(&q._mp_num);
+}
+inline fn mpqDen(q: *mpq_t) *mpz_t {
+	return @ptrCast(&q._mp_den);
+}
+
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 const Sign = enum { neg, zero, pos };
@@ -392,6 +414,130 @@ const OPS = [_]Op{ .add, .sub, .mul, .divq, .divr };
 // path would've needed.
 const POWM_SIZES = [_]usize{ 8, 16, 32, 60, 64, 128, 192, 256, 384, 512, 768, 1024, 1536, 2048, 3072, 4096 };
 
+/// Pick a numerator whose only prime factors are 2 and 5 (so that any
+/// rational na/(power-of-2-or-5) divides another (nb)/(p2/5) into a
+/// rational whose reduced denominator also has only 2/5 factors,
+/// guaranteeing divExact terminates). Range: [-10000, 10000] roughly.
+fn pickTerminatingNum(rng: std.Random) i64 {
+	const pool = [_]i64{
+		1,    2,    4,    5,    8,    10,   16,    20,    25,    32,
+		40,   50,   64,   80,   100,  125,  128,   160,   200,   250,
+		256,  320,  400,  500,  625,  800,  1000,  1250,  1600,  2000,
+		2500, 3125, 4000, 5000, 6250, 8000, 10000,
+	};
+	const v = pool[rng.intRangeLessThan(usize, 0, pool.len)];
+	const negate = rng.boolean();
+	return if (negate) -v else v;
+}
+
+/// Convert an Fp (any base) to a reduced (num, den) Mp pair representing
+/// the same rational value. Sign goes on num; den is always positive.
+fn fpToFraction(num_out: *Mp, den_out: *Mp, fp: *const blip_mp.Fp, allocator: std.mem.Allocator) !void {
+	const radix: u64 = @intFromEnum(fp.base);
+	// num_raw = mantissa × radix^max(0, scale)
+	var num_raw = Mp.init(allocator);
+	defer num_raw.deinit();
+	try num_raw.setBytes(fp.mantissa.bytes());
+	if (fp.scale > 0) {
+		var multiplier = Mp.init(allocator);
+		defer multiplier.deinit();
+		try multiplier.setI64(1);
+		var radix_mp = Mp.init(allocator);
+		defer radix_mp.deinit();
+		try radix_mp.setI64(@intCast(radix));
+		var i: i32 = 0;
+		while (i < fp.scale) : (i += 1) {
+			var tmp = Mp.init(allocator);
+			defer tmp.deinit();
+			try tmp.mul(&multiplier, &radix_mp);
+			try multiplier.setBytes(tmp.bytes());
+		}
+		var prod = Mp.init(allocator);
+		defer prod.deinit();
+		try prod.mul(&num_raw, &multiplier);
+		try num_raw.setBytes(prod.bytes());
+	}
+	// den_raw = radix^max(0, -scale)
+	var den_raw = Mp.init(allocator);
+	defer den_raw.deinit();
+	try den_raw.setI64(1);
+	if (fp.scale < 0) {
+		var radix_mp = Mp.init(allocator);
+		defer radix_mp.deinit();
+		try radix_mp.setI64(@intCast(radix));
+		var i: i32 = 0;
+		while (i < -fp.scale) : (i += 1) {
+			var tmp = Mp.init(allocator);
+			defer tmp.deinit();
+			try tmp.mul(&den_raw, &radix_mp);
+			try den_raw.setBytes(tmp.bytes());
+		}
+	}
+	// Reduce by gcd. Use abs(num) since gcd doesn't care about sign and we'll re-apply.
+	var num_abs = Mp.init(allocator);
+	defer num_abs.deinit();
+	try blip_mp.sign.abs(&num_abs, &num_raw);
+	var g = Mp.init(allocator);
+	defer g.deinit();
+	try blip_mp.gcd.gcd(&g, &num_abs, &den_raw);
+	// num / g (preserving sign), den / g.
+	var num_div = Mp.init(allocator);
+	defer num_div.deinit();
+	try Mp.div(&num_div, &num_raw, &g);
+	try num_out.setBytes(num_div.bytes());
+	var den_div = Mp.init(allocator);
+	defer den_div.deinit();
+	try Mp.div(&den_div, &den_raw, &g);
+	try den_out.setBytes(den_div.bytes());
+	// Special-case zero: GMP's mpq canonical form for 0 is 0/1.
+	if (num_out.cachedSign() == 0) {
+		try den_out.setI64(1);
+	}
+}
+
+/// Convert mpz_t into an Mp by going through the BLIP byte form. Uses the
+/// same little-endian unsigned-magnitude + sign byte-write recipe as setBoth.
+fn mpzToMp(out: *Mp, z: *const mpz_t, allocator: std.mem.Allocator) !void {
+	const sign = __gmpz_cmp_ui(z, 0);
+	if (sign == 0) {
+		try out.setI64(0);
+		return;
+	}
+	const negative = sign < 0;
+	// Get unsigned magnitude as bytes via mpz_export.
+	const nbits = __gmpz_sizeinbase(z, 2);
+	const nbytes = (nbits + 7) / 8;
+	const buf = try allocator.alloc(u8, nbytes + 1); // +1 for a possible sign-padding byte
+	defer allocator.free(buf);
+	var written: usize = 0;
+	_ = __gmpz_export(buf.ptr, &written, -1, 1, 0, 0, z);
+	// If the high bit of the high byte is set, prepend 0x00 so the BLIP
+	// payload is interpreted as positive (signed two's-complement).
+	var payload: []u8 = buf[0..written];
+	if ((payload[payload.len - 1] & 0x80) != 0) {
+		payload = buf[0 .. written + 1];
+		payload[written] = 0x00;
+	}
+	if (negative) negateInPlace(payload);
+	// Canonicalize: drop redundant high bytes (0xFF for negatives, 0x00 for
+	// positives) when the next-down byte preserves the sign. Mp.cmp assumes
+	// canonical form when comparing same-sign values.
+	while (payload.len > 1) {
+		const high = payload[payload.len - 1];
+		const next = payload[payload.len - 2];
+		const drop_neg = high == 0xFF and (next & 0x80) != 0;
+		const drop_pos = high == 0x00 and (next & 0x80) == 0;
+		if (!drop_neg and !drop_pos) break;
+		payload = payload[0 .. payload.len - 1];
+	}
+	const hdr_buf_len = 16;
+	const blip_buf = try allocator.alloc(u8, payload.len + hdr_buf_len);
+	defer allocator.free(blip_buf);
+	const hdr_len = try blip_mp.tier3.writeHeader(blip_buf, payload.len);
+	@memcpy(blip_buf[hdr_len .. hdr_len + payload.len], payload);
+	try out.setBytes(blip_buf[0 .. hdr_len + payload.len]);
+}
+
 pub fn main() !u8 {
 	const allocator = std.heap.c_allocator;
 	var rng_state = std.Random.DefaultPrng.init(0xCAFEBEEFDEADCC01);
@@ -708,6 +854,135 @@ pub fn main() !u8 {
 		const ratio: f64 = blip_per / gmp_per;
 		std.debug.print("  bits={d:>5}: blip={d:>8.2} ms/op   gmp={d:>8.2} ms/op   ratio={d:.2}x\n", .{ bits, blip_per, gmp_per, ratio });
 	}
+
+	// ── M14-10: Fp ↔ mpq cross-validation ─────────────────────────────────
+	// For each (a, b) random rational pair (decimal-base, terminating-friendly
+	// denominators), assert blip_mp.fp.{add, sub, mul, divExact} produces a
+	// rational EXACTLY equal to GMP mpq_{add, sub, mul, div}.
+	std.debug.print("\n=== Fp vs GMP mpq cross-validation (M14-10) ===\n", .{});
+	const fp_dens = [_]i64{ 1, 2, 4, 5, 8, 10, 16, 20, 25, 32, 40, 50, 64, 80, 100, 125, 250, 500, 625, 1000 };
+	const fp_ops = [_]enum { add, sub, mul, div_exact }{ .add, .sub, .mul, .div_exact };
+	const fp_iters_per_op = 250;
+	var fp_failures: usize = 0;
+	var fp_div_skipped: usize = 0;
+
+	var fp_a = blip_mp.Fp.init(allocator);
+	defer fp_a.deinit();
+	var fp_b = blip_mp.Fp.init(allocator);
+	defer fp_b.deinit();
+	var fp_r = blip_mp.Fp.init(allocator);
+	defer fp_r.deinit();
+	var mpq_a: mpq_t = undefined;
+	var mpq_b: mpq_t = undefined;
+	var mpq_r: mpq_t = undefined;
+	__gmpq_init(&mpq_a);
+	__gmpq_init(&mpq_b);
+	__gmpq_init(&mpq_r);
+	defer {
+		__gmpq_clear(&mpq_a);
+		__gmpq_clear(&mpq_b);
+		__gmpq_clear(&mpq_r);
+	}
+
+	for (fp_ops) |op| {
+		var op_failures: usize = 0;
+		var op_checks: usize = 0;
+		for (0..fp_iters_per_op) |_| {
+			// For add/sub/mul: numerators are arbitrary i32-range integers
+			// (so num × max_den fits in i64), denominators from fp_dens
+			// (terminating-friendly).
+			//
+			// For div_exact: numerators must ALSO be 2/5-only so the quotient
+			// has a terminating expansion (otherwise divExact errors and the
+			// trial is skipped). Pick from ±fp_dens × small_2_5_factor.
+			const da: i64 = fp_dens[rng.intRangeLessThan(usize, 0, fp_dens.len)];
+			const db: i64 = fp_dens[rng.intRangeLessThan(usize, 0, fp_dens.len)];
+			const na: i64 = if (op == .div_exact)
+				pickTerminatingNum(rng)
+			else
+				@intCast(rng.intRangeAtMost(i32, -100_000, 100_000));
+			const nb_raw: i64 = if (op == .div_exact)
+				pickTerminatingNum(rng)
+			else
+				@intCast(rng.intRangeAtMost(i32, -100_000, 100_000));
+			const nb: i64 = if (op == .div_exact and nb_raw == 0) 1 else nb_raw;
+
+			// Set both Fps and mpqs.
+			fp_a.setRationalDecimal(na, da) catch continue;
+			fp_b.setRationalDecimal(nb, db) catch continue;
+			__gmpq_set_si(&mpq_a, na, @intCast(da));
+			__gmpq_canonicalize(&mpq_a);
+			__gmpq_set_si(&mpq_b, nb, @intCast(db));
+			__gmpq_canonicalize(&mpq_b);
+
+			// Run the op on both sides.
+			switch (op) {
+				.add => {
+					try blip_mp.fp.add(&fp_r, &fp_a, &fp_b);
+					__gmpq_add(&mpq_r, &mpq_a, &mpq_b);
+				},
+				.sub => {
+					try blip_mp.fp.sub(&fp_r, &fp_a, &fp_b);
+					__gmpq_sub(&mpq_r, &mpq_a, &mpq_b);
+				},
+				.mul => {
+					try blip_mp.fp.mul(&fp_r, &fp_a, &fp_b);
+					__gmpq_mul(&mpq_r, &mpq_a, &mpq_b);
+				},
+				.div_exact => {
+					blip_mp.fp.divExact(&fp_r, &fp_a, &fp_b) catch {
+						// Skip non-terminating quotients.
+						fp_div_skipped += 1;
+						continue;
+					};
+					__gmpq_div(&mpq_r, &mpq_a, &mpq_b);
+				},
+			}
+
+			// Compare results as reduced fractions.
+			// Build (num, den) Mp pair from Fp.
+			var fp_num = Mp.init(allocator);
+			defer fp_num.deinit();
+			var fp_den = Mp.init(allocator);
+			defer fp_den.deinit();
+			try fpToFraction(&fp_num, &fp_den, &fp_r, allocator);
+
+			// Pull (num, den) from mpq into Mp via setBytes.
+			var mpq_num_mp = Mp.init(allocator);
+			defer mpq_num_mp.deinit();
+			var mpq_den_mp = Mp.init(allocator);
+			defer mpq_den_mp.deinit();
+			try mpzToMp(&mpq_num_mp, mpqNum(&mpq_r), allocator);
+			try mpzToMp(&mpq_den_mp, mpqDen(&mpq_r), allocator);
+
+			op_checks += 1;
+			const num_ok = fp_num.cmp(&mpq_num_mp) == .eq;
+			const den_ok = fp_den.cmp(&mpq_den_mp) == .eq;
+			if (!num_ok or !den_ok) {
+				op_failures += 1;
+				if (op_failures <= 3) {
+					std.debug.print("  MISMATCH op={s} {d}/{d} {s} {d}/{d}: fp={any}/{any} mpq={any}/{any}\n", .{
+						@tagName(op), na, da,
+						switch (op) {
+							.add => "+",
+							.sub => "-",
+							.mul => "*",
+							.div_exact => "/",
+						},
+						nb, db,
+						fp_num.bytes(), fp_den.bytes(),
+						mpq_num_mp.bytes(), mpq_den_mp.bytes(),
+					});
+				}
+			}
+		}
+		const verdict = if (op_failures == 0) "PASS" else "FAIL";
+		std.debug.print("  {s} op={s} checks={d} fails={d}\n", .{ verdict, @tagName(op), op_checks, op_failures });
+		fp_failures += op_failures;
+		total_checks += op_checks;
+	}
+	if (fp_div_skipped > 0) std.debug.print("  ({d} div trials skipped — non-terminating quotient)\n", .{fp_div_skipped});
+	total_failures += fp_failures;
 
 	std.debug.print("\n=== Summary ===\n", .{});
 	std.debug.print("Total checks: {d}\n", .{total_checks});
