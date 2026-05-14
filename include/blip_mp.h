@@ -269,6 +269,12 @@ int blip_mp_fp_set_str(blip_mp_fp_t *fp, const char *str, size_t str_len, int ba
 // setF64: decode IEEE754 bit-exactly. NaN/±∞ → BLIP_MP_ERR_NOT_REPRESENTABLE.
 int blip_mp_fp_set_f64(blip_mp_fp_t *fp, double v);
 
+// getF64Exact: encode as IEEE754 ONLY if exactly representable.
+//   BLIP_MP_ERR_NON_TERMINATING — decimal with no terminating binary form
+//   BLIP_MP_ERR_NOT_REPRESENTABLE — needs >53 mantissa bits, or out of range
+// Caller wanting silent rounding must round explicitly first.
+int blip_mp_fp_get_f64_exact(const blip_mp_fp_t *fp, double *out);
+
 // Queries.
 int     blip_mp_fp_is_zero(const blip_mp_fp_t *fp);
 int     blip_mp_fp_get_base(const blip_mp_fp_t *fp);

@@ -489,6 +489,16 @@ export fn blip_mp_fp_set_f64(fp: *Fp, v: f64) c_int {
 	return BLIP_MP_OK;
 }
 
+/// Encode `fp` as IEEE754 double, ONLY if exactly representable. Errors:
+///   NON_TERMINATING — original is decimal with no terminating binary form
+///   NOT_REPRESENTABLE — needs >53 mantissa bits, or out of f64 range
+/// Caller wanting silent rounding must round explicitly first via roundToScale.
+export fn blip_mp_fp_get_f64_exact(fp: *const Fp, out: *f64) c_int {
+	const v = fp.getF64Exact() catch |e| return mapError(e);
+	out.* = v;
+	return BLIP_MP_OK;
+}
+
 // --- Queries -----------------------------------------------------------
 
 export fn blip_mp_fp_is_zero(fp: *const Fp) c_int {
@@ -687,6 +697,7 @@ comptime {
 	_ = blip_mp_fp_set_rational_binary;
 	_ = blip_mp_fp_set_str;
 	_ = blip_mp_fp_set_f64;
+	_ = blip_mp_fp_get_f64_exact;
 	_ = blip_mp_fp_is_zero;
 	_ = blip_mp_fp_get_base;
 	_ = blip_mp_fp_get_scale;
