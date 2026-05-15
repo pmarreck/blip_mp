@@ -317,10 +317,10 @@ pub fn mulMagnitudesWithScratch(
 	for (a, 0..) |byte, i| pa_n[i] = byte;
 	for (b, 0..) |byte, i| pb_n[i] = byte;
 
-	nttStockhamVec(pa_n, sc_n, tw_fwd_n);
-	nttStockhamVec(pb_n, sc_n, tw_fwd_n);
+	nttStockhamVecU4(pa_n, sc_n, tw_fwd_n);
+	nttStockhamVecU4(pb_n, sc_n, tw_fwd_n);
 	for (0..N) |i| pa_n[i] = mulModP(pa_n[i], pb_n[i]);
-	nttStockhamVec(pa_n, sc_n, tw_inv_n);
+	nttStockhamVecU4(pa_n, sc_n, tw_inv_n);
 	const n_inv = invModP(@intCast(N));
 	for (pa_n) |*x| x.* = mulModP(x.*, n_inv);
 
@@ -1086,6 +1086,124 @@ pub fn nttStockhamMontVec(a: []u64, scratch: []u64, twiddles_m: []const u64) voi
 					dst[q + j + 1] = new_lo[1];
 					dst[q + j + m2] = new_hi[0];
 					dst[q + j + 1 + m2] = new_hi[1];
+				}
+			}
+		}
+		const tmp = src;
+		src = dst;
+		dst = tmp;
+	}
+
+	if (src.ptr != a.ptr) {
+		@memcpy(a, src);
+	}
+}
+
+/// **M6-4-E.3 (2026-05-14) attempt B**: Stockham vec NTT, manually
+/// unrolled by 2 (so each iteration processes 4 butterflies = 2 NEON
+/// pairs instead of 1). Hypothesis: more independent work in flight gives
+/// the scheduler more room to hide the mul → umulh → msub critical-path
+/// latency in the per-lane scalar reduction.
+///
+/// At m2 == 2 the unroll exactly fills the level (one iteration per group);
+/// at m2 == 1 we fall back to the existing scalar path. For m2 ≥ 4 we run
+/// the unrolled body, then a tail-fixup for any odd remainder pair (since
+/// m2 is always a power of 2 ≥ 2, m2 % 4 ∈ {0, 2}; the tail handles m2=2).
+pub fn nttStockhamVecU4(a: []u64, scratch: []u64, twiddles: []const u64) void {
+	const n = a.len;
+	if (n <= 1) return;
+	std.debug.assert(n & (n - 1) == 0);
+	std.debug.assert(scratch.len == n);
+	std.debug.assert(twiddles.len >= n / 2);
+
+	const half_n = n >> 1;
+	var src: []u64 = a;
+	var dst: []u64 = scratch;
+
+	var m: usize = 2;
+	while (m <= n) : (m <<= 1) {
+		const m2 = m >> 1;
+		const stride = n / m;
+		if (m2 == 1) {
+			// Scalar fallback at the smallest level.
+			var q: usize = 0;
+			while (q < n) : (q += m) {
+				const q_idx = q / m;
+				const src_base = q_idx * m2;
+				const w = twiddles[0];
+				const x = src[src_base];
+				const y = src[src_base + half_n];
+				const t = mulModP(y, w);
+				dst[q] = addModP(x, t);
+				dst[q + 1] = subModP(x, t);
+			}
+		} else if (m2 == 2) {
+			// Single pair per group (no unroll possible — m2 == 2 means j ∈ {0}).
+			var q: usize = 0;
+			while (q < n) : (q += m) {
+				const q_idx = q / m;
+				const src_base = q_idx * m2;
+				const w_pair: @Vector(2, u64) = .{ twiddles[0], twiddles[stride] };
+				const x_pair: @Vector(2, u64) = .{ src[src_base], src[src_base + 1] };
+				const y_pair: @Vector(2, u64) = .{ src[src_base + half_n], src[src_base + 1 + half_n] };
+				const t_pair = mulModP_x2(y_pair, w_pair);
+				const new_lo = addModP_x2(x_pair, t_pair);
+				const new_hi = subModP_x2(x_pair, t_pair);
+				dst[q] = new_lo[0];
+				dst[q + 1] = new_lo[1];
+				dst[q + m2] = new_hi[0];
+				dst[q + m2 + 1] = new_hi[1];
+			}
+		} else {
+			// m2 ≥ 4 — unroll body by 2 (= 4 butterflies per iteration).
+			var q: usize = 0;
+			while (q < n) : (q += m) {
+				const q_idx = q / m;
+				const src_base = q_idx * m2;
+				var j: usize = 0;
+				while (j < m2) : (j += 4) {
+					// Pair 0: butterflies j, j+1.
+					const w0: @Vector(2, u64) = .{
+						twiddles[j * stride],
+						twiddles[(j + 1) * stride],
+					};
+					const x0: @Vector(2, u64) = .{
+						src[src_base + j],
+						src[src_base + j + 1],
+					};
+					const y0: @Vector(2, u64) = .{
+						src[src_base + j + half_n],
+						src[src_base + j + 1 + half_n],
+					};
+					// Pair 1: butterflies j+2, j+3.
+					const w1: @Vector(2, u64) = .{
+						twiddles[(j + 2) * stride],
+						twiddles[(j + 3) * stride],
+					};
+					const x1: @Vector(2, u64) = .{
+						src[src_base + j + 2],
+						src[src_base + j + 3],
+					};
+					const y1: @Vector(2, u64) = .{
+						src[src_base + j + 2 + half_n],
+						src[src_base + j + 3 + half_n],
+					};
+					// Compute both pairs' mods in immediate succession so the
+					// scheduler can interleave the dependency chains.
+					const t0 = mulModP_x2(y0, w0);
+					const t1 = mulModP_x2(y1, w1);
+					const lo0 = addModP_x2(x0, t0);
+					const lo1 = addModP_x2(x1, t1);
+					const hi0 = subModP_x2(x0, t0);
+					const hi1 = subModP_x2(x1, t1);
+					dst[q + j]            = lo0[0];
+					dst[q + j + 1]        = lo0[1];
+					dst[q + j + 2]        = lo1[0];
+					dst[q + j + 3]        = lo1[1];
+					dst[q + j + m2]       = hi0[0];
+					dst[q + j + m2 + 1]   = hi0[1];
+					dst[q + j + m2 + 2]   = hi1[0];
+					dst[q + j + m2 + 3]   = hi1[1];
 				}
 			}
 		}
@@ -1892,6 +2010,35 @@ test "nttWithTwiddlesMontVec: matches nttWithTwiddles after Mont conversion acro
 		for (a_vec, a_scalar) |xm, x_expected| {
 			try testing.expectEqual(x_expected, fromMont(xm));
 		}
+	}
+}
+
+test "nttStockhamVecU4: bit-exact match vs nttStockhamVec across sizes" {
+	// U4 must produce IDENTICAL output to the by-2 vec form. Tests the
+	// unrolled-by-4 inner loop covers all sizes including small m2.
+	const sizes = [_]usize{ 2, 4, 8, 16, 32, 64, 256, 1024, 4096, 8192 };
+	for (sizes) |n| {
+		const a_ref = try testing.allocator.alloc(u64, n);
+		defer testing.allocator.free(a_ref);
+		const sc_ref = try testing.allocator.alloc(u64, n);
+		defer testing.allocator.free(sc_ref);
+		const a_u4 = try testing.allocator.alloc(u64, n);
+		defer testing.allocator.free(a_u4);
+		const sc_u4 = try testing.allocator.alloc(u64, n);
+		defer testing.allocator.free(sc_u4);
+		const tw = try testing.allocator.alloc(u64, n / 2);
+		defer testing.allocator.free(tw);
+		var prng = std.Random.DefaultPrng.init(0xBADC0DE_FACE_F00D ^ n);
+		const rand = prng.random();
+		for (a_ref) |*x| x.* = rand.uintLessThan(u64, P);
+		@memcpy(a_u4, a_ref);
+		const omega_n = nthRootOfUnity(n);
+		if (tw.len > 0) tw[0] = 1;
+		var j: usize = 1;
+		while (j < tw.len) : (j += 1) tw[j] = mulModP(tw[j - 1], omega_n);
+		nttStockhamVec(a_ref, sc_ref, tw);
+		nttStockhamVecU4(a_u4, sc_u4, tw);
+		try testing.expectEqualSlices(u64, a_ref, a_u4);
 	}
 }
 
