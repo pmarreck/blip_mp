@@ -917,6 +917,49 @@ pub fn karatsubaScratchNeed(n: usize) usize {
 /// Chunked u64 inner loop: each iteration multiplies an 8-byte chunk by c
 /// (u64 * u8 = u72, fits in u128) and produces an 8-byte result chunk + 1
 /// carry byte. ~8× faster than per-byte for large `a_len`.
+/// Magnitude × u64 scalar (GMP `mpn_mul_1` analogue): the mul_ui fast path
+/// blip_mp was missing relative to GMP. Reads `a` as a chunked-u64 LE
+/// payload (last partial chunk handled per-byte), produces `out` as
+/// unsigned LE bytes. Returns canonical output length.
+///
+/// Algorithm — one pass left-to-right:
+///   word ← read u64 from a
+///   prod ← word × c + carry        (u128: word*c < 2^128 since both ≤ 2^64)
+///   write low 64 to out
+///   carry ← high 64
+/// Tail bytes (a.len % 8) processed per-byte against c. Any final carry
+/// (≤ u64) is written out byte-by-byte and the result is canonicalised.
+///
+/// The pi-spigot in ../pi hits this every loop iteration (×2, ×3, ×4, ×7,
+/// ×10). Mp.mulU64 wraps it with sign tracking + BLIP re-encoding.
+pub fn mulMagnitudeByU64(a: []const u8, a_len: usize, c: u64, out: []u8) usize {
+	std.debug.assert(out.len >= a_len + 8);
+	if (c == 0 or a_len == 0) return 0;
+	var carry: u64 = 0;
+	var i: usize = 0;
+	const aligned_end = a_len - (a_len % 8);
+	while (i < aligned_end) : (i += 8) {
+		const word = std.mem.readInt(u64, a[i..][0..8], .little);
+		const prod: u128 = @as(u128, word) * @as(u128, c) + @as(u128, carry);
+		std.mem.writeInt(u64, out[i..][0..8], @truncate(prod), .little);
+		carry = @intCast(prod >> 64);
+	}
+	// Per-byte tail (up to 7 bytes left).
+	var partial_carry: u128 = carry;
+	while (i < a_len) : (i += 1) {
+		const prod: u128 = @as(u128, a[i]) * @as(u128, c) + (partial_carry & 0xFF);
+		out[i] = @truncate(prod);
+		partial_carry = (partial_carry >> 8) + (prod >> 8);
+	}
+	while (partial_carry != 0) {
+		out[i] = @truncate(partial_carry);
+		partial_carry >>= 8;
+		i += 1;
+	}
+	while (i > 0 and out[i - 1] == 0) i -= 1;
+	return i;
+}
+
 pub fn mulSmallConst(a: []const u8, a_len: usize, c: u8, out: []u8) usize {
 	std.debug.assert(out.len > a_len);
 	if (c == 0 or a_len == 0) return 0;

@@ -318,6 +318,65 @@ pub const Mp = struct {
 		try tier3MulOp(r, a, b);
 	}
 
+	/// Multiply `a` by an unsigned u64 scalar (GMP `mpz_mul_ui` analogue).
+	/// Avoids the full Mp×Mp dispatch chain (no header parsing of c, no
+	/// allocator round-trip, no schoolbook/Karatsuba dispatch) — for
+	/// "multiply by small constant" workloads (pi spigot, etc.) this is
+	/// typically several × faster than `Mp.mul(r, a, c_as_mp)`.
+	///
+	/// Sign: result sign = sign(a) (c is unsigned non-negative). c == 0 or
+	/// a == 0 collapses to zero.
+	pub fn mulU64(r: *Mp, a: *const Mp, c: u64) ArithError!void {
+		// Trivial cases.
+		if (c == 0 or a.cachedSign() == 0) {
+			try r.setI64(0);
+			return;
+		}
+		// Tier 0/1 fast path: a fits in i64, product fits too → native.
+		if (a.inline_len <= 9) {
+			const av: i128 = @as(i128, decodeInlineSmall(a));
+			const product: i128 = av * @as(i128, c);
+			if (product >= std.math.minInt(i64) and product <= std.math.maxInt(i64)) {
+				try r.setI64(@intCast(product));
+				return;
+			}
+			// Falls through to tier-3 path with a's bytes as-is.
+		}
+		// Tier-3 path. Get the magnitude bytes of a (positive form).
+		const a_pay = a.payload();
+		const a_neg = a.cachedSign() < 0;
+		const allocator = r.allocator;
+		// `mag` holds the unsigned magnitude bytes (LE). For positive a this
+		// IS a copy of a_pay (minus trailing 0x00 sign-extension if any). For
+		// negative a, it's the two's-complement negation of a_pay.
+		const mag = try allocator.alloc(u8, a_pay.len);
+		defer allocator.free(mag);
+		@memcpy(mag, a_pay);
+		if (a_neg) tier3.negateInPlace(mag);
+		// Trim trailing zero bytes (so mag_len is the true magnitude length).
+		var mag_len: usize = mag.len;
+		while (mag_len > 0 and mag[mag_len - 1] == 0) mag_len -= 1;
+		// Output magnitude buffer: a's mag bytes + up to 8 carry bytes.
+		const out_mag = try allocator.alloc(u8, mag_len + 16);
+		defer allocator.free(out_mag);
+		const out_mag_len = tier3.mulMagnitudeByU64(mag, mag_len, c, out_mag);
+		if (out_mag_len == 0) {
+			try r.setI64(0);
+			return;
+		}
+		// Re-encode as signed BLIP payload (pad with 0x00 high if high bit
+		// of magnitude byte is set, to avoid being read as negative; then
+		// negate for negative inputs).
+		var pay_len = out_mag_len;
+		const need_high_pad = (out_mag[out_mag_len - 1] & 0x80) != 0;
+		if (need_high_pad) {
+			out_mag[out_mag_len] = 0x00;
+			pay_len += 1;
+		}
+		if (a_neg) tier3.negateInPlace(out_mag[0..pay_len]);
+		try writeMpFromPayload(r, out_mag[0..pay_len]);
+	}
+
 	/// Truncated division: writes a / b into `q` and a %% b into `rem`.
 	/// Sign convention matches GMP `mpz_tdiv_qr`:
 	///   sign(q) = sign(a) XOR sign(b); sign(rem) = sign(a) (or zero).
@@ -3893,6 +3952,107 @@ test "mul: i64 overflow now promotes to tier 3" {
 	try b.setI64(-1);
 	try r.mul(&a, &b);
 	try testing.expect(r.bytes().len > 9);
+}
+
+test "mulU64: identities and small cases" {
+	var a = Mp.init(testing.allocator);
+	defer a.deinit();
+	var r = Mp.init(testing.allocator);
+	defer r.deinit();
+
+	// 0 × 7 == 0
+	try a.setI64(0);
+	try r.mulU64(&a, 7);
+	try testing.expectEqual(@as(i64, 0), try r.getI64());
+	// 7 × 0 == 0
+	try a.setI64(7);
+	try r.mulU64(&a, 0);
+	try testing.expectEqual(@as(i64, 0), try r.getI64());
+	// 7 × 1 == 7
+	try a.setI64(7);
+	try r.mulU64(&a, 1);
+	try testing.expectEqual(@as(i64, 7), try r.getI64());
+	// 7 × 11 == 77
+	try a.setI64(7);
+	try r.mulU64(&a, 11);
+	try testing.expectEqual(@as(i64, 77), try r.getI64());
+	// -7 × 11 == -77
+	try a.setI64(-7);
+	try r.mulU64(&a, 11);
+	try testing.expectEqual(@as(i64, -77), try r.getI64());
+	// 0xDEAD × 0xBABE — both u16, product fits comfortably in i64.
+	try a.setI64(0xDEAD);
+	try r.mulU64(&a, 0xBABE);
+	try testing.expectEqual(@as(i64, 0xDEAD * 0xBABE), try r.getI64());
+}
+
+test "mulU64: i64.max × 2 promotes cleanly to tier 3" {
+	var a = Mp.init(testing.allocator);
+	defer a.deinit();
+	var r = Mp.init(testing.allocator);
+	defer r.deinit();
+	try a.setI64(std.math.maxInt(i64));
+	try r.mulU64(&a, 2);
+	// Result = 2 × (2^63 - 1) = 2^64 - 2 — doesn't fit in i64.
+	// Build the same value via Mp.mul against an Mp(2) and compare bytes.
+	var two = Mp.init(testing.allocator);
+	defer two.deinit();
+	try two.setI64(2);
+	var ref = Mp.init(testing.allocator);
+	defer ref.deinit();
+	try ref.mul(&a, &two);
+	try testing.expectEqualSlices(u8, ref.bytes(), r.bytes());
+}
+
+test "mulU64: tier-3 magnitude × small scalar matches Mp.mul" {
+	// Build a 2048-bit positive a; multiply by various u64 values; compare
+	// against the reference Mp.mul path. This is the equivalence proof that
+	// would have caught early-implementation bugs.
+	const allocator = testing.allocator;
+	var prng = std.Random.DefaultPrng.init(0xFEED_FACE_C0DE_BABE);
+	const rand = prng.random();
+	const sizes = [_]usize{ 16, 32, 64, 128, 256 }; // bytes
+	const scalars = [_]u64{ 1, 2, 3, 7, 10, 0xFF, 0xFFFF, 0xFFFFFFFF, 0xCAFEBABE_DEADBEEF };
+
+	var a = Mp.init(allocator);
+	defer a.deinit();
+	var r = Mp.init(allocator);
+	defer r.deinit();
+	var c_mp = Mp.init(allocator);
+	defer c_mp.deinit();
+	var ref = Mp.init(allocator);
+	defer ref.deinit();
+
+	for (sizes) |sz| {
+		for (scalars) |c| {
+			// Random positive payload of `sz` bytes.
+			const pay = try allocator.alloc(u8, sz);
+			defer allocator.free(pay);
+			rand.bytes(pay);
+			pay[sz - 1] &= 0x7F;
+			if (pay[sz - 1] == 0) pay[sz - 1] = 0x40;
+			const blip = try allocator.alloc(u8, sz + 16);
+			defer allocator.free(blip);
+			const hdr = try tier3.writeHeader(blip, sz);
+			@memcpy(blip[hdr .. hdr + sz], pay);
+			try a.setBytes(blip[0 .. hdr + sz]);
+
+			try r.mulU64(&a, c);
+			// Reference via Mp.mul on the same value as an Mp.
+			if (c <= std.math.maxInt(i64)) {
+				try c_mp.setI64(@intCast(c));
+			} else {
+				// c > i64.max: encode as a 9-byte tier-3 positive (high byte 0x00 sign).
+				var c_buf: [16]u8 = undefined;
+				c_buf[0] = 0x80 | 9;
+				std.mem.writeInt(u64, c_buf[1..9], c, .little);
+				c_buf[9] = 0x00;
+				try c_mp.setBytes(c_buf[0..10]);
+			}
+			try ref.mul(&a, &c_mp);
+			try testing.expectEqualSlices(u8, ref.bytes(), r.bytes());
+		}
+	}
 }
 
 test "mul: result canonicalizes (small product from large inputs)" {
