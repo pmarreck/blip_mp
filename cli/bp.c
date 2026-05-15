@@ -743,30 +743,63 @@ static void print_top(void) {
 	free(buf);
 }
 
+// ── Tokenizer ─────────────────────────────────────────────────────────────
+//
+// Used both for stdin (multi-line input across fgets boundaries) and for
+// argv args (so a single quoted arg like ': tau 6.28 ; tau 2 *' splits into
+// 7 tokens — no need to escape special chars individually). The state buffer
+// `tok` carries any trailing partial token across calls so a token can span
+// a buffer boundary.
+
+typedef struct {
+	char tok[1024];
+	size_t tok_len;
+} Tokenizer;
+
+// Process all whitespace-delimited tokens in `s` (length `len`). Any
+// trailing partial token stays in tz.tok for the next call. Call
+// tokenizer_flush() at end-of-input to emit a final partial token.
+static void tokenizer_feed(Tokenizer *tz, const char *s, size_t len) {
+	for (size_t i = 0; i < len; i++) {
+		char c = s[i];
+		if (isspace((unsigned char)c)) {
+			if (tz->tok_len > 0) {
+				tz->tok[tz->tok_len] = 0;
+				process_token(tz->tok);
+				tz->tok_len = 0;
+			}
+		} else {
+			if (tz->tok_len + 1 >= sizeof tz->tok) die("token too long");
+			tz->tok[tz->tok_len++] = c;
+		}
+	}
+}
+
+static void tokenizer_flush(Tokenizer *tz) {
+	if (tz->tok_len > 0) {
+		tz->tok[tz->tok_len] = 0;
+		process_token(tz->tok);
+		tz->tok_len = 0;
+	}
+}
+
 // ── stdin reader ──────────────────────────────────────────────────────────
 
 static void process_stdin(void) {
 	char buf[4096];
-	char tok[1024];
-	size_t tok_len = 0;
-	while (fgets(buf, sizeof buf, stdin)) {
-		for (char *p = buf; *p; p++) {
-			if (isspace((unsigned char)*p)) {
-				if (tok_len > 0) {
-					tok[tok_len] = 0;
-					process_token(tok);
-					tok_len = 0;
-				}
-			} else {
-				if (tok_len + 1 >= sizeof tok) die("token too long");
-				tok[tok_len++] = *p;
-			}
-		}
+	Tokenizer tz = {0};
+	size_t n;
+	while ((n = fread(buf, 1, sizeof buf, stdin)) > 0) {
+		tokenizer_feed(&tz, buf, n);
 	}
-	if (tok_len > 0) {
-		tok[tok_len] = 0;
-		process_token(tok);
-	}
+	tokenizer_flush(&tz);
+}
+
+// Process one argv arg (which may itself contain whitespace-separated tokens).
+static void process_argv_arg(const char *arg) {
+	Tokenizer tz = {0};
+	tokenizer_feed(&tz, arg, strlen(arg));
+	tokenizer_flush(&tz);
 }
 
 // ── Help / about / version ────────────────────────────────────────────────
@@ -827,7 +860,7 @@ int main(int argc, char **argv) {
 			i++; // already consumed by detect_lang
 			continue;
 		}
-		process_token(arg);
+		process_argv_arg(arg);
 		got_token = true;
 	}
 	if (!got_token) {
