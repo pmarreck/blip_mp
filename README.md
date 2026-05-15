@@ -98,23 +98,37 @@ cd blip_mp
 **Every value is an exact arbitrary-precision rational** (M14 `Fp`, base = decimal). No IEEE754. No silent precision loss. Division uses `divExact` and errors when the quotient has no terminating decimal expansion — there's no quiet rounding hiding under the hood.
 
 ```bash
-bp 35 factorial 24 factorial \*       # → huge 64-digit exact integer
-bp 0.1 0.2 +                          # → "0.3"  (the IEEE754 disruption demo)
-bp 0.1 0.2 + 0.3 -                    # → "0"    (the proof)
+# Three ergonomic input forms — pick whichever's least painful:
+bp 35 factorial 24 factorial '*'      # separate args (escape * for shell)
+bp '35 factorial 24 factorial *'      # ONE quoted arg (no escaping needed)
+echo '35 factorial 24 factorial *' | bp   # stdin pipe
+
+# Headline IEEE754 disruption demos:
+bp 0.1 0.2 +                          # → "0.3"  (the disruption)
+bp '0.1 0.2 + 0.3 -'                  # → "0"    (the proof)
 bp 1 4 /                              # → "0.25" (terminates exactly)
 bp 22 7 /                             # → ERROR: non-terminating expansion
 bp 100 fib                            # → 354224848179261915075
-bp 50 25 binomial                     # → 126410606437752
+bp '50 25 binomial'                   # → 126410606437752
 bp 48 18 gcd                          # → 6
 
-echo "0.1 0.2 +" | bp                 # stdin form
+# Forth-style ":" definitions — Phase 2 (threaded code, classical semantics):
+bp ': square dup * ; 5 square'        # → 25
+bp ': tau 6.28 ; tau 2 *'             # → 12.56
 
-# Forth-style ":" definitions — Phase 2:
-bp : square dup \* \; 5 square        # → 25
-bp : tau 6.28 \; tau 2 \*             # → 12.56
-bp : ! drop 999 \;                  \ # redefines factorial in this run only;
-   : real-fact ! \;                 \ # earlier defs that captured the original
-   5 real-fact                        # → still 120 (Forth threaded-code semantics)
+# Heredoc form (multi-line):
+bp <<'EOF'
+: square dup * ;
+: cube dup square * ;
+3 cube
+EOF
+# → 27
+
+# Re-defining a builtin shadows it for FUTURE lookups but doesn't
+# retroactively rebind earlier compiled bodies (classic Forth):
+bp ': real-fact ! ;
+    : ! drop 999 ;
+    5 real-fact'                      # → still 120
 ```
 
 **Operators** (`bp --help` for full list with stack-effect comments):
