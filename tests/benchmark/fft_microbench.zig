@@ -247,6 +247,23 @@ fn benchNttStockhamVec(orig: *const [NTT_N]u64, work: *[NTT_N]u64, scratch: *[NT
 	return @as(f64, @floatFromInt(elapsed)) / @as(f64, @floatFromInt(NTT_ITERS));
 }
 
+// Stockham unrolled-by-2 (M6-4-E.3 attempt B). Same call shape as
+// nttStockhamVec but the inner loop processes 4 butterflies per iteration
+// instead of 2 — more independent work in flight to hide mul/umulh/msub
+// dep-chain latency.
+fn benchNttStockhamVecU4(orig: *const [NTT_N]u64, work: *[NTT_N]u64, scratch: *[NTT_N]u64, tw: *const [NTT_N / 2]u64) f64 {
+	var elapsed: u64 = 0;
+	var i: usize = 0;
+	while (i < NTT_ITERS) : (i += 1) {
+		@memcpy(work, orig);
+		const t0 = nowNs();
+		fft.nttStockhamVecU4(work, scratch, tw);
+		elapsed += nowNs() - t0;
+	}
+	std.mem.doNotOptimizeAway(work);
+	return @as(f64, @floatFromInt(elapsed)) / @as(f64, @floatFromInt(NTT_ITERS));
+}
+
 // Stockham + Mont hybrid (M6-4-E.3). Same shape as nttStockhamVec but with
 // Mont-form data and twiddles + montMul_x2 inner mul.
 fn benchNttStockhamMontVec(orig_m: *const [NTT_N]u64, work: *[NTT_N]u64, scratch: *[NTT_N]u64, tw_m: *const [NTT_N / 2]u64) f64 {
@@ -379,6 +396,14 @@ pub fn main() !void {
 	std.debug.print("Stockham vs Cooley-Tukey vec ({d}x) — lower is better\n", .{1});
 	std.debug.print("Stockham NTT speedup (stockham_vec vs %P_vec): {d:.2}x\n", .{ns_ntt_vec / ns_ntt_stockham_vec});
 	std.debug.print("Stockham NTT speedup (stockham_vec vs scalar): {d:.2}x\n", .{ns_ntt_scalar / ns_ntt_stockham_vec});
+
+	// Stockham unrolled-by-2 (M6-4-E.3 attempt B): same algorithm as
+	// nttStockhamVec but processing 4 butterflies per iteration. More
+	// independent work in flight for the M-series scheduler.
+	_ = benchNttStockhamVecU4(&orig, &work, &st_scratch, &tw); // warm-up
+	const ns_ntt_stockham_u4 = benchNttStockhamVecU4(&orig, &work, &st_scratch, &tw);
+	std.debug.print("RESULT impl=nttStockhamVecU4 n={d} ns_per_pass={d:.0}\n", .{ NTT_N, ns_ntt_stockham_u4 });
+	std.debug.print("Stockham U4 speedup vs nttStockhamVec:      {d:.3}x\n", .{ns_ntt_stockham_vec / ns_ntt_stockham_u4});
 
 	// Stockham + Mont hybrid (M6-4-E.3): combines Stockham's bit-reversal-pass
 	// elimination with Mont's faster per-mul.
