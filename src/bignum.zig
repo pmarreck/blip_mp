@@ -318,6 +318,153 @@ pub const Mp = struct {
 		try tier3MulOp(r, a, b);
 	}
 
+	/// Add an unsigned u64 scalar to `a` (GMP `mpz_add_ui` analogue).
+	/// Sign-aware: c is non-negative, so a += c shrinks |a| when a < 0 and
+	/// |a| > c. Tier-0/1 fast path via native i128; tier-3 routes through
+	/// a one-time setI64(c) into a temp Mp + Mp.add. (The setI64 + add for
+	/// a single-byte constant is cheap; the perf win is avoiding the
+	/// caller's c1/c2 cached-constant churn rather than a fused inner loop.)
+	pub fn addU64(r: *Mp, a: *const Mp, c: u64) ArithError!void {
+		if (c == 0) {
+			try r.setBytes(a.bytes());
+			return;
+		}
+		if (a.inline_len <= 9) {
+			const av: i128 = @as(i128, decodeInlineSmall(a));
+			const sum: i128 = av + @as(i128, c);
+			if (sum >= std.math.minInt(i64) and sum <= std.math.maxInt(i64)) {
+				try r.setI64(@intCast(sum));
+				return;
+			}
+		}
+		// Tier-3: build a one-shot Mp(c), call Mp.add. c is u64 so always
+		// representable via setI64 if ≤ i64.max, else as a 9-byte payload.
+		var c_mp = Mp.init(r.allocator);
+		defer c_mp.deinit();
+		if (c <= std.math.maxInt(i64)) {
+			try c_mp.setI64(@intCast(c));
+		} else {
+			var buf: [16]u8 = undefined;
+			buf[0] = 0x80 | 9;
+			std.mem.writeInt(u64, buf[1..9], c, .little);
+			buf[9] = 0x00; // sign byte (positive)
+			try c_mp.setBytes(buf[0..10]);
+		}
+		try r.add(a, &c_mp);
+	}
+
+	/// Fused `self += a * c` (GMP `mpz_addmul_ui` analogue). When `self` and
+	/// `a` are same-sign-positive (the spigot's common case), the inner loop
+	/// is a single chunked-u64 pass:
+	///   prod ← a_word × c + self_word + carry
+	///   write low 64 to self
+	///   carry ← high 64
+	/// Saves one full pass over the data vs the unfused `tmp = a*c; self +=
+	/// tmp` form (which is the fallback for mixed-sign cases).
+	pub fn addmulU64(self: *Mp, a: *const Mp, c: u64) ArithError!void {
+		// Trivial cases.
+		if (c == 0 or a.cachedSign() == 0) return;
+		// Same-sign-positive fast path: fused inner loop on the magnitudes.
+		// Includes the case where `self` is zero (we just become a*c).
+		const self_sign = self.cachedSign();
+		const a_sign = a.cachedSign();
+		const same_sign_or_self_zero = (self_sign == 0) or (self_sign == a_sign);
+		if (!same_sign_or_self_zero) {
+			// Mixed-sign fallback: compute tmp = a*c, then self += tmp.
+			var tmp = Mp.init(self.allocator);
+			defer tmp.deinit();
+			try tmp.mulU64(a, c);
+			try self.add(self, &tmp);
+			return;
+		}
+		// Fused path. Work on the magnitude bytes of self and a.
+		const allocator = self.allocator;
+		const a_pay = a.payload();
+		const self_pay = self.payload();
+		const negative = a_sign < 0; // self_sign matches (or self is zero)
+
+		// Magnitude bytes for a (positive-form).
+		const a_mag = try allocator.alloc(u8, a_pay.len);
+		defer allocator.free(a_mag);
+		@memcpy(a_mag, a_pay);
+		if (a_sign < 0) tier3.negateInPlace(a_mag);
+		var a_mag_len: usize = a_mag.len;
+		while (a_mag_len > 0 and a_mag[a_mag_len - 1] == 0) a_mag_len -= 1;
+
+		// Magnitude bytes for self (will be modified in place). Allocate
+		// enough headroom for the worst-case grown magnitude: max(self,
+		// a_len + carry-bytes). a's mag_len + 8 covers a*c carry; the
+		// self_pay can be larger so use max.
+		const headroom = @max(self_pay.len, a_mag_len) + 16;
+		const out_mag = try allocator.alloc(u8, headroom);
+		defer allocator.free(out_mag);
+		@memset(out_mag, 0);
+		const self_mag_len_in: usize = blk: {
+			if (self_sign == 0) break :blk 0;
+			@memcpy(out_mag[0..self_pay.len], self_pay);
+			if (self_sign < 0) tier3.negateInPlace(out_mag[0..self_pay.len]);
+			var n: usize = self_pay.len;
+			while (n > 0 and out_mag[n - 1] == 0) n -= 1;
+			break :blk n;
+		};
+
+		// Fused inner loop: chunked u64 over min(a_mag_len, self_mag_len_in).
+		var carry: u128 = 0;
+		var i: usize = 0;
+		const merged_aligned = (@min(a_mag_len, self_mag_len_in) / 8) * 8;
+		while (i < merged_aligned) : (i += 8) {
+			const a_word = std.mem.readInt(u64, a_mag[i..][0..8], .little);
+			const self_word = std.mem.readInt(u64, out_mag[i..][0..8], .little);
+			const prod: u128 = @as(u128, a_word) * @as(u128, c) + @as(u128, self_word) + carry;
+			std.mem.writeInt(u64, out_mag[i..][0..8], @truncate(prod), .little);
+			carry = prod >> 64;
+		}
+		// Remaining region 1: a still has bytes/chunks but self does not.
+		// Continues a*c with carry-from-merged, accumulating ONLY into carry
+		// (out_mag is zero past self_mag_len_in by @memset).
+		while (i + 8 <= a_mag_len) : (i += 8) {
+			const a_word = std.mem.readInt(u64, a_mag[i..][0..8], .little);
+			const self_word: u64 = if (i + 8 <= self_mag_len_in)
+				std.mem.readInt(u64, out_mag[i..][0..8], .little)
+			else
+				0;
+			const prod: u128 = @as(u128, a_word) * @as(u128, c) + @as(u128, self_word) + carry;
+			std.mem.writeInt(u64, out_mag[i..][0..8], @truncate(prod), .little);
+			carry = prod >> 64;
+		}
+		// Per-byte tail of a (a_mag_len % 8 leftover).
+		while (i < a_mag_len) : (i += 1) {
+			const a_byte: u64 = a_mag[i];
+			const self_byte: u64 = if (i < self_mag_len_in) out_mag[i] else 0;
+			const prod: u128 = a_byte * @as(u128, c) + self_byte + (carry & 0xFF);
+			out_mag[i] = @truncate(prod);
+			carry = (carry >> 8) + (prod >> 8);
+		}
+		// Region 2: a exhausted; self still has bytes. Propagate carry through.
+		while (i < self_mag_len_in or carry != 0) {
+			const self_byte: u64 = if (i < self_mag_len_in) out_mag[i] else 0;
+			const sum: u128 = self_byte + (carry & 0xFF);
+			out_mag[i] = @truncate(sum);
+			carry = (carry >> 8) + (sum >> 8);
+			i += 1;
+		}
+		// Canonicalise length.
+		var mag_len = i;
+		while (mag_len > 0 and out_mag[mag_len - 1] == 0) mag_len -= 1;
+		if (mag_len == 0) {
+			try self.setI64(0);
+			return;
+		}
+		// Re-encode as signed BLIP payload.
+		var pay_len = mag_len;
+		if ((out_mag[mag_len - 1] & 0x80) != 0) {
+			out_mag[mag_len] = 0x00;
+			pay_len += 1;
+		}
+		if (negative) tier3.negateInPlace(out_mag[0..pay_len]);
+		try writeMpFromPayload(self, out_mag[0..pay_len]);
+	}
+
 	/// Multiply `a` by an unsigned u64 scalar (GMP `mpz_mul_ui` analogue).
 	/// Avoids the full Mp×Mp dispatch chain (no header parsing of c, no
 	/// allocator round-trip, no schoolbook/Karatsuba dispatch) — for
@@ -4051,6 +4198,162 @@ test "mulU64: tier-3 magnitude × small scalar matches Mp.mul" {
 			}
 			try ref.mul(&a, &c_mp);
 			try testing.expectEqualSlices(u8, ref.bytes(), r.bytes());
+		}
+	}
+}
+
+test "addU64: identities and small cases" {
+	var a = Mp.init(testing.allocator);
+	defer a.deinit();
+	var r = Mp.init(testing.allocator);
+	defer r.deinit();
+	try a.setI64(0);
+	try r.addU64(&a, 7);
+	try testing.expectEqual(@as(i64, 7), try r.getI64());
+	try a.setI64(7);
+	try r.addU64(&a, 0);
+	try testing.expectEqual(@as(i64, 7), try r.getI64());
+	try a.setI64(7);
+	try r.addU64(&a, 35);
+	try testing.expectEqual(@as(i64, 42), try r.getI64());
+	try a.setI64(-7);
+	try r.addU64(&a, 10);
+	try testing.expectEqual(@as(i64, 3), try r.getI64());
+	try a.setI64(-100);
+	try r.addU64(&a, 30);
+	try testing.expectEqual(@as(i64, -70), try r.getI64());
+	// i64.max + 1 → tier-3
+	try a.setI64(std.math.maxInt(i64));
+	try r.addU64(&a, 1);
+	var ref = Mp.init(testing.allocator);
+	defer ref.deinit();
+	var one = Mp.init(testing.allocator);
+	defer one.deinit();
+	try one.setI64(1);
+	try ref.add(&a, &one);
+	try testing.expectEqualSlices(u8, ref.bytes(), r.bytes());
+}
+
+test "addU64: tier-3 magnitude + c matches Mp.add" {
+	const allocator = testing.allocator;
+	var prng = std.Random.DefaultPrng.init(0xADD_BEEF_5EED);
+	const rand = prng.random();
+	var a = Mp.init(allocator);
+	defer a.deinit();
+	var r = Mp.init(allocator);
+	defer r.deinit();
+	var c_mp = Mp.init(allocator);
+	defer c_mp.deinit();
+	var ref = Mp.init(allocator);
+	defer ref.deinit();
+	const sizes = [_]usize{ 16, 32, 64, 128, 256 };
+	const scalars = [_]u64{ 1, 2, 7, 0xFF, 0xFFFF, 0xFFFFFFFF };
+	for (sizes) |sz| {
+		for (scalars) |c| {
+			const pay = try allocator.alloc(u8, sz);
+			defer allocator.free(pay);
+			rand.bytes(pay);
+			pay[sz - 1] &= 0x7F;
+			if (pay[sz - 1] == 0) pay[sz - 1] = 0x40;
+			const blip = try allocator.alloc(u8, sz + 16);
+			defer allocator.free(blip);
+			const hdr = try tier3.writeHeader(blip, sz);
+			@memcpy(blip[hdr .. hdr + sz], pay);
+			try a.setBytes(blip[0 .. hdr + sz]);
+			try c_mp.setI64(@intCast(c));
+			try ref.add(&a, &c_mp);
+			try r.addU64(&a, c);
+			try testing.expectEqualSlices(u8, ref.bytes(), r.bytes());
+		}
+	}
+}
+
+test "addmulU64: out += a * c — identities and small cases" {
+	var out = Mp.init(testing.allocator);
+	defer out.deinit();
+	var a = Mp.init(testing.allocator);
+	defer a.deinit();
+	// 100 + 5*3 == 115
+	try out.setI64(100);
+	try a.setI64(5);
+	try out.addmulU64(&a, 3);
+	try testing.expectEqual(@as(i64, 115), try out.getI64());
+	// 100 + 5*0 == 100
+	try out.setI64(100);
+	try a.setI64(5);
+	try out.addmulU64(&a, 0);
+	try testing.expectEqual(@as(i64, 100), try out.getI64());
+	// 100 + 0*7 == 100
+	try out.setI64(100);
+	try a.setI64(0);
+	try out.addmulU64(&a, 7);
+	try testing.expectEqual(@as(i64, 100), try out.getI64());
+}
+
+test "addmulU64: tier-3 fused = mul + add (matches reference)" {
+	// out += a * c on tier-3 inputs. Both positive (the spigot's same-sign
+	// fast path) and mixed-sign should agree with the unfused reference.
+	const allocator = testing.allocator;
+	var prng = std.Random.DefaultPrng.init(0xADD_C0FFEE_BABE);
+	const rand = prng.random();
+	var out = Mp.init(allocator);
+	defer out.deinit();
+	var out_copy = Mp.init(allocator);
+	defer out_copy.deinit();
+	var a = Mp.init(allocator);
+	defer a.deinit();
+	var c_mp = Mp.init(allocator);
+	defer c_mp.deinit();
+	var ref = Mp.init(allocator);
+	defer ref.deinit();
+	var prod = Mp.init(allocator);
+	defer prod.deinit();
+	const sizes = [_]usize{ 16, 32, 64, 128, 256 };
+	const scalars = [_]u64{ 1, 7, 0xFF, 0xFFFFFFFF, 0xCAFE_BABE_DEAD_BEEF };
+	for (sizes) |sz| {
+		for (scalars) |c| {
+			// out random tier-3 positive
+			const out_pay = try allocator.alloc(u8, sz);
+			defer allocator.free(out_pay);
+			rand.bytes(out_pay);
+			out_pay[sz - 1] &= 0x7F;
+			if (out_pay[sz - 1] == 0) out_pay[sz - 1] = 0x40;
+			const out_blip = try allocator.alloc(u8, sz + 16);
+			defer allocator.free(out_blip);
+			const out_hdr = try tier3.writeHeader(out_blip, sz);
+			@memcpy(out_blip[out_hdr .. out_hdr + sz], out_pay);
+			try out.setBytes(out_blip[0 .. out_hdr + sz]);
+			try out_copy.setBytes(out.bytes());
+
+			// a random tier-3 positive
+			const a_pay = try allocator.alloc(u8, sz);
+			defer allocator.free(a_pay);
+			rand.bytes(a_pay);
+			a_pay[sz - 1] &= 0x7F;
+			if (a_pay[sz - 1] == 0) a_pay[sz - 1] = 0x40;
+			const a_blip = try allocator.alloc(u8, sz + 16);
+			defer allocator.free(a_blip);
+			const a_hdr = try tier3.writeHeader(a_blip, sz);
+			@memcpy(a_blip[a_hdr .. a_hdr + sz], a_pay);
+			try a.setBytes(a_blip[0 .. a_hdr + sz]);
+
+			// Reference: prod = a*c via Mp.mul against an Mp(c), then out += prod.
+			if (c <= std.math.maxInt(i64)) {
+				try c_mp.setI64(@intCast(c));
+			} else {
+				var cb: [16]u8 = undefined;
+				cb[0] = 0x80 | 9;
+				std.mem.writeInt(u64, cb[1..9], c, .little);
+				cb[9] = 0x00;
+				try c_mp.setBytes(cb[0..10]);
+			}
+			try prod.mul(&a, &c_mp);
+			try ref.add(&out_copy, &prod);
+
+			// Fused path.
+			try out.addmulU64(&a, c);
+
+			try testing.expectEqualSlices(u8, ref.bytes(), out.bytes());
 		}
 	}
 }
