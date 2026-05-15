@@ -1217,6 +1217,170 @@ pub fn nttStockhamVecU4(a: []u64, scratch: []u64, twiddles: []const u64) void {
 	}
 }
 
+/// **M6-4-E.3 attempt C — RESULT: no improvement over U4.** Stockham
+/// vec NTT unrolled by 4 (= 8 butterflies per iteration). Tested whether
+/// more ILP would keep paying off after the U4 win.
+///
+/// Microbench (3 runs, M-series, N=8192):
+///   nttStockhamVecU4: 32045 / 30365 / 33125 ns
+///   nttStockhamVecU8: 33035 / 30950 / 31620 ns
+///   speedup U8/U4:    0.970× / 0.981× / 1.048× — at the noise floor
+///
+/// Conclusion: at U4 we appear to hit the L1 load/store-bandwidth ceiling
+/// for this NTT-pass working set (~64KB at N=8192). Each butterfly moves
+/// ~80 bytes (3 loads + 2 stores × 16B); 4 butterflies × 5 NEON-equiv
+/// memory ops = 20 loads/cycle pressure on the LSU. More butterflies in
+/// flight don't help because compute isn't the bottleneck.
+///
+/// Kept as a measured data point (and as the place to plug in any future
+/// cache-tile-blocked variant that operates on 8 butterflies' worth of
+/// data with explicit prefetch / re-use patterns). NOT wired into the
+/// mulMagnitudes production path — U4 remains the winner.
+pub fn nttStockhamVecU8(a: []u64, scratch: []u64, twiddles: []const u64) void {
+	const n = a.len;
+	if (n <= 1) return;
+	std.debug.assert(n & (n - 1) == 0);
+	std.debug.assert(scratch.len == n);
+	std.debug.assert(twiddles.len >= n / 2);
+
+	const half_n = n >> 1;
+	var src: []u64 = a;
+	var dst: []u64 = scratch;
+
+	var m: usize = 2;
+	while (m <= n) : (m <<= 1) {
+		const m2 = m >> 1;
+		const stride = n / m;
+		if (m2 < 8) {
+			// Fall back to U4 (which itself falls back further for m2<4).
+			// Avoids duplicating all the small-m2 paths here.
+			nttStockhamVecU4Body(src, dst, twiddles, m, m2, stride, half_n, n);
+		} else {
+			// m2 ≥ 8 — unroll by 4 (= 8 butterflies per iter).
+			var q: usize = 0;
+			while (q < n) : (q += m) {
+				const q_idx = q / m;
+				const src_base = q_idx * m2;
+				var j: usize = 0;
+				while (j < m2) : (j += 8) {
+					const w0: @Vector(2, u64) = .{ twiddles[(j + 0) * stride], twiddles[(j + 1) * stride] };
+					const w1: @Vector(2, u64) = .{ twiddles[(j + 2) * stride], twiddles[(j + 3) * stride] };
+					const w2: @Vector(2, u64) = .{ twiddles[(j + 4) * stride], twiddles[(j + 5) * stride] };
+					const w3: @Vector(2, u64) = .{ twiddles[(j + 6) * stride], twiddles[(j + 7) * stride] };
+					const x0: @Vector(2, u64) = .{ src[src_base + j + 0], src[src_base + j + 1] };
+					const x1: @Vector(2, u64) = .{ src[src_base + j + 2], src[src_base + j + 3] };
+					const x2: @Vector(2, u64) = .{ src[src_base + j + 4], src[src_base + j + 5] };
+					const x3: @Vector(2, u64) = .{ src[src_base + j + 6], src[src_base + j + 7] };
+					const y0: @Vector(2, u64) = .{ src[src_base + j + 0 + half_n], src[src_base + j + 1 + half_n] };
+					const y1: @Vector(2, u64) = .{ src[src_base + j + 2 + half_n], src[src_base + j + 3 + half_n] };
+					const y2: @Vector(2, u64) = .{ src[src_base + j + 4 + half_n], src[src_base + j + 5 + half_n] };
+					const y3: @Vector(2, u64) = .{ src[src_base + j + 6 + half_n], src[src_base + j + 7 + half_n] };
+					const t0 = mulModP_x2(y0, w0);
+					const t1 = mulModP_x2(y1, w1);
+					const t2 = mulModP_x2(y2, w2);
+					const t3 = mulModP_x2(y3, w3);
+					const lo0 = addModP_x2(x0, t0);
+					const lo1 = addModP_x2(x1, t1);
+					const lo2 = addModP_x2(x2, t2);
+					const lo3 = addModP_x2(x3, t3);
+					const hi0 = subModP_x2(x0, t0);
+					const hi1 = subModP_x2(x1, t1);
+					const hi2 = subModP_x2(x2, t2);
+					const hi3 = subModP_x2(x3, t3);
+					dst[q + j + 0] = lo0[0];
+					dst[q + j + 1] = lo0[1];
+					dst[q + j + 2] = lo1[0];
+					dst[q + j + 3] = lo1[1];
+					dst[q + j + 4] = lo2[0];
+					dst[q + j + 5] = lo2[1];
+					dst[q + j + 6] = lo3[0];
+					dst[q + j + 7] = lo3[1];
+					dst[q + j + m2 + 0] = hi0[0];
+					dst[q + j + m2 + 1] = hi0[1];
+					dst[q + j + m2 + 2] = hi1[0];
+					dst[q + j + m2 + 3] = hi1[1];
+					dst[q + j + m2 + 4] = hi2[0];
+					dst[q + j + m2 + 5] = hi2[1];
+					dst[q + j + m2 + 6] = hi3[0];
+					dst[q + j + m2 + 7] = hi3[1];
+				}
+			}
+		}
+		const tmp = src;
+		src = dst;
+		dst = tmp;
+	}
+
+	if (src.ptr != a.ptr) {
+		@memcpy(a, src);
+	}
+}
+
+/// Helper used by nttStockhamVecU8 for small-m2 levels — runs ONE level
+/// of the U4 algorithm. Exists so the U8 path can delegate without
+/// re-implementing the small-m2 branches.
+fn nttStockhamVecU4Body(
+	src: []u64, dst: []u64, twiddles: []const u64,
+	m: usize, m2: usize, stride: usize, half_n: usize, n: usize,
+) void {
+	if (m2 == 1) {
+		var q: usize = 0;
+		while (q < n) : (q += m) {
+			const q_idx = q / m;
+			const src_base = q_idx * m2;
+			const w = twiddles[0];
+			const x = src[src_base];
+			const y = src[src_base + half_n];
+			const t = mulModP(y, w);
+			dst[q] = addModP(x, t);
+			dst[q + 1] = subModP(x, t);
+		}
+	} else if (m2 == 2) {
+		var q: usize = 0;
+		while (q < n) : (q += m) {
+			const q_idx = q / m;
+			const src_base = q_idx * m2;
+			const w_pair: @Vector(2, u64) = .{ twiddles[0], twiddles[stride] };
+			const x_pair: @Vector(2, u64) = .{ src[src_base], src[src_base + 1] };
+			const y_pair: @Vector(2, u64) = .{ src[src_base + half_n], src[src_base + 1 + half_n] };
+			const t_pair = mulModP_x2(y_pair, w_pair);
+			const new_lo = addModP_x2(x_pair, t_pair);
+			const new_hi = subModP_x2(x_pair, t_pair);
+			dst[q] = new_lo[0];
+			dst[q + 1] = new_lo[1];
+			dst[q + m2] = new_hi[0];
+			dst[q + m2 + 1] = new_hi[1];
+		}
+	} else {
+		// m2 == 4 — single U4 pass per group.
+		var q: usize = 0;
+		while (q < n) : (q += m) {
+			const q_idx = q / m;
+			const src_base = q_idx * m2;
+			const w0: @Vector(2, u64) = .{ twiddles[0], twiddles[stride] };
+			const w1: @Vector(2, u64) = .{ twiddles[2 * stride], twiddles[3 * stride] };
+			const x0: @Vector(2, u64) = .{ src[src_base + 0], src[src_base + 1] };
+			const x1: @Vector(2, u64) = .{ src[src_base + 2], src[src_base + 3] };
+			const y0: @Vector(2, u64) = .{ src[src_base + 0 + half_n], src[src_base + 1 + half_n] };
+			const y1: @Vector(2, u64) = .{ src[src_base + 2 + half_n], src[src_base + 3 + half_n] };
+			const t0 = mulModP_x2(y0, w0);
+			const t1 = mulModP_x2(y1, w1);
+			const lo0 = addModP_x2(x0, t0);
+			const lo1 = addModP_x2(x1, t1);
+			const hi0 = subModP_x2(x0, t0);
+			const hi1 = subModP_x2(x1, t1);
+			dst[q + 0] = lo0[0];
+			dst[q + 1] = lo0[1];
+			dst[q + 2] = lo1[0];
+			dst[q + 3] = lo1[1];
+			dst[q + m2 + 0] = hi0[0];
+			dst[q + m2 + 1] = hi0[1];
+			dst[q + m2 + 2] = hi1[0];
+			dst[q + m2 + 3] = hi1[1];
+		}
+	}
+}
+
 // ── Radix-4 NTT (M6-4-D) ───────────────────────────────────────────────────
 //
 // Cooley-Tukey radix-4 in-place NTT, expressed as a *fused pair of radix-2
@@ -2010,6 +2174,33 @@ test "nttWithTwiddlesMontVec: matches nttWithTwiddles after Mont conversion acro
 		for (a_vec, a_scalar) |xm, x_expected| {
 			try testing.expectEqual(x_expected, fromMont(xm));
 		}
+	}
+}
+
+test "nttStockhamVecU8: bit-exact match vs nttStockhamVec across sizes" {
+	const sizes = [_]usize{ 2, 4, 8, 16, 32, 64, 256, 1024, 4096, 8192 };
+	for (sizes) |n| {
+		const a_ref = try testing.allocator.alloc(u64, n);
+		defer testing.allocator.free(a_ref);
+		const sc_ref = try testing.allocator.alloc(u64, n);
+		defer testing.allocator.free(sc_ref);
+		const a_u8 = try testing.allocator.alloc(u64, n);
+		defer testing.allocator.free(a_u8);
+		const sc_u8 = try testing.allocator.alloc(u64, n);
+		defer testing.allocator.free(sc_u8);
+		const tw = try testing.allocator.alloc(u64, n / 2);
+		defer testing.allocator.free(tw);
+		var prng = std.Random.DefaultPrng.init(0xBADC0DE_F00D_CAFE ^ n);
+		const rand = prng.random();
+		for (a_ref) |*x| x.* = rand.uintLessThan(u64, P);
+		@memcpy(a_u8, a_ref);
+		const omega_n = nthRootOfUnity(n);
+		if (tw.len > 0) tw[0] = 1;
+		var j: usize = 1;
+		while (j < tw.len) : (j += 1) tw[j] = mulModP(tw[j - 1], omega_n);
+		nttStockhamVec(a_ref, sc_ref, tw);
+		nttStockhamVecU8(a_u8, sc_u8, tw);
+		try testing.expectEqualSlices(u64, a_ref, a_u8);
 	}
 }
 

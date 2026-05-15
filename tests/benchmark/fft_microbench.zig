@@ -247,6 +247,20 @@ fn benchNttStockhamVec(orig: *const [NTT_N]u64, work: *[NTT_N]u64, scratch: *[NT
 	return @as(f64, @floatFromInt(elapsed)) / @as(f64, @floatFromInt(NTT_ITERS));
 }
 
+// Stockham unrolled-by-4 (M6-4-E.3 attempt C). 8 butterflies per iter.
+fn benchNttStockhamVecU8(orig: *const [NTT_N]u64, work: *[NTT_N]u64, scratch: *[NTT_N]u64, tw: *const [NTT_N / 2]u64) f64 {
+	var elapsed: u64 = 0;
+	var i: usize = 0;
+	while (i < NTT_ITERS) : (i += 1) {
+		@memcpy(work, orig);
+		const t0 = nowNs();
+		fft.nttStockhamVecU8(work, scratch, tw);
+		elapsed += nowNs() - t0;
+	}
+	std.mem.doNotOptimizeAway(work);
+	return @as(f64, @floatFromInt(elapsed)) / @as(f64, @floatFromInt(NTT_ITERS));
+}
+
 // Stockham unrolled-by-2 (M6-4-E.3 attempt B). Same call shape as
 // nttStockhamVec but the inner loop processes 4 butterflies per iteration
 // instead of 2 — more independent work in flight to hide mul/umulh/msub
@@ -404,6 +418,12 @@ pub fn main() !void {
 	const ns_ntt_stockham_u4 = benchNttStockhamVecU4(&orig, &work, &st_scratch, &tw);
 	std.debug.print("RESULT impl=nttStockhamVecU4 n={d} ns_per_pass={d:.0}\n", .{ NTT_N, ns_ntt_stockham_u4 });
 	std.debug.print("Stockham U4 speedup vs nttStockhamVec:      {d:.3}x\n", .{ns_ntt_stockham_vec / ns_ntt_stockham_u4});
+
+	_ = benchNttStockhamVecU8(&orig, &work, &st_scratch, &tw); // warm-up
+	const ns_ntt_stockham_u8 = benchNttStockhamVecU8(&orig, &work, &st_scratch, &tw);
+	std.debug.print("RESULT impl=nttStockhamVecU8 n={d} ns_per_pass={d:.0}\n", .{ NTT_N, ns_ntt_stockham_u8 });
+	std.debug.print("Stockham U8 speedup vs nttStockhamVec:      {d:.3}x\n", .{ns_ntt_stockham_vec / ns_ntt_stockham_u8});
+	std.debug.print("Stockham U8 speedup vs nttStockhamVecU4:    {d:.3}x\n", .{ns_ntt_stockham_u4 / ns_ntt_stockham_u8});
 
 	// Stockham + Mont hybrid (M6-4-E.3): combines Stockham's bit-reversal-pass
 	// elimination with Mont's faster per-mul.
