@@ -86,10 +86,43 @@ Requires [Nix](https://nixos.org/) (handles the Zig 0.16.0 toolchain and GMP bui
 git clone https://github.com/pmarreck/blip_mp
 cd blip_mp
 
-./build           # native ReleaseFast build via nix
-./test            # 76+ unit tests + 8240-check GMP cross-validation
+./build           # native ReleaseFast build via nix; also builds bp
+./test            # ~451 unit tests + 13029 GMP cross-checks + C FFI smoke + bp CLI smoke
 ./result/bin/blip_mp_bench    # run the bench (after nix build .#packages.<sys>.bench)
 ```
+
+## `bp` — RPN exact-arithmetic calculator
+
+`bp` is a Forth-style RPN calculator that ships in `./result/bin/bp` after `./build`. It dogfoods the C FFI — same headers any downstream Rust/Lua/Python binding would use — so every shipped fix to the FFI surface gets exercised by the calculator itself.
+
+**Every value is an exact arbitrary-precision rational** (M14 `Fp`, base = decimal). No IEEE754. No silent precision loss. Division uses `divExact` and errors when the quotient has no terminating decimal expansion — there's no quiet rounding hiding under the hood.
+
+```bash
+bp 35 factorial 24 factorial \*       # → huge 64-digit exact integer
+bp 0.1 0.2 +                          # → "0.3"  (the IEEE754 disruption demo)
+bp 0.1 0.2 + 0.3 -                    # → "0"    (the proof)
+bp 1 4 /                              # → "0.25" (terminates exactly)
+bp 22 7 /                             # → ERROR: non-terminating expansion
+bp 100 fib                            # → 354224848179261915075
+bp 50 25 binomial                     # → 126410606437752
+bp 48 18 gcd                          # → 6
+
+echo "0.1 0.2 +" | bp                 # stdin form
+
+# Forth-style ":" definitions — Phase 2:
+bp : square dup \* \; 5 square        # → 25
+bp : tau 6.28 \; tau 2 \*             # → 12.56
+bp : ! drop 999 \;                  \ # redefines factorial in this run only;
+   : real-fact ! \;                 \ # earlier defs that captured the original
+   5 real-fact                        # → still 120 (Forth threaded-code semantics)
+```
+
+**Operators** (`bp --help` for full list with stack-effect comments):
+`+ - * / % ^ neg abs dup drop swap factorial ! fibonacci fib binomial isqrt sqrt gcd lcm`
+
+**Definitions**: `:` enters compile mode and consumes the next token as the new word's name. `;` is "immediate" — it executes even in compile mode and finalises the definition. The body is a list of *resolved* instruction pointers (builtin / user-word / literal-Fp), not text — so re-defining a builtin shadows it for *future* lookups but does NOT retroactively rebind any earlier compiled body. Classic Forth threaded code.
+
+## Use as a library
 
 In your own Zig code:
 

@@ -104,15 +104,21 @@ static void stack_drain(void) {
 
 // ── Helpers ───────────────────────────────────────────────────────────────
 
+// Forward decl — defined later alongside the user-word machinery; called
+// from die/die_op + main for clean shutdown.
+static void dict_drain(void);
+
 static void die(const char *msg) {
 	fprintf(stderr, "bp: error: %s\n", msg);
 	stack_drain();
+	dict_drain();
 	exit(2);
 }
 
 static void die_op(const char *op, const char *msg, int rc) {
 	fprintf(stderr, "bp: %s: %s (rc=%d)\n", op, msg, rc);
 	stack_drain();
+	dict_drain();
 	exit(2);
 }
 
@@ -482,25 +488,120 @@ static const Op OPS[] = {
 	{NULL, NULL, NULL},
 };
 
-static int dispatch_op(const char *tok) {
+static op_fn lookup_builtin(const char *tok) {
 	for (const Op *op = OPS; op->name_en; op++) {
-		if (strcmp(tok, op->name_en) == 0) {
-			return op->fn(tok);
-		}
+		if (strcmp(tok, op->name_en) == 0) return op->fn;
 	}
-	return -1; // unknown
+	return NULL;
 }
 
-// ── Token parsing ─────────────────────────────────────────────────────────
+// ── User-defined words (Forth-style ':' definitions) ──────────────────────
+//
+// Threaded-code execution model. A user word is a list of resolved
+// instructions (builtin pointer / user-word pointer / literal Fp value).
+// `:` is a normal word that switches us into compile mode (after
+// consuming the next token as the new word's name); `;` is "immediate" —
+// it executes even in compile mode, finalising the definition. Resolution
+// happens at definition time so re-defining a builtin does NOT
+// retroactively rebind any earlier compiled body.
 
-// Returns 1 if `tok` parses as a number literal (and pushes), 0 if not.
-static int try_push_number(const char *tok) {
-	if (!*tok) return 0;
-	// Quick reject: must start with digit, '-', '+', or '.'
-	if (!(isdigit((unsigned char)tok[0]) || tok[0] == '-' || tok[0] == '+' || tok[0] == '.')) {
-		return 0;
+typedef enum { INST_BUILTIN, INST_USER, INST_LITERAL } InstKind;
+
+struct UserWord;
+
+typedef struct {
+	InstKind kind;
+	union {
+		op_fn builtin;
+		struct UserWord *user;
+		blip_mp_fp_t *literal; // owned by the inst; freed on dict_drain
+	} u;
+} Inst;
+
+typedef struct UserWord {
+	char *name;
+	Inst *body;
+	size_t len;
+	size_t cap;
+} UserWord;
+
+static UserWord **DICT = NULL;
+static size_t DICT_LEN = 0;
+static size_t DICT_CAP = 0;
+
+static enum { MODE_INTERP, MODE_AWAITING_NAME, MODE_COMPILE } MODE = MODE_INTERP;
+static UserWord *CUR_DEF = NULL;
+
+// Walks the dict back-to-front so the MOST RECENT definition wins (Forth
+// semantics: a re-definition shadows the prior one for new lookups).
+static UserWord *dict_lookup(const char *name) {
+	for (size_t i = DICT_LEN; i > 0; i--) {
+		if (strcmp(DICT[i - 1]->name, name) == 0) return DICT[i - 1];
 	}
-	// If "-" alone, that's the subtraction op, not a number.
+	return NULL;
+}
+
+static void dict_install(UserWord *w) {
+	if (DICT_LEN == DICT_CAP) {
+		DICT_CAP = DICT_CAP ? DICT_CAP * 2 : 8;
+		UserWord **nd = realloc(DICT, DICT_CAP * sizeof *DICT);
+		if (!nd) die("OOM");
+		DICT = nd;
+	}
+	DICT[DICT_LEN++] = w;
+}
+
+static void user_word_destroy(UserWord *w) {
+	if (!w) return;
+	free(w->name);
+	for (size_t i = 0; i < w->len; i++) {
+		if (w->body[i].kind == INST_LITERAL) {
+			blip_mp_fp_destroy(w->body[i].u.literal);
+		}
+	}
+	free(w->body);
+	free(w);
+}
+
+static void dict_drain(void) {
+	for (size_t i = 0; i < DICT_LEN; i++) user_word_destroy(DICT[i]);
+	free(DICT);
+	DICT = NULL;
+	DICT_LEN = DICT_CAP = 0;
+}
+
+static void inst_append(UserWord *w, Inst inst) {
+	if (w->len == w->cap) {
+		size_t new_cap = w->cap ? w->cap * 2 : 8;
+		Inst *nb = realloc(w->body, new_cap * sizeof *w->body);
+		if (!nb) die("OOM");
+		w->body = nb;
+		w->cap = new_cap;
+	}
+	w->body[w->len++] = inst;
+}
+
+// Deep copy an Fp value (for stack push from a literal inst, AND for the
+// `dup` op which previously inlined this dance).
+static blip_mp_fp_t *clone_fp(blip_mp_fp_t *src) {
+	blip_mp_fp_t *out = blip_mp_fp_create();
+	if (!out) die("OOM");
+	int32_t scale = blip_mp_fp_get_scale(src);
+	blip_mp_fp_set_i64(out, 0, scale, BLIP_MP_FP_BASE_DECIMAL);
+	blip_mp_t *src_m = blip_mp_fp_get_mantissa(src);
+	const uint8_t *bytes = blip_mp_bytes(src_m);
+	size_t blen = blip_mp_byte_len(src_m);
+	if (bytes && blen) blip_mp_set_bytes(blip_mp_fp_get_mantissa(out), bytes, blen);
+	return out;
+}
+
+// Try parsing tok as a numeric literal. Returns 1 + writes *out if successful.
+// (Same recognition rules as the prior try_push_number, but builds an Fp into
+// *out instead of pushing — so we can use it both in INTERP push path AND in
+// COMPILE literal-instruction-build path.)
+static int try_parse_literal(const char *tok, blip_mp_fp_t **out) {
+	if (!*tok) return 0;
+	if (!(isdigit((unsigned char)tok[0]) || tok[0] == '-' || tok[0] == '+' || tok[0] == '.')) return 0;
 	if ((tok[0] == '-' || tok[0] == '+') && tok[1] == 0) return 0;
 	blip_mp_fp_t *fp = blip_mp_fp_create();
 	if (!fp) die("OOM");
@@ -509,14 +610,114 @@ static int try_push_number(const char *tok) {
 		blip_mp_fp_destroy(fp);
 		return 0;
 	}
-	stack_push(fp);
+	*out = fp;
 	return 1;
 }
 
+static void execute_user_word(UserWord *w);
+
+// Resolve a token at compile-time. Errors if the token isn't a literal,
+// a user word, or a builtin.
+static Inst resolve_token(const char *tok) {
+	Inst inst = {0};
+	blip_mp_fp_t *lit;
+	if (try_parse_literal(tok, &lit)) {
+		inst.kind = INST_LITERAL;
+		inst.u.literal = lit;
+		return inst;
+	}
+	UserWord *uw = dict_lookup(tok);
+	if (uw) {
+		inst.kind = INST_USER;
+		inst.u.user = uw;
+		return inst;
+	}
+	op_fn fn = lookup_builtin(tok);
+	if (fn) {
+		inst.kind = INST_BUILTIN;
+		inst.u.builtin = fn;
+		return inst;
+	}
+	char buf[256];
+	snprintf(buf, sizeof buf, "compile-time: unknown token '%s'", tok);
+	die(buf);
+	return inst; // unreachable
+}
+
+// Walk a user word's body, executing each instruction.
+static void execute_user_word(UserWord *w) {
+	for (size_t i = 0; i < w->len; i++) {
+		Inst *in = &w->body[i];
+		switch (in->kind) {
+			case INST_BUILTIN:
+				in->u.builtin(w->name);
+				break;
+			case INST_USER:
+				execute_user_word(in->u.user);
+				break;
+			case INST_LITERAL:
+				stack_push(clone_fp(in->u.literal));
+				break;
+		}
+	}
+}
+
+// ── Token dispatch (mode-aware) ───────────────────────────────────────────
+
 static void process_token(const char *tok) {
 	if (!tok || !*tok) return;
-	if (try_push_number(tok)) return;
-	if (dispatch_op(tok) == 0) return;
+
+	// AWAITING_NAME: just saw `:`; this token is the new word's name.
+	if (MODE == MODE_AWAITING_NAME) {
+		if (CUR_DEF) die("internal: stale CUR_DEF in AWAITING_NAME");
+		CUR_DEF = calloc(1, sizeof *CUR_DEF);
+		if (!CUR_DEF) die("OOM");
+		CUR_DEF->name = strdup(tok);
+		if (!CUR_DEF->name) die("OOM");
+		MODE = MODE_COMPILE;
+		return;
+	}
+
+	// `:` enters compile mode. Only legal at top level.
+	if (strcmp(tok, ":") == 0) {
+		if (MODE != MODE_INTERP) die("nested ':' definitions not allowed");
+		MODE = MODE_AWAITING_NAME;
+		return;
+	}
+
+	// `;` is "immediate" — runs even in COMPILE mode and ends the definition.
+	if (strcmp(tok, ";") == 0) {
+		if (MODE != MODE_COMPILE) die("';' outside of ':' definition");
+		dict_install(CUR_DEF);
+		CUR_DEF = NULL;
+		MODE = MODE_INTERP;
+		return;
+	}
+
+	// COMPILE mode: resolve & append. Tokens never execute here.
+	if (MODE == MODE_COMPILE) {
+		Inst inst = resolve_token(tok);
+		inst_append(CUR_DEF, inst);
+		return;
+	}
+
+	// INTERP mode: number literal → push; else user-word lookup (shadows
+	// builtins by precedence) → execute; else builtin → execute; else error.
+	blip_mp_fp_t *lit;
+	if (try_parse_literal(tok, &lit)) {
+		stack_push(lit);
+		return;
+	}
+	UserWord *uw = dict_lookup(tok);
+	if (uw) {
+		execute_user_word(uw);
+		return;
+	}
+	op_fn fn = lookup_builtin(tok);
+	if (fn) {
+		fn(tok);
+		return;
+	}
 	char buf[256];
 	snprintf(buf, sizeof buf, "unknown token '%s'", tok);
 	die(buf);
@@ -589,11 +790,18 @@ static void print_help(void) {
 	for (const Op *op = OPS; op->name_en; op++) {
 		printf("  %-12s %s\n", op->name_en, op->help);
 	}
+	printf("\nDefinitions (Forth-style):\n");
+	printf("  : NAME ... ;  define a new word with body ... (RPN tokens). Body\n");
+	printf("                may use builtins, prior user words, or literals.\n");
+	printf("                Resolution happens at definition time — re-defining\n");
+	printf("                a builtin does NOT retroactively rebind earlier defs.\n");
 	printf("\nExamples:\n");
 	printf("  %s 35 factorial 24 factorial \\*\n", BP_NAME);
 	printf("  echo \"0.1 0.2 +\" | %s\n", BP_NAME);
-	printf("  %s 22 7 /         # error: non-terminating decimal\n", BP_NAME);
-	printf("  %s 1 4 /          # ok: 0.25 (terminates)\n", BP_NAME);
+	printf("  %s 22 7 /                              # error: non-terminating decimal\n", BP_NAME);
+	printf("  %s 1 4 /                               # ok: 0.25 (terminates)\n", BP_NAME);
+	printf("  %s : square dup \\* \\; 5 square         # user-defined: prints 25\n", BP_NAME);
+	printf("  %s : tau 6.28 \\; tau 2 \\*              # literal in body: prints 12.56\n", BP_NAME);
 	printf("\nAll arithmetic is BIT-EXACT — no IEEE754 rounding, no silent precision loss.\n");
 }
 
@@ -625,7 +833,9 @@ int main(int argc, char **argv) {
 	if (!got_token) {
 		process_stdin();
 	}
+	if (MODE != MODE_INTERP) die("unterminated ':' definition (missing ';')");
 	print_top();
 	stack_drain();
+	dict_drain();
 	return 0;
 }
