@@ -2567,10 +2567,24 @@ pub fn mulRawBlip(
 	const a_neg = signExtByte(a_pay) == 0xFF;
 	const b_neg = signExtByte(b_pay) == 0xFF;
 
-	@memcpy(scratch_a[0..a_pay.len], a_pay);
-	@memcpy(scratch_b[0..b_pay.len], b_pay);
-	if (a_neg) negateInPlace(scratch_a[0..a_pay.len]);
-	if (b_neg) negateInPlace(scratch_b[0..b_pay.len]);
+	// Skip the snap-to-scratch memcpy when no negation is needed — the
+	// algorithm only needs to READ the operand magnitudes, and a_pay/b_pay
+	// are already valid `[]const u8` views of the (positive) magnitude.
+	// For the negative case we still must copy-then-negateInPlace so the
+	// caller's input bytes stay untouched.
+	// At pi-blip's mul shape (e.g. 88KB t-by-small-l per iter) this saves
+	// a full payload memcpy per call — the @memcpy was the leading source
+	// of `_platform_memmove` time inside `tier3.mulMagnitudes` per profile.
+	const a_mag: []const u8 = if (a_neg) blk: {
+		@memcpy(scratch_a[0..a_pay.len], a_pay);
+		negateInPlace(scratch_a[0..a_pay.len]);
+		break :blk scratch_a[0..a_pay.len];
+	} else a_pay;
+	const b_mag: []const u8 = if (b_neg) blk: {
+		@memcpy(scratch_b[0..b_pay.len], b_pay);
+		negateInPlace(scratch_b[0..b_pay.len]);
+		break :blk scratch_b[0..b_pay.len];
+	} else b_pay;
 
 	const r_len = a_pay.len + b_pay.len;
 	// Algorithm selection: CRT-FFT (extended range) → single-prime FFT →
@@ -2578,7 +2592,7 @@ pub fn mulRawBlip(
 	const can_fft_crt = fft_alloc != null and a_pay.len == b_pay.len and a_pay.len >= FFT_CRT_THRESHOLD and a_pay.len + b_pay.len <= fft.MAX_FFT_CRT_COMBINED_LEN;
 	const can_fft = fft_alloc != null and a_pay.len == b_pay.len and a_pay.len >= FFT_THRESHOLD and a_pay.len + b_pay.len <= fft.MAX_FFT_COMBINED_LEN;
 	if (can_fft_crt) {
-		_ = try fft.mulMagnitudesCRT(fft_alloc.?, scratch_a[0..a_pay.len], scratch_b[0..b_pay.len], scratch_r[0..r_len]);
+		_ = try fft.mulMagnitudesCRT(fft_alloc.?, a_mag, b_mag, scratch_r[0..r_len]);
 	} else if (can_fft) {
 		// E.1 + E.2 — use cached caller-supplied scratch. First call per
 		// thread allocs the 5 buffers under fft_alloc; every subsequent
@@ -2588,8 +2602,8 @@ pub fn mulRawBlip(
 		while (N_fft < need_len_fft) N_fft <<= 1;
 		try fft_scratch.ensureCapacity(fft_alloc.?, N_fft);
 		_ = fft.mulMagnitudesWithScratch(
-			scratch_a[0..a_pay.len],
-			scratch_b[0..b_pay.len],
+			a_mag,
+			b_mag,
 			scratch_r[0..r_len],
 			fft_scratch.pa,
 			fft_scratch.pb,
@@ -2599,12 +2613,12 @@ pub fn mulRawBlip(
 		);
 	} else if (a_pay.len == b_pay.len and a_pay.len >= TOOM3_THRESHOLD and scratch_k.len >= toom3ScratchNeed(a_pay.len)) {
 		@memset(scratch_r[0..r_len], 0);
-		mulToom3(scratch_a[0..a_pay.len], scratch_b[0..b_pay.len], scratch_r[0..r_len], scratch_k);
+		mulToom3(a_mag, b_mag, scratch_r[0..r_len], scratch_k);
 	} else if (a_pay.len == b_pay.len and a_pay.len >= KARATSUBA_THRESHOLD and scratch_k.len >= karatsubaScratchNeed(a_pay.len)) {
 		@memset(scratch_r[0..r_len], 0);
-		mulKaratsuba(scratch_a[0..a_pay.len], scratch_b[0..b_pay.len], scratch_r[0..r_len], scratch_k);
+		mulKaratsuba(a_mag, b_mag, scratch_r[0..r_len], scratch_k);
 	} else {
-		mulMagnitudes(scratch_a[0..a_pay.len], scratch_b[0..b_pay.len], scratch_r[0..r_len]);
+		mulMagnitudes(a_mag, b_mag, scratch_r[0..r_len]);
 	}
 
 	// Check for zero result (canonical encoding is single 0x00 byte).
