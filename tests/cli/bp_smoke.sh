@@ -143,6 +143,28 @@ assert_stdin "stdin: define + invoke" "100" \
 	": square dup * ;
 10 square"
 
+# Quoted-multi-token argv form: bp should tokenize each arg on whitespace
+# so users don't have to escape every special char (;, *, !, etc.).
+assert_argv "single quoted arg with multiple tokens" "0.3" "0.1 0.2 +"
+assert_argv "quoted arg containing : and ; and *" "12.56" ": tau 6.28 ; tau 2 *"
+assert_argv "mixed: some quoted multi-token, some single-token" "25" ": square dup *" ";" 5 square
+assert_argv "leading/trailing whitespace in quoted arg" "5" "  5  "
+assert_argv "empty quoted arg + a real arg" "7" "" 7
+
+# Heredoc form (just a flavour of stdin — should also work with no escaping).
+heredoc_actual=$("$BP" <<'EOF' 2>/dev/null
+: square dup * ;
+: cube dup square * ;
+: poly 1 + dup cube swap square + ;
+3 poly
+EOF
+)
+if [[ "$heredoc_actual" == "80" ]]; then
+	pass "heredoc: define + use across multiple lines"
+else
+	fail "heredoc: expected '80', got '$heredoc_actual'"
+fi
+
 "$BP" --help >/dev/null 2>&1 && pass "--help exits 0" || fail "--help"
 "$BP" --about >/dev/null 2>&1 && pass "--about exits 0" || fail "--about"
 "$BP" --version >/dev/null 2>&1 && pass "--version exits 0" || fail "--version"
