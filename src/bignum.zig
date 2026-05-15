@@ -4688,6 +4688,62 @@ test "invMod: large modulus — 256-bit random with verification" {
 	try testing.expectEqual(@as(i64, 1), try rem.getI64());
 }
 
+test "divMod: divisor > 64K-bit doesn't overflow tier3.divModKnuthU64 stack scratch" {
+	// Regression for the assertion `v_len <= VN_MAX` (1024 u64 limbs ≈
+	// 64K-bit divisor) in tier3.divModKnuthU64. Real workloads (e.g. the
+	// pi spigot at ~1700 digits) push past it. Build a divisor with ~70K
+	// significant bits and verify divMod still works.
+	const allocator = testing.allocator;
+	var dividend = Mp.init(allocator);
+	defer dividend.deinit();
+	var divisor = Mp.init(allocator);
+	defer divisor.deinit();
+	var q = Mp.init(allocator);
+	defer q.deinit();
+	var r = Mp.init(allocator);
+	defer r.deinit();
+
+	// Build a 70K-bit divisor via setBytes (~8800 bytes of payload — safely
+	// past VN_MAX × 8 = 8192 bytes).
+	const div_bytes = 8800;
+	const div_payload = try allocator.alloc(u8, div_bytes);
+	defer allocator.free(div_payload);
+	var prng = std.Random.DefaultPrng.init(0xCAFE_BABE_DEAD_BEEF);
+	prng.random().bytes(div_payload);
+	div_payload[div_bytes - 1] &= 0x7F; // keep positive
+	if (div_payload[div_bytes - 1] == 0) div_payload[div_bytes - 1] = 0x40;
+	const div_buf = try allocator.alloc(u8, div_bytes + 16);
+	defer allocator.free(div_buf);
+	const hdr_len = try tier3.writeHeader(div_buf, div_bytes);
+	@memcpy(div_buf[hdr_len .. hdr_len + div_bytes], div_payload);
+	try divisor.setBytes(div_buf[0 .. hdr_len + div_bytes]);
+
+	// Build a dividend ~3x the divisor's bit length.
+	const dvd_bytes = 26000;
+	const dvd_payload = try allocator.alloc(u8, dvd_bytes);
+	defer allocator.free(dvd_payload);
+	prng.random().bytes(dvd_payload);
+	dvd_payload[dvd_bytes - 1] &= 0x7F;
+	if (dvd_payload[dvd_bytes - 1] == 0) dvd_payload[dvd_bytes - 1] = 0x40;
+	const dvd_buf = try allocator.alloc(u8, dvd_bytes + 16);
+	defer allocator.free(dvd_buf);
+	const hdr2 = try tier3.writeHeader(dvd_buf, dvd_bytes);
+	@memcpy(dvd_buf[hdr2 .. hdr2 + dvd_bytes], dvd_payload);
+	try dividend.setBytes(dvd_buf[0 .. hdr2 + dvd_bytes]);
+
+	// THE assertion that used to fire — divMod must complete without aborting.
+	try Mp.divMod(&q, &r, &dividend, &divisor);
+
+	// Reconstruction sanity: q * divisor + r == dividend.
+	var reconstructed = Mp.init(allocator);
+	defer reconstructed.deinit();
+	var prod = Mp.init(allocator);
+	defer prod.deinit();
+	try prod.mul(&q, &divisor);
+	try reconstructed.add(&prod, &r);
+	try testing.expect(reconstructed.cmp(&dividend) == .eq);
+}
+
 test "divMod: identity a == q*b + rem on 1000 random i64 pairs" {
 	var prng = std.Random.DefaultPrng.init(0xD1D_D0D_5EED);
 	const rand = prng.random();
