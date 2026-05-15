@@ -78,6 +78,30 @@ pub fn build(b: *std.Build) void {
 	const run_c_smoke_step = b.step("c-smoke-run", "Run the C-FFI smoke test");
 	run_c_smoke_step.dependOn(&run_c_smoke.step);
 
+	// bp — RPN exact-arithmetic calculator. Pure-C CLI dogfooding the C
+	// FFI (per CLAUDE.md: no Zig CLI bypassing the FFI).
+	const bp_module = b.createModule(.{
+		.root_source_file = null,
+		.target = target,
+		.optimize = optimize,
+		.link_libc = true,
+	});
+	bp_module.addCSourceFile(.{
+		.file = b.path("cli/bp.c"),
+		.flags = &.{ "-O2", "-Wall", "-Wextra", "-Werror", "-std=c11" },
+	});
+	bp_module.addIncludePath(b.path("include"));
+	bp_module.linkLibrary(c_api_lib);
+	const bp_exe = b.addExecutable(.{
+		.name = "bp",
+		.root_module = bp_module,
+	});
+	const install_bp = b.addInstallArtifact(bp_exe, .{});
+	const bp_step = b.step("bp", "Build the bp RPN calculator");
+	bp_step.dependOn(&install_bp.step);
+	// Always install bp with the default `zig build` so it lands in zig-out/bin.
+	b.getInstallStep().dependOn(&install_bp.step);
+
 	const unit_tests = b.addTest(.{
 		.root_module = b.createModule(.{
 			.root_source_file = b.path("src/blip_mp.zig"),

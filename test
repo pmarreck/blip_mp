@@ -38,6 +38,13 @@ run "c FFI smoke" bash -c '
 	nix develop -c zig build c-smoke-run --summary none 2>&1
 '
 
+# bp CLI smoke test — exercises the RPN calculator end-to-end via the
+# same C FFI. Includes the IEEE754-disruption headline (0.1 0.2 + → 0.3).
+run "bp CLI smoke" bash -c '
+	nix build --print-build-logs >/dev/null 2>&1 || { echo "bp build failed"; exit 1; }
+	BP_BIN=./result/bin/bp ./tests/cli/bp_smoke.sh
+'
+
 if [ "$fail_count" -eq 0 ]; then
 	printf '\nAll test groups passed.\n'
 	exit 0
