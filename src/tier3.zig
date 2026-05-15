@@ -1528,13 +1528,24 @@ pub fn divModKnuthU64(
 	const top = v[v_len - 1];
 	const s: u6 = @intCast(@clz(top));
 
-	// Build normalized divisor `vn` on the stack — we cap v_len at a generous
-	// bound here. RSA-32K (4096-byte modulus) → 512 u64 limbs. Round up to 1024
-	// for headroom. If a caller exceeds this they'll overrun the stack assertion.
-	const VN_MAX = 1024;
-	std.debug.assert(v_len <= VN_MAX);
-	var vn_storage: [VN_MAX]u64 = undefined;
-	const vn = vn_storage[0..v_len];
+	// Normalized divisor `vn`: stack fast-path for v_len ≤ 1024 limbs (= 64K
+	// bit divisor — covers RSA-32K and below); heap fallback via c_allocator
+	// for anything larger. The streaming pi-spigot in ../pi pushes past the
+	// stack cap at ~1700 digits (divisor t grows linearly with iteration
+	// count). OOM here is an unrecoverable condition consistent with the
+	// other std.debug.assert calls in this file — heap-fallback callers that
+	// can survive OOM should size their workloads to fit the stack path.
+	const VN_FAST_MAX = 1024;
+	var vn_stack: [VN_FAST_MAX]u64 = undefined;
+	var vn_heap: ?[]u64 = null;
+	defer if (vn_heap) |h| std.heap.c_allocator.free(h);
+	const vn: []u64 = if (v_len <= VN_FAST_MAX) vn_stack[0..v_len] else blk: {
+		const h = std.heap.c_allocator.alloc(u64, v_len) catch @panic(
+			"tier3.divModKnuthU64: out of memory allocating heap-fallback vn scratch",
+		);
+		vn_heap = h;
+		break :blk h;
+	};
 
 	if (s == 0) {
 		var i: usize = 0;
