@@ -116,6 +116,33 @@ assert_argv "20! large value" "2432902008176640000" 20 factorial
 assert_argv "35! × 24!" "6411185140617356991862832318891262798817305298993152000000000000" 35 factorial 24 factorial '*'
 
 # --help and --about don't crash.
+# Forth-style ':' definitions (Phase 2).
+assert_argv "': square dup * ;' then 5 square → 25" "25" : square dup '*' ';' 5 square
+assert_argv "': cube ... ;' composes existing user word" "27" \
+	: square dup '*' ';' \
+	: cube dup square '*' ';' \
+	3 cube
+assert_argv "literal in definition body — ': tau 6.28 ;'" "6.28" : tau 6.28 ';' tau
+assert_argv "definition uses literal + builtin together" "10" \
+	: ten 5 5 + ';' ten
+assert_argv "definition shadows a builtin (override !)" "999" \
+	: '!' drop 999 ';' 5 '!'
+assert_argv "shadowed builtin's old binding survives in EARLIER definitions" "120" \
+	: real-fact '!' ';' \
+	: '!' drop 999 ';' \
+	5 real-fact
+
+# ':' / ';' error paths.
+assert_argv_fails "unterminated ':' definition errors" : foo 5
+assert_argv_fails "';' outside definition errors" 5 ';'
+assert_argv_fails "nested ':' errors" : foo : bar ';' ';'
+assert_argv_fails "compile-time unknown token errors" : foo zomgwtf ';' foo
+
+# Stdin form definition + use.
+assert_stdin "stdin: define + invoke" "100" \
+	": square dup * ;
+10 square"
+
 "$BP" --help >/dev/null 2>&1 && pass "--help exits 0" || fail "--help"
 "$BP" --about >/dev/null 2>&1 && pass "--about exits 0" || fail "--about"
 "$BP" --version >/dev/null 2>&1 && pass "--version exits 0" || fail "--version"
