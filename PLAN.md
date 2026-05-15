@@ -160,7 +160,11 @@ Closed FFT-vs-Toom-3 gap from 1.93× to 1.15×. Substantial but not flipped.
 
 - [x] **M6-4-E.1** Caller-supplied scratch via thread-local FftScratch cache in tier3.zig. mulMagnitudesWithScratch shipped. (2026-05-02 EST)
 - [x] **M6-4-E.2** Stockham wired into production via mulMagnitudesWithScratch. **32K-bit Mp.mul: 135K → 128K ns. FFT-vs-Toom-3 gap 1.15× → 1.07-1.08×.** Honest finding: libc malloc on M4 costs ~700-900 ns per call, not the projected 1-2K ns; the rest of the win came from finally uncovering Stockham's per-pass +9% × 3 passes. (2026-05-02 EST)
-- [ ] **M6-4-E.3** Hand-scheduled aarch64 inline asm for the butterfly inner loop — schedules mul/umulh on scalar pipes WHILE NEON handles add/sub/load/store. Architecturally what M4 wants, fragile (M-series-specific). ~9-10K ns gap remaining; this is the last lever.
+- [~] **M6-4-E.3** Hand-scheduled aarch64 inline asm for the butterfly inner loop. **Status (2026-05-14): PARTIAL.** Three attempts logged on `yolo`:
+  - Attempt A (`8af848af`): Stockham+Mont hybrid — NEGATIVE, 7-10% slower (Mont's pure-NEON reduction crowds the same pipes as add/sub).
+  - Attempt B (`c8b7f00f`): nttStockhamVecU4 manual unroll-by-2 — **POSITIVE, real ~6% improvement (32360 → ~31285 ns at N=8192)**. Wired into mulMagnitudes' production path. Closes ~half the original 13-15% target.
+  - Attempt C (`f45fd62a`): nttStockhamVecU8 unroll-by-4 — NEGATIVE, no improvement (hits L1 LSU bandwidth ceiling at U4 already; more butterflies in flight don't help when compute isn't the bottleneck).
+  Bandwidth-bound finding: ~80B per butterfly (3 NEON loads + 2 NEON stores × 16B) × 4 butterflies = 20 LSU ops/iter, saturating the M-series LSU. Real inline asm probably ≤ 2-3% upside given this ceiling. Real next-step paths: (a) cache-tile blocking to reduce L1 churn, (b) stp-paired stores via output reordering, (c) hand asm if all else fails. None small.
 - [ ] **M6-4-E.4** OR accept Toom-3 as production winner in supported range. FFT primitives essential when extending past Toom-3's natural crossover (~512K-bit+).
 
 ## Milestone 7 — Division, modulo, and modular exponentiation
