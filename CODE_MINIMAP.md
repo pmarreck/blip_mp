@@ -220,3 +220,8 @@ Isolated microbench for FFT primitives (M6-4-A.1 work). Times scalar vs vec `mul
 
 ### `tests/cli/c_smoke.c` (~350 lines)
 End-to-end FFI smoke test (M8 + iters 24/25 expansions). Exercises lifecycle (incl. NULL-safety), i64 + u64 set/get roundtrip + error cases, bit access (bit_at/bit_len with 0/1/0xFF/0x100/-0x100 sweeps including out-of-range and sign-ignore semantics), arithmetic (add/sub/mul/div/mod/divMod), powm + invMod (with no-inverse case), set_bytes → arith → bytes() round-trip, sign / cmp / is_zero predicates, error returns. Built as `c-smoke` binary; runs via `c-smoke-run` step. Wired into `./test` as the third group alongside Zig units and 12029 GMP cross-checks.
+
+## cli/ — end-user CLI tooling (dogfoods the C FFI)
+
+### `cli/bp.c` (~880 lines, M16)
+**`bp`** — Forth-style RPN exact-arbitrary-precision calculator. Stack-based; consumes `Mp` values via the public C surface (no direct Zig import — satisfies the "CLI dogfoods the FFI" architectural mandate). Supports three input forms (argv, stdin, heredoc), Forth `:` user-word definitions (threaded code), redefinition, and whitespace-tokenized argv args. Linux portability via `_POSIX_C_SOURCE` define for `strdup()`. Built as the `bp` binary alongside the static lib.
