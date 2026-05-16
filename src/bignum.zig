@@ -315,7 +315,70 @@ pub const Mp = struct {
 				else => {},
 			}
 		}
+		// Asymmetric-with-small-side fast path: if one operand's |magnitude|
+		// fits in u64, route to the dedicated mulMagnitudeByU64 (GMP's
+		// mpn_mul_1 analogue) via Mp.mulU64. Saves the generic 2D schoolbook's
+		// per-byte tail overhead on the small side. Critical for workloads
+		// like the pi spigot where one mul operand is a small running counter
+		// (k, l, n) and the other is a huge accumulator (q, r, t).
+		const a_fits_u64 = magFitsInU64(a);
+		const b_fits_u64 = magFitsInU64(b);
+		if (a_fits_u64 or b_fits_u64) {
+			// Pick the side that fits as the scalar; the other as multiplicand.
+			const scalar_side = if (a_fits_u64) a else b;
+			const big_side = if (a_fits_u64) b else a;
+			const c_mag: u64 = magnitudeAsU64(scalar_side);
+			// mulU64 produces r = big_side × c_mag with sign(r) = sign(big_side)
+			// (since c_mag is treated as a positive scalar). If the scalar side
+			// was negative we negate r at the end to get the correct sign.
+			try mulU64(r, big_side, c_mag);
+			if (scalar_side.cachedSign() < 0) {
+				// Negate r in place via 0 - r. (Can't import sign.zig — circular.)
+				var zero = Mp.init(r.allocator);
+				defer zero.deinit();
+				try zero.setI64(0);
+				try r.sub(&zero, r);
+			}
+			return;
+		}
 		try tier3MulOp(r, a, b);
+	}
+
+	/// Returns true if `|x|` fits in u64. Cheap O(1) check using cached
+	/// payload length. For pay_len ≤ 8 the magnitude always fits in u64
+	/// (positive or negative 2's-complement representable in 64 bits). For
+	/// pay_len = 9 the magnitude can be up to 2^71, which exceeds u64 —
+	/// fall through to the generic path rather than misroute. (We accept
+	/// missing a tight band of values in [2^63, 2^64) that COULD fit; the
+	/// check would need to inspect bytes which costs more than it saves.)
+	inline fn magFitsInU64(x: *const Mp) bool {
+		return x.cached_pay_len <= 8;
+	}
+
+	/// Extract `|x|` as a u64. Caller must have verified `magFitsInU64(x)`.
+	/// Handles the two's-complement encoding for negative values.
+	inline fn magnitudeAsU64(x: *const Mp) u64 {
+		if (x.cachedSign() == 0) return 0;
+		const pay = x.payload();
+		var v: u64 = 0;
+		var shift: u6 = 0;
+		const lim = @min(pay.len, 8);
+		for (pay[0..lim]) |b| {
+			v |= @as(u64, b) << shift;
+			if (shift == 56) break;
+			shift += 8;
+		}
+		if (x.cachedSign() < 0) {
+			// `v` is the low 8 bytes of a two's-complement encoding. Compute
+			// the magnitude = -v as u64. For pay.len < 8, the high bits of v
+			// must be sign-extended to 1s first so the negation is correct.
+			if (pay.len < 8) {
+				const sign_mask: u64 = ~@as(u64, 0) << @intCast(8 * pay.len);
+				v |= sign_mask;
+			}
+			v = (~v) +% 1; // two's-complement negation, wrapping u64
+		}
+		return v;
 	}
 
 	/// Add an unsigned u64 scalar to `a` (GMP `mpz_add_ui` analogue).
