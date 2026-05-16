@@ -251,6 +251,46 @@ pub fn releaseDivScratch() void {
 	div_scratch.releaseUnsafe();
 }
 
+// ── Per-thread divModKnuthU64 VN scratch cache ────────────────────────────────
+//
+// divModKnuthU64 needs a `vn` working buffer of v_len u64 slots for the
+// normalized divisor. For v_len ≤ VN_FAST_MAX (1024 limbs = 64K-bit) it
+// lives on the stack; above that, we previously fell through to a per-call
+// std.heap.c_allocator.alloc + defer free. The streaming pi spigot at
+// N≥1700 digits pushes past the stack cap on every divMod call, leading
+// to thousands of large mallocs per workload.
+//
+// Cache holds the largest vn ever requested. Hardcoded c_allocator matches
+// the original (avoids plumbing an allocator parameter through the kernel
+// signature; this is the only kernel-internal alloc).
+const VnScratch = struct {
+	cap: usize = 0,
+	buf: []u64 = &.{},
+
+	fn ensureCapacity(self: *VnScratch, need: usize) void {
+		if (self.cap >= need) return;
+		if (self.cap > 0) std.heap.c_allocator.free(self.buf);
+		self.buf = std.heap.c_allocator.alloc(u64, need) catch @panic(
+			"tier3.divModKnuthU64: out of memory allocating heap-fallback vn scratch",
+		);
+		self.cap = need;
+	}
+
+	fn releaseUnsafe(self: *VnScratch) void {
+		if (self.cap > 0) std.heap.c_allocator.free(self.buf);
+		self.* = .{};
+	}
+};
+
+threadlocal var vn_scratch: VnScratch = .{};
+
+/// Release the per-thread VN scratch held by divModKnuthU64's heap-fallback
+/// path. Idempotent. Tests use this to keep DebugAllocator-style leak
+/// detectors happy across runs.
+pub fn releaseVnScratch() void {
+	vn_scratch.releaseUnsafe();
+}
+
 // Two-prime CRT FFT dispatch threshold (bytes per operand). Lifts the
 // per-operand cap from ~7K bytes (single-prime) to ~32K bytes by running the
 // convolution under TWO NTT-friendly primes (998244353 and 985661441) and
@@ -1809,22 +1849,16 @@ pub fn divModKnuthU64(
 	const s: u6 = @intCast(@clz(top));
 
 	// Normalized divisor `vn`: stack fast-path for v_len ≤ 1024 limbs (= 64K
-	// bit divisor — covers RSA-32K and below); heap fallback via c_allocator
-	// for anything larger. The streaming pi-spigot in ../pi pushes past the
-	// stack cap at ~1700 digits (divisor t grows linearly with iteration
-	// count). OOM here is an unrecoverable condition consistent with the
-	// other std.debug.assert calls in this file — heap-fallback callers that
-	// can survive OOM should size their workloads to fit the stack path.
+	// bit divisor — covers RSA-32K and below); per-thread cached heap
+	// fallback (vn_scratch) for anything larger. The streaming pi-spigot in
+	// ../pi pushes past the stack cap at ~1700 digits (divisor t grows
+	// linearly with iteration count), so the cache turns N divs' worth of
+	// 88 KB mallocs into a single first-call alloc + reuse.
 	const VN_FAST_MAX = 1024;
 	var vn_stack: [VN_FAST_MAX]u64 = undefined;
-	var vn_heap: ?[]u64 = null;
-	defer if (vn_heap) |h| std.heap.c_allocator.free(h);
 	const vn: []u64 = if (v_len <= VN_FAST_MAX) vn_stack[0..v_len] else blk: {
-		const h = std.heap.c_allocator.alloc(u64, v_len) catch @panic(
-			"tier3.divModKnuthU64: out of memory allocating heap-fallback vn scratch",
-		);
-		vn_heap = h;
-		break :blk h;
+		vn_scratch.ensureCapacity(v_len);
+		break :blk vn_scratch.buf[0..v_len];
 	};
 
 	if (s == 0) {

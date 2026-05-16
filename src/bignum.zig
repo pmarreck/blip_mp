@@ -5262,12 +5262,13 @@ test "divMod: divisor > 64K-bit doesn't overflow tier3.divModKnuthU64 stack scra
 	// pi spigot at ~1700 digits) push past it. Build a divisor with ~70K
 	// significant bits and verify divMod still works.
 	const allocator = testing.allocator;
-	// The .mul + .divMod calls below allocate the per-thread tier-3 mul
-	// and div scratch caches (divisor > 64K-bit forces large heap fallback).
-	// Release them on test exit so DebugAllocator's leak-detector stays
-	// happy. (Same pattern as releaseFftScratch.)
+	// The .mul + .divMod calls below allocate the per-thread tier-3 mul,
+	// div, and vn scratch caches (divisor > 64K-bit forces large heap
+	// fallback). Release them on test exit so DebugAllocator's leak-detector
+	// stays happy. (Same pattern as releaseFftScratch.)
 	defer tier3.releaseMulScratch();
 	defer tier3.releaseDivScratch();
+	defer tier3.releaseVnScratch();
 	var dividend = Mp.init(allocator);
 	defer dividend.deinit();
 	var divisor = Mp.init(allocator);
