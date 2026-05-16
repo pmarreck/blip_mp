@@ -1790,13 +1790,43 @@ fn bzDiv2nByN(
 	return .{ .q_len = q_len, .r_len = got2.r_len };
 }
 
-/// 3n/2-by-n recursive divider (Burnikel-Ziegler Algorithm 3). Currently a
-/// stub: delegates to byte-direct Knuth D. Real recursive form lands in the
-/// next commit (mutual recursion with `bzDiv2nByN` at half-size).
+/// Threshold (in bytes of `n`) below which `bzDiv3n_2n` delegates to byte-
+/// direct Knuth D instead of recursing. Empirically calibrated later — for
+/// correctness this can be any value ≥ 2.
+const BZ_RECURSE_THRESHOLD: usize = 4;
+
+/// In-place decrement of a canonical LE magnitude buffer. `len_ptr` is
+/// updated to reflect the new canonical length. Caller must guarantee
+/// `buf[0..len_ptr.*]` represents a value > 0.
+inline fn decrementMagInPlace(buf: []u8, len_ptr: *usize) void {
+	var len = len_ptr.*;
+	std.debug.assert(len > 0);
+	var i: usize = 0;
+	while (i < len) : (i += 1) {
+		if (buf[i] > 0) {
+			buf[i] -= 1;
+			break;
+		}
+		buf[i] = 0xFF;
+	}
+	while (len > 0 and buf[len - 1] == 0) len -= 1;
+	len_ptr.* = len;
+}
+
+/// 3n/2-by-n recursive divider (Burnikel-Ziegler Algorithm 3). Recursive
+/// case: divisor v split into [B2 (low half) | B1 (high half)]; dividend u
+/// split into [A3 (low half) | A2 (mid half) | A1 (high half)]. Two cases:
+///   - If A1 < B1: recurse via `bzDiv2nByN([A1||A2], half, B1)` at half scale.
+///   - Else: set Q = β^half - 1, R = (A1||A2) - B1·β^half + B1.
+/// Then compute D = Q·B2, R' = R·β^half + A3 - D; correct (≤ 2 iters)
+/// if R' went negative by Q -= 1, R' += v.
+///
+/// Below `BZ_RECURSE_THRESHOLD`, delegates to byte-direct Knuth D (the
+/// algorithm's base case).
 ///
 /// Preconditions:
-///   - u.len == 3 * (n / 2)  (caller passes exactly the 3n/2-byte view)
-///   - v.len == n; v normalized as in bzDiv2nByN
+///   - u.len == 3 * (n / 2)
+///   - v.len == n; v[n-1] top bit set (normalized)
 ///   - n is even, n >= 2
 ///   - q_out.len >= n/2 + 1
 ///   - r_out.len >= n
@@ -1809,29 +1839,124 @@ fn bzDiv3n_2n(
 	std.debug.assert(u.len == 3 * (n / 2));
 	std.debug.assert(v.len == n);
 	std.debug.assert(n >= 2 and n % 2 == 0);
+	std.debug.assert((v[n - 1] >> 7) == 1);
 
-	// Trim u to canonical length.
-	var u_len: usize = u.len;
-	while (u_len > 0 and u[u_len - 1] == 0) u_len -= 1;
-	if (u_len == 0) {
-		// Zero dividend.
-		return .{ .q_len = 0, .r_len = 0 };
+	// Base case: small n → byte-direct Knuth D.
+	if (n < BZ_RECURSE_THRESHOLD) {
+		var u_len: usize = u.len;
+		while (u_len > 0 and u[u_len - 1] == 0) u_len -= 1;
+		if (u_len == 0) return .{ .q_len = 0, .r_len = 0 };
+		if (u_len < n) {
+			@memcpy(r_out[0..u_len], u[0..u_len]);
+			return .{ .q_len = 0, .r_len = u_len };
+		}
+		const work = try allocator.alloc(u8, divModKnuthScratchNeed(u_len, n));
+		defer allocator.free(work);
+		const got = divModKnuth(u, u_len, v, n, q_out, r_out, work);
+		return .{ .q_len = got.q_len, .r_len = got.r_len };
 	}
 
-	// v's top is normalized, so v_len == n (no trailing-zero trim possible).
-	const v_len = n;
+	// Recursive case.
+	const half = n / 2;
+	const A1 = u[2 * half .. 3 * half]; // high half of u (n/2 bytes)
+	const A3 = u[0..half]; // low half (n/2 bytes)
+	const A1A2 = u[half .. 3 * half]; // n bytes — high n of u
+	const B1 = v[half..n]; // high half of v (n/2 bytes)
+	const B2 = v[0..half]; // low half (n/2 bytes)
 
-	// Knuth D requires u_len >= v_len AND v_len >= 2. v_len = n >= 2 is
-	// guaranteed. If u_len < v_len, q = 0, r = u — handle directly.
-	if (u_len < v_len) {
-		@memcpy(r_out[0..u_len], u[0..u_len]);
-		return .{ .q_len = 0, .r_len = u_len };
+	// r_workspace holds R as it's computed and then transformed into R'.
+	// In the special case R can grow to n+1 bytes before the correction
+	// step; we keep slack to hold R·β^half + A3 (≈ 3n/2 + 1 bytes) and
+	// the (possibly larger) intermediate during correction. Size 2n + 4
+	// is comfortably above any intermediate.
+	const r_work = try allocator.alloc(u8, 2 * n + 4);
+	defer allocator.free(r_work);
+	@memset(r_work, 0);
+	var r_len: usize = 0;
+	var q_len: usize = 0;
+
+	const cmp_A1_B1 = cmpUnsignedLE(A1, half, B1, half);
+	if (cmp_A1_B1 < 0) {
+		// Standard case: A1 < B1. Recurse at half scale.
+		const got = try bzDiv2nByN(A1A2, half, B1, q_out, r_work, allocator);
+		q_len = got.q_len;
+		r_len = got.r_len;
+	} else {
+		// Special case: A1 >= B1. Q = β^half - 1; R = (A1-B1)·β^half + A2 + B1.
+		@memset(q_out[0..half], 0xFF);
+		q_len = half;
+		// r_work[0..n] := A1A2; then subtract B1 from r_work[half..n] in place;
+		// then add B1 to r_work[0..] (carries may extend into n+1 bytes).
+		@memcpy(r_work[0..n], A1A2);
+		_ = subUnsignedLE(r_work[half..n], half, B1, half, r_work[half..n]);
+		r_len = addUnsignedLE(r_work[0..n], n, B1, half, r_work);
 	}
 
-	const work = try allocator.alloc(u8, divModKnuthScratchNeed(u_len, v_len));
-	defer allocator.free(work);
-	const got = divModKnuth(u, u_len, v, v_len, q_out, r_out, work);
-	return .{ .q_len = got.q_len, .r_len = got.r_len };
+	// Compute D = Q · B2 (length up to q_len + half bytes).
+	const d_buf_cap = q_len + half + 1;
+	const d_buf = try allocator.alloc(u8, d_buf_cap);
+	defer allocator.free(d_buf);
+	@memset(d_buf, 0);
+	if (q_len > 0) {
+		mulMagnitudes(q_out[0..q_len], B2, d_buf);
+	}
+	var d_len = q_len + half;
+	while (d_len > 0 and d_buf[d_len - 1] == 0) d_len -= 1;
+
+	// Form rp = R · β^half + A3 in r_work. Currently r_work[0..r_len] holds R;
+	// shift up by `half` bytes (place A3 at offset 0). Done via memmove:
+	// move r_work[0..r_len] to r_work[half..half+r_len], then write A3 to
+	// r_work[0..half].
+	std.mem.copyBackwards(u8, r_work[half .. half + r_len], r_work[0..r_len]);
+	@memcpy(r_work[0..half], A3);
+	@memset(r_work[half + r_len ..], 0);
+	var rp_len = half + r_len;
+	while (rp_len > 0 and r_work[rp_len - 1] == 0) rp_len -= 1;
+
+	// Subtract D. May go negative; track magnitude separately.
+	var negative = false;
+	const cmp_rp_d = cmpUnsignedLE(r_work, rp_len, d_buf, d_len);
+	if (cmp_rp_d < 0) {
+		// Negative result: magnitude = D - rp. Compute into a temp then copy back.
+		const tmp = try allocator.alloc(u8, d_len);
+		defer allocator.free(tmp);
+		const mag_len = subUnsignedLE(d_buf, d_len, r_work, rp_len, tmp);
+		@memcpy(r_work[0..mag_len], tmp[0..mag_len]);
+		// Zero stale bytes ONLY in the range that old rp extended past new magnitude.
+		if (rp_len > mag_len) @memset(r_work[mag_len..rp_len], 0);
+		rp_len = mag_len;
+		negative = true;
+	} else {
+		rp_len = subUnsignedLE(r_work, rp_len, d_buf, d_len, r_work);
+	}
+
+	// Correction loop: while negative, Q -= 1 and R' += V. Bounded to 2 iters
+	// per B-Z analysis.
+	var corrections: u8 = 0;
+	while (negative) {
+		decrementMagInPlace(q_out, &q_len);
+		const cmp_v_rp = cmpUnsignedLE(v, n, r_work, rp_len);
+		if (cmp_v_rp >= 0) {
+			// V >= |R'|: new R' = V - |R'|, becomes non-negative.
+			const tmp = try allocator.alloc(u8, n);
+			defer allocator.free(tmp);
+			const new_len = subUnsignedLE(v, n, r_work, rp_len, tmp);
+			@memcpy(r_work[0..new_len], tmp[0..new_len]);
+			if (rp_len > new_len) @memset(r_work[new_len..rp_len], 0);
+			rp_len = new_len;
+			negative = false;
+		} else {
+			// |R'| > V: still negative, new magnitude = |R'| - V.
+			rp_len = subUnsignedLE(r_work, rp_len, v, n, r_work);
+		}
+		corrections += 1;
+		std.debug.assert(corrections <= 2);
+	}
+
+	// Write canonical R' to r_out and return.
+	std.debug.assert(rp_len <= r_out.len);
+	@memcpy(r_out[0..rp_len], r_work[0..rp_len]);
+	return .{ .q_len = q_len, .r_len = rp_len };
 }
 
 /// Burnikel-Ziegler recursive divider. Byte-direct magnitude-only API
@@ -5458,26 +5583,77 @@ test "montMul: 8-limb (512-bit) random equivalence to schoolbook + Knuth div" {
 // M15-1: Burnikel-Ziegler recursive divider — failing tests (TDD-first)
 // ────────────────────────────────────────────────────────────────────────────
 
+test "bzDiv2nByN: regression — previously-failing seed at n=16 (slice-bounds UB in correction)" {
+	// Specific case isolated during M15-1 step 3 bisection. Triggered the
+	// `@memset(r_work[mag_len..rp_len], 0)` slice-bounds bug in bzDiv3n_2n's
+	// "rp - D went negative" branch when mag_len > rp_len. Keeps a permanent
+	// guard against regression of that exact failure mode.
+	const allocator = std.testing.allocator;
+	const u = [_]u8{ 147, 49, 193, 48, 185, 93, 97, 45, 41, 57, 16, 164, 128, 135, 191, 199, 127, 220, 91, 144, 174, 130, 153, 194, 27, 221, 75, 101, 17, 254, 127, 90 };
+	const v = [_]u8{ 36, 122, 213, 93, 80, 233, 246, 211, 11, 189, 188, 120, 248, 109, 71, 248 };
+	const n = 16;
+
+	const q_ref = try allocator.alloc(u8, 2 * n + 1);
+	defer allocator.free(q_ref);
+	const r_ref = try allocator.alloc(u8, n);
+	defer allocator.free(r_ref);
+	const work_ref = try allocator.alloc(u8, divModKnuthScratchNeed(2 * n, n));
+	defer allocator.free(work_ref);
+	const got_ref = divModKnuth(&u, 2 * n, &v, n, q_ref, r_ref, work_ref);
+
+	const q_bz = try allocator.alloc(u8, n + 1);
+	defer allocator.free(q_bz);
+	const r_bz = try allocator.alloc(u8, n);
+	defer allocator.free(r_bz);
+	const got_bz = try bzDiv2nByN(&u, n, &v, q_bz, r_bz, allocator);
+
+	try testing.expectEqualSlices(u8, q_ref[0..got_ref.q_len], q_bz[0..got_bz.q_len]);
+	try testing.expectEqualSlices(u8, r_ref[0..got_ref.r_len], r_bz[0..got_bz.r_len]);
+}
+
 test "bzDiv2nByN: cross-check vs divModKnuth at n=2,4,8,16,32 bytes" {
 	// Spec: u has length 2n, v has length n, v[n-1] != 0 (caller normalized).
 	// Output: Q (canonical, ≤ n bytes), R (canonical, ≤ n bytes).
+	//
+	// PRECONDITION (B-Z): u < v · β^n (quotient must fit in n bytes). Tests
+	// construct u = Q·v + R with random Q of length ≤ n and R of length < n
+	// to satisfy this; the top-level wrapper (divModBurnikelZiegler) will
+	// enforce this invariant via blocking when n-byte divisors face larger
+	// dividends.
 	const allocator = std.testing.allocator;
 	var rng = std.Random.DefaultPrng.init(0xB12B_12B1_AAAA_BBBB);
 	const r_rng = rng.random();
-	const sizes = [_]usize{ 2, 4, 8, 16, 32 };
+	const sizes = [_]usize{ 2, 4, 8, 16, 32, 64, 128 };
 	for (sizes) |n| {
 		var trial: usize = 0;
 		while (trial < 40) : (trial += 1) {
-			const u = try allocator.alloc(u8, 2 * n);
-			defer allocator.free(u);
+			// Generate v (length n, normalized top bit).
 			const v = try allocator.alloc(u8, n);
 			defer allocator.free(v);
-			for (u) |*p| p.* = r_rng.int(u8);
 			for (v) |*p| p.* = r_rng.int(u8);
-			// Ensure v's top byte is non-zero AND has top bit set (normalized).
 			v[n - 1] |= 0x80;
-			// Ensure u's top byte is non-zero so cross-check sees full length.
-			if (u[2 * n - 1] == 0) u[2 * n - 1] = 1;
+
+			// Generate random Q of length n bytes and R of length < n bytes,
+			// then compute u = Q·v + R. Result naturally satisfies u < v · β^n
+			// because Q < β^n. The high byte of Q is biased high so u tends
+			// to fill 2n bytes (better coverage).
+			const q_seed = try allocator.alloc(u8, n);
+			defer allocator.free(q_seed);
+			for (q_seed) |*p| p.* = r_rng.int(u8);
+			q_seed[n - 1] |= 0x40; // bias non-zero high bits
+			const r_seed = try allocator.alloc(u8, n);
+			defer allocator.free(r_seed);
+			for (r_seed) |*p| p.* = r_rng.int(u8);
+			r_seed[n - 1] = 0; // ensure R < β^(n-1) ≤ v (since v[n-1] ≥ 0x80)
+
+			// u_tmp has 2n+1 bytes; high byte will be 0 since Q·v+R < β^(2n).
+			const u_tmp = try allocator.alloc(u8, 2 * n + 1);
+			defer allocator.free(u_tmp);
+			@memset(u_tmp, 0);
+			mulMagnitudes(q_seed, v, u_tmp[0 .. 2 * n]);
+			_ = addUnsignedLE(u_tmp, 2 * n, r_seed, n, u_tmp);
+			std.debug.assert(u_tmp[2 * n] == 0);
+			const u = u_tmp[0 .. 2 * n];
 
 			// Reference: Knuth D on canonicalized inputs.
 			var u_len_ref: usize = 2 * n;
@@ -5498,10 +5674,7 @@ test "bzDiv2nByN: cross-check vs divModKnuth at n=2,4,8,16,32 bytes" {
 			defer allocator.free(r_bz);
 			const got_bz = try bzDiv2nByN(u, n, v, q_bz, r_bz, allocator);
 
-			testing.expectEqual(got_ref.q_len, got_bz.q_len) catch |e| {
-				std.debug.print("n={d} trial={d}: q_len mismatch\n", .{ n, trial });
-				return e;
-			};
+			try testing.expectEqual(got_ref.q_len, got_bz.q_len);
 			try testing.expectEqualSlices(u8, q_ref[0..got_ref.q_len], q_bz[0..got_bz.q_len]);
 			try testing.expectEqual(got_ref.r_len, got_bz.r_len);
 			try testing.expectEqualSlices(u8, r_ref[0..got_ref.r_len], r_bz[0..got_bz.r_len]);
