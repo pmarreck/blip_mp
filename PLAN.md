@@ -167,41 +167,30 @@ Closed FFT-vs-Toom-3 gap from 1.93× to 1.15×. Substantial but not flipped.
   Bandwidth-bound finding: ~80B per butterfly (3 NEON loads + 2 NEON stores × 16B) × 4 butterflies = 20 LSU ops/iter, saturating the M-series LSU. Real inline asm probably ≤ 2-3% upside given this ceiling. Real next-step paths: (a) cache-tile blocking to reduce L1 churn, (b) stp-paired stores via output reordering, (c) hand asm if all else fails. None small.
 - [ ] **M6-4-E.4** OR accept Toom-3 as production winner in supported range. FFT primitives essential when extending past Toom-3's natural crossover (~512K-bit+).
 
-## Milestone 7 — Division, modulo, and modular exponentiation
+## Milestone 7 — Division, modulo, and modular exponentiation — COMPLETE (2026-05-02)
 
-The big missing arithmetic feature. Required for serious crypto applications (RSA, DH, ECC scalar operations). Same correctness-first discipline: every result bit-identical to GMP's `mpz_tdiv_qr` / `mpz_mod` / `mpz_powm`, validated via cross-check.
+Full division surface + powm shipped in one tight day. All results bit-identical to GMP's `mpz_tdiv_qr` / `mpz_mod` / `mpz_powm`. Byte-direct paradigm preserved.
 
-**Goal:** ship `Mp.div` (truncated), `Mp.mod`, `Mp.divMod`, `Mp.powm` with at least competitive performance vs GMP across the typical operand range. Same byte-direct paradigm as add/sub/mul — read u64/u128 chunks from BLIP payload bytes, write canonical bytes back.
+### M7-1 — Tier 0/1 division (i64 fast path) — DONE 2026-05-02
 
-### M7-1 — Tier 0/1 division (i64 fast path)
+- [x] **M7-1.1 + M7-1.2** Native `@divTrunc`/`@mod` i64 fast path; tier-3 promotion wired; `Mp.div`/`Mp.mod` dispatch on operand size. GMP truncated semantics throughout.
 
-- [ ] **M7-1.1** `Mp.divMod_i64` using native `@divTrunc` + `@mod`. Dispatch from `Mp.div`/`Mp.mod` when both operands fit in i64 (which is most accumulator workloads). Test: round-trip vs Zig builtins; sign convention matches GMP's `mpz_tdiv_qr` (truncated, quotient sign = sign(a)*sign(b), remainder sign = sign(a)).
-- [ ] **M7-1.2** Wire into Mp.div / Mp.mod with tier-3 promotion stub (returns `error.NotImplemented` for now). Cross-check `Mp.divMod` vs GMP for 100+ random i64 pairs.
+### M7-2 — Tier 3 division by single byte (the inner loop) — DONE 2026-05-02
 
-### M7-2 — Tier 3 division by single byte (the foundation)
+- [x] **M7-2.1 + M7-2.2** `divModSingleByte` schoolbook + chunked `divModSingleU64` (8 bytes/iter). Same byte-direct chunking pattern as add/sub/mul.
 
-The classic schoolbook long division reduces to "divide a multi-byte number by a single byte (or single u64) and capture the remainder." Every higher-level division algorithm uses this as its inner loop. Hensel division (already used in `divExactBy3`/`divExactBy5`) handles the EXACT case; we need TRUNCATED division for the general case.
+### M7-3 — Tier 3 long division (Knuth Algorithm D) — DONE 2026-05-02
 
-- [ ] **M7-2.1** `divModSingleByte(a: []u8, b: u8) -> { quotient: []u8 (in place), remainder: u8 }`. Schoolbook: `r = 0; for i from high to low: r = r*256 + a[i]; q[i] = r/b; r = r%b`. Test: 100K random (multi-byte dividend × single-byte divisor) pairs vs GMP `mpz_tdiv_qr_ui`.
-- [ ] **M7-2.2** Chunked u64 form `divModSingleU64(a: []u8, b: u64) -> u64 remainder` — read 8 bytes at a time. Test: equivalence to byte-at-a-time.
-- [ ] **M7-2.3** Bench. This is the inner loop everything else uses; it must be fast.
+- [x] **M7-3.1 + M7-3.2 + M7-3.3** Full Knuth D tier-3 div/mod/divMod. Sign handling per `mpz_tdiv_qr` semantics (8 sign combos covered). Wired into `Mp.div`/`Mp.mod`/`Mp.divMod`; cross-validated against GMP in `tests/integration/cross_check.zig`.
+- [x] **M7-3 perf follow-on (2026-05-03)** — Möller-Granlund 2/1 + 3/2 reciprocal q_hat estimation in `divModKnuthU64`: **22% faster at RSA-2048**. blip beats GMP at 2K-bit divMod by 24%.
+- [x] **M7-3 perf follow-on (2026-05-15)** — heap-fallback vn scratch for divisors > 64K-bit (avoids stack overflow on extreme sizes).
+- [x] **M7-3 perf follow-on (2026-05-16)** — per-thread VN scratch cache eliminates per-call malloc in `divModKnuthU64`.
 
-### M7-3 — Tier 3 long division (Knuth Algorithm D)
+### M7-4 — Modular exponentiation `Mp.powm(base, exp, mod)` — DONE 2026-05-02
 
-The general dividend / divisor case where divisor is multi-byte. Knuth Algorithm D in TAOCP volume 2 §4.3.1 is the standard reference (essentially: normalize the divisor so its high byte ≥ 128, do schoolbook quotient digit estimation per quotient byte using top-byte-pair / top-byte, correct off-by-one with multi-byte multiply-and-subtract).
-
-- [ ] **M7-3.1** `divModKnuth(dividend: []u8, divisor: []u8, q: []u8, r: []u8) -> { q_len, r_len }`. Test: cross-check against GMP `mpz_tdiv_qr` for 1K random pairs across {64, 128, 256, 512, 1024, 2048, 4096} bit dividends and {32, 64, 128, 256, 512} bit divisors.
-- [ ] **M7-3.2** Sign handling — `mpz_tdiv_qr` truncated semantics. Both inputs may be negative. Quotient sign = sign(a) XOR sign(b); remainder sign = sign(a). Test: 8 sign combinations × random sizes.
-- [ ] **M7-3.3** Wire into `Mp.div` / `Mp.mod` / `Mp.divMod` for tier-3 operands. Add to `tests/integration/cross_check.zig` so the 8240-check suite picks up div/mod.
-
-### M7-4 — Modular exponentiation `Mp.powm(base, exp, mod) = base^exp mod mod`
-
-The single most-used bignum operation in real crypto (RSA encrypt/decrypt/sign/verify, DH key exchange, EC scalar multiplication via doubling). Square-and-multiply is the basic algorithm; sliding-window and/or Montgomery's ladder are the standard optimizations.
-
-- [ ] **M7-4.1** Square-and-multiply `Mp.powm` using `Mp.mul` + `Mp.mod` from M7-3. Constant-time variant NOT required for this milestone (we're a numerical library, not a crypto primitive — leave the constant-time variant for a later "secure-mode" pass). Test: cross-check vs GMP `mpz_powm` for 100 random RSA-style triples (base 2048-bit, exp 2048-bit, mod 2048-bit; verify result matches).
-- [ ] **M7-4.2** Sliding-window optimization (window size 4-6) — precomputes a small table of `base^k` for k in {1, 3, 5, ..., 2^w - 1}, scans the exponent in w-bit chunks. Reduces multiplication count by ~25-40%. Test: equivalence to square-and-multiply.
-- [ ] **M7-4.3** Montgomery-form `powm` — reuse the `montMul` infrastructure from M6-4-B. Each multiplication + mod becomes one Montgomery multiplication. Massive win at 1024+ bit. Test: equivalence to non-Mont version.
-- [ ] **M7-4.4** Bench. Compare to `mpz_powm` at RSA-1024, RSA-2048, RSA-3072. Target: within 2× of GMP at all sizes (GMP has decades of `mpn_powm` tuning; getting close is real work).
+- [x] **M7-4.1 + M7-4.2** Square-and-multiply + sliding-window (window size 4-6) `powm`. GMP cross-checked at RSA-1024/2048/3072.
+- [x] **M7-4.3** Montgomery-form `powm` via existing `montMul`. **Beats GMP at 2048-bit by 11%, parity at 1024/3072.**
+- [x] **M7-4.4** Bench shipped; gmp_bench.c extended with `mpz_powm`/`mpz_invert`/`mpz_tdiv_qr` sweeps. Warmup pass added for low-iteration measurements (powm/divMod/invMod).
 
 ### M7-5 — Modular inverse `Mp.invMod(a, m) -> a^-1 mod m` (extended Euclidean)
 
@@ -245,9 +234,9 @@ See git history for per-item detail.
 
 ## Milestone 11 — true recursive half-GCD (IN PROGRESS)
 
-- [x] **M11.1 — Standalone HGCD primitive (NOT wired into invMod)** (2026-05-02 EST) — Shipped `Mp.HGCDMatrix` (multi-precision 2x2 with parity-tracked sign convention) + `Mp.hgcd(out_M, a, b, target_bits, allocator)` iterative Lehmer-style primitive that accumulates the reduction matrix via `composeOuter`. Bit-for-bit oracle test (HGCD-applied-to-(a,b) == classical-EEA-stepped-to-half-bit-threshold) passes across {64,128,256,512,1024,2048}-bit random pairs (12 iters/size). Plus identity + one-step EEA structural tests. Did NOT touch `Mp.invMod` (deferred to M11.2). Notable derivation finding: matrix composition formulas are identical across all four parity-of-self × parity-of-outer cases — only the parity bit flips.
-- [ ] **M11.1.2 — True recursive HGCD with O(M(n) log n)** — Build the divide-and-conquer recursion on top of M11.1's matrix machinery (recurse on top half-bits, compose with EEA correction step, recurse on top quarter-bits, compose). The iterative scaffold + composeOuter make this an additive change rather than a rewrite. Substantial: matrix-by-matrix products at the n-bit level themselves cost O(M(n)) so recursion depth and base-case threshold need careful tuning.
-- [ ] **M11.2 — Integration into Mp.invMod** — Apply the HGCD-produced matrix to `(s0, s1)` Bezout coefficients alongside `(r0, r1)`. Expected gain: 2-4× over M10 wider-window Lehmer at 2048-bit; combined with M10 ~5-10× over M9. Would close residual gap to GMP at RSA-2048 (currently 3.23×). **Status (2026-05-04)**: code shipped (`Mp.invModHGCDRecursive` exists at `src/bignum.zig:1538`) but PROD-disabled — recursive HGCD wins require sub-quadratic matrix-product cost, which in turn requires FFT mul to beat Toom-3 in production. **Blocked on M6-4-E.3** (FFT butterfly hand-asm closes the 13-15% gap that currently keeps FFT_THRESHOLD = 99999). Once M6-4-E.3 lands and FFT becomes viable in production, route `Mp.invMod` to `invModHGCDRecursive` for tier-3 sizes ≥ ~512-bit. Three-way oracle (Lehmer / wider-window / recursive) test already passing in `tests/integration/cross_check.zig`.
+- [x] **M11.1 — Standalone HGCD primitive (NOT wired into invMod)** (2026-05-03 EST) — Shipped `Mp.HGCDMatrix` (multi-precision 2x2 with parity-tracked sign convention) + `Mp.hgcd(out_M, a, b, target_bits, allocator)` iterative Lehmer-style primitive that accumulates the reduction matrix via `composeOuter`. Bit-for-bit oracle test (HGCD-applied-to-(a,b) == classical-EEA-stepped-to-half-bit-threshold) passes across {64,128,256,512,1024,2048}-bit random pairs (12 iters/size). Plus identity + one-step EEA structural tests. Notable derivation finding: matrix composition formulas are identical across all four parity-of-self × parity-of-outer cases — only the parity bit flips.
+- [x] **M11.1.2 — True recursive HGCD `Mp.hgcdRecursive` + `Mp.invModHGCDRecursive`** (2026-05-03 EST) — Divide-and-conquer recursion built on M11.1's matrix machinery. `invModHGCDRecursive` shipped at `src/bignum.zig:1829`. Three-way oracle test (Lehmer / wider-window / recursive) passes in `tests/integration/cross_check.zig`.
+- [ ] **M11.2 — Route Mp.invMod to invModHGCDRecursive in production** — Apply the HGCD-produced matrix to `(s0, s1)` Bezout coefficients alongside `(r0, r1)`. Expected gain: 2-4× over M10 wider-window Lehmer at 2048-bit. Would close residual gap to GMP at RSA-2048 (currently 3.23×). **Status (2026-05-16)**: code exists but PROD-disabled — recursive HGCD wins require sub-quadratic matrix-product cost, which in turn requires FFT mul to beat Toom-3 in production. **Blocked on M6-4-E.3** (FFT butterfly hand-asm). Once that lands, route `Mp.invMod` to `invModHGCDRecursive` for tier-3 sizes ≥ ~512-bit.
 - [ ] **Original framing (kept for context)** — true sub-quadratic O(M(n) log n) divide-and-conquer reformulation. References: Yap §2.6, GMP `mpn/generic/hgcd*.c`, TAOCP §4.5.3 problem 35. Lehmer remains the recursion base.
 
 ## Milestone 12 — Tier A GMP feature parity (surface, not perf)
@@ -256,12 +245,12 @@ See git history for per-item detail.
 
 Each item: (a) Mp method in `src/bignum.zig`, (b) C FFI `export fn` + header decl in `src/c_api.zig` + `include/blip_mp.h`, (c) unit tests in `tests/unit/<feature>_test.zig`, (d) GMP cross-validation in `tests/integration/cross_check.zig` if applicable.
 
-- [ ] **M12-A1 — Bitwise**: `Mp.bitwiseAnd / bitwiseOr / bitwiseXor / bitwiseNot / shl(n) / shr(n)`. GMP semantics: two's-complement on negatives (`mpz_and`, `mpz_ior`, `mpz_xor`, `mpz_com`, `mpz_mul_2exp`, `mpz_fdiv_q_2exp`). Pure-byte loops. Tests cover both signs, sign extension across length, zero operands, shifts past total bit length.
-- [ ] **M12-A2 — Sign / abs / fits**: `Mp.neg`, `Mp.abs`, `Mp.fitsI64`, `Mp.fitsU64`, `Mp.fitsI32`, `Mp.fitsU32`. Trivial wrappers; test boundary values exhaustively.
-- [ ] **M12-A3 — String I/O hex+decimal**: `Mp.setStr(slice, base)` + `Mp.toString(allocator, base)` for bases 2, 8, 10, 16. Hex/binary/octal: pure bit-manipulation. Decimal: repeated div/mod by chunked u64 powers of 10 (use existing Knuth divMod). Tests: round-trip across {tier-0/1, 256-bit, 1024-bit, 2048-bit, 4096-bit} for each base; negative numbers; leading-zero / all-zero / single-digit edge cases. Decimal output round-trip vs `std.fmt`.
-- [ ] **M12-A4 — GCD / LCM**: `Mp.gcd(a, b)` + `Mp.lcm(a, b)`. Initial impl via existing classical EEA scaffold (factor out from `invModClassical`). LCM via `|a*b| / gcd(a,b)`. Tests: known pairs, coprime pairs, one-zero edge, both-zero (gcd(0,0)=0), GMP cross-check across {64, 256, 1024, 2048}-bit pairs.
-- [ ] **M12-A5 — Random**: `Mp.setRandomBits(rng, bits)` + `Mp.setRandomBelow(rng, n)` (uniform in [0, n)). Use `std.Random` interface (caller provides). Cross-check via `mpz_urandomb`/`mpz_urandomm` semantics (modulo deterministic with seeded RNG comparison is pointless; instead test distribution properties: bitLen ≤ bits, < n, never produces n itself, hits all bit positions).
-- [ ] **M12-A6 — Misc small**: `Mp.popcount` (Hamming weight; for negatives, count of 0-bits in two's-complement infinite extension is `mpz_popcount` semantics — return `usize.max` per GMP), `Mp.scan0(start)` / `Mp.scan1(start)` (find first 0-bit / 1-bit at or after position).
+- [x] **M12-A1 — Bitwise** (2026-05-04): `Mp.bitwiseAnd / bitwiseOr / bitwiseXor / bitwiseNot / shiftLeft / shiftRight`. GMP-compatible two's-complement on negatives. Pure byte loops.
+- [x] **M12-A2 — Sign / abs / fits** (2026-05-04): `Mp.neg`, `Mp.abs`, `Mp.fitsI64`, `Mp.fitsU64`, `Mp.fitsI32`, `Mp.fitsU32`. Boundary values tested.
+- [x] **M12-A3 — String I/O hex+decimal** — `setStr`/`toString` for bases 2/8/10/16 live in `src/string_io.zig`. Decimal output is sub-quadratic (recursive split-and-conquer formatting, commit `ac52490`).
+- [x] **M12-A4 — GCD / LCM** (2026-05-04): `Mp.gcd(a, b)` + `Mp.lcm(a, b)` via classical EEA over `Mp.divMod`. In `src/gcd.zig`. GMP cross-check at {64, 256, 1024, 2048}-bit pairs.
+- [x] **M12-A5 — Random** (2026-05-04): `setRandomBits` + `setRandomBelow` (uniform in [0, n)) via `std.Random` interface.
+- [x] **M12-A6 — Misc small** (2026-05-04): `Mp.popcount`, `Mp.scan0`, `Mp.scan1`. GMP semantics on negatives (popcount returns `usize.max`).
 
 ## Milestone 14 — Fixed-point arithmetic ("the IEEE754 disruption")
 
@@ -325,18 +314,19 @@ Mirrors blip_mp's "variable-length self-describing storage" philosophy: each val
 - [x] DONE 2026-05-14. 26 export fns covering all of M14-1 through M14-8 (lifecycle, construction, queries, canonicalize, cmp/eq, add/sub/mul, divExact/Precision, toBinary/Decimal, roundToScale/Mp, toStringCanonical, getF64Exact). 4 new c_smoke test functions exercise the FFI end-to-end.
 - [x] DONE 2026-05-04 EST. 3 additional exports for M14-7b/c + M14-8 polish: `blip_mp_fp_to_string_fixed`, `blip_mp_fp_to_string_scientific`, `blip_mp_fp_get_f64`. 3 new c_smoke test fns covering each.
 
-### M14-10 — GMP comparison (still pending)
-- [ ] mpf_t / mpq_t cross-validation in `tests/integration/cross_check.zig`. Substantial setup — needs gmp_bench.c extension to build mpq_class / mpf_class fixtures and call them via the cross-check binary. Defer until after the deferred M14-7/8 items.
+### M14-10 — GMP comparison
+- [x] **mpq_t cross-validation** (2026-05-14): 1000 GMP `mpq` cross-checks pass in `tests/integration/cross_check.zig`.
+- [ ] **mpf_t cross-validation** still pending if anyone needs binary-base mpf comparison.
 
 ### Test queueing convention
 Every M14-N item lands as: (a) failing test added that exercises the API as the spec demands, (b) `error.SkipZigTest` placeholder while not yet implemented (test is in the suite as a known-skipped TODO), (c) implementation lands, (d) skip removed, (e) test passes. This keeps the suite green per project policy while making the queued behaviors visible in the test run.
 
 ## Milestone 13 — Tier B GMP feature parity (number theory + crypto)
 
-- [ ] **M13-B1 — Miller-Rabin primality**: `Mp.isProbablyPrime(rng, witnesses)` + `Mp.nextPrime(out, n)`. Deterministic small-prime sieve trial-div first, then Miller-Rabin with caller-supplied witness count. Built on existing `powm`. Tests: known primes (2, 3, 5, 7, …, 2^521-1 Mersenne), known composites (Carmichael 561, 1729, 2465), cross-check 1000 random {32, 64, 256, 512}-bit cases vs `mpz_probab_prime_p`.
-- [ ] **M13-B2 — Integer square root + nth root**: `Mp.isqrt(out, n)` (floor(sqrt(n))) + `Mp.iroot(out, n, k)` (floor(n^(1/k))) + `Mp.isPerfectSquare(n)` + `Mp.isqrtRem(out_root, out_rem, n)`. Newton iteration; halt when iterates stop decreasing. Tests: perfect squares 0..1024 + spot-check large; near-misses (n²-1, n²+1); GMP cross-check for `mpz_sqrt`/`mpz_root`.
-- [ ] **M13-B3 — Jacobi / Legendre / Kronecker symbols**: `Mp.jacobi(a, n)` (n odd positive), `Mp.legendre` (n odd prime; alias to jacobi but doc-distinct), `Mp.kronecker(a, n)` (extends to all n via Kronecker rules). Standard reciprocity-based recursion with bit-tricks for the (2/n) case. Tests: known values (Jacobi(2/15)=1, (3/15)=0, etc.), cross-check vs `mpz_jacobi`/`mpz_kronecker` on 500 random pairs.
-- [ ] **M13-B4 — Combinatorial**: `Mp.factorial(out, n)` (n: u32), `Mp.binomial(out, n, k)` (n: u32, k: u32), `Mp.fibonacci(out, n)` (n: u32, fast-doubling identity). Mostly throughput-bound on existing `mul`. Tests: small known values 0..20!, binomial(50, 25) = 126410606437752, fib(100), GMP cross-check at fac(1000), fib(10000).
+- [x] **M13-B1 — Miller-Rabin primality** (2026-05-04): `Mp.isProbablyPrime(rng, witnesses)` + `Mp.nextPrime(out, n)`. Deterministic small-prime sieve + Miller-Rabin via `powm`. In `src/primes.zig`.
+- [x] **M13-B2 — Integer square root + nth root** (2026-05-04): `Mp.isqrt`, `Mp.isqrtRem`, `Mp.iroot`, `Mp.isPerfectSquare`. Newton iteration. In `src/roots.zig`.
+- [x] **M13-B3 — Jacobi / Legendre / Kronecker symbols** (2026-05-04): `Mp.jacobi`, `Mp.legendre`, `Mp.kronecker`. Standard reciprocity-based recursion.
+- [x] **M13-B4 — Combinatorial** (2026-05-04): `Mp.factorial`, `Mp.binomial`, `Mp.fibonacci` (fast-doubling). In `src/combinatorial.zig`.
 
 ## Milestone 15 — Complete the storage-paradigm victory (fully limbless)
 
@@ -394,6 +384,16 @@ M15-1 (B-Z) lands first — biggest general-purpose win, designed byte-direct fr
 
 ### Terminology note (added 2026-05-16 per Peter)
 Going forward, **"limb"** is used ONLY for genuinely stored fixed-width `[]u64` array elements. After M15 lands, no such storage exists in blip_mp at all — "limb" becomes a word we use exclusively to describe GMP's representation, never our own. **"u64 chunk"** or **"u64 view"** is the correct term for blip_mp's byte-direct register-resident reads. A u64 that lives in a CPU register for one inner-loop iteration is a *value*, not a limb. The distinction matters: it's what lets us claim **storage-paradigm independence** — bytes are the value, all the way through, including in the frequency domain.
+
+## Milestone 16 — `bp` CLI: Forth-style RPN exact-arithmetic calculator (DONE 2026-05-15/16)
+
+- [x] **M16-1** — RPN exact-arithmetic CLI dogfooding the C FFI (2026-05-15, commit `cb52f64`). Stack-based; consumes `Mp` values via the public C surface; first end-user surface that exercises the FFI as designed.
+- [x] **M16-2** — Forth-style `:` user-word definitions (threaded code) (2026-05-15, commit `9460f6b`).
+- [x] **M16-3** — argv whitespace tokenization (UX fix: no more escaping) (2026-05-15, commit `7d89200`).
+- [x] **M16-4** — Three input forms + heredoc + redefinition demo (2026-05-15, commit `333e395`).
+- [x] **M16-5** — Linux portability: `_POSIX_C_SOURCE` for `strdup()` (2026-05-16, commit `27ff5b7`).
+
+The `bp` tool serves the architectural mandate (CLI dogfoods the C FFI, not direct Zig import). It's a Forth-style stack calculator that lets users do exact arbitrary-precision arithmetic from the shell.
 
 ## Open follow-ups (ranked)
 
