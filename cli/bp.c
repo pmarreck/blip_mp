@@ -18,6 +18,12 @@
 // i18n stub: see operator table OPS[] and the .name_<lang> alias slots
 // (currently only English populated; future locales plug in here).
 
+// strdup() is POSIX, not ISO C. Under `-std=c11` on glibc/musl it's hidden
+// unless this is defined BEFORE any system headers — macOS exposes it
+// unconditionally, which is why the local Apple-Silicon build is happy and
+// the Garnix x86_64-linux build errored on `implicit function declaration`.
+#define _POSIX_C_SOURCE 200809L
+
 #include <ctype.h>
 #include <errno.h>
 #include <inttypes.h>
