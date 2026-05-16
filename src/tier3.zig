@@ -120,6 +120,87 @@ pub fn releaseFftScratch() void {
 	fft_scratch.releaseUnsafe();
 }
 
+// ── Per-thread tier-3 mul scratch cache ──────────────────────────────────────
+//
+// Eliminates the per-call alloc/free of tier3MulOp's scratch buffers
+// (the snap-into-scratch a/b copies, the raw result buffer, the BLIP-
+// encoded out buffer, and the Karatsuba/Toom scratch) when those
+// buffers spill out of the function's STACK_BYTES bucket.
+//
+// Profile showed a real-world workload (the pi spigot at N=10000) was
+// spending ~38% of wall clock inside macOS's xzm allocator just doing
+// large_huge alloc/free pairs across ~150K muls. With this cache, the
+// first call per thread allocates; subsequent calls reuse via O(1)
+// capacity check.
+//
+// Buffers grow monotonically — each slot tracks its own current capacity
+// and only re-allocates when the requested size exceeds it. Allocator
+// identity is enforced (same way fft_scratch does it) so the cache
+// transparently rebuilds if a different allocator is passed later.
+// Thread-local: one cache per thread, no locking.
+const MulScratch = struct {
+	a_cap: usize = 0,
+	b_cap: usize = 0,
+	r_cap: usize = 0,
+	out_cap: usize = 0,
+	k_cap: usize = 0,
+	a_buf: []u8 = &.{},
+	b_buf: []u8 = &.{},
+	r_buf: []u8 = &.{},
+	out_buf: []u8 = &.{},
+	k_buf: []u8 = &.{},
+	owner_alloc: ?std.mem.Allocator = null,
+
+	fn ensureSlot(allocator: std.mem.Allocator, cap_field: *usize, buf_field: *[]u8, need: usize) !void {
+		if (cap_field.* >= need) return;
+		if (cap_field.* != 0) allocator.free(buf_field.*);
+		buf_field.* = try allocator.alloc(u8, need);
+		cap_field.* = need;
+	}
+
+	pub fn ensureCapacity(
+		self: *MulScratch,
+		allocator: std.mem.Allocator,
+		a_need: usize,
+		b_need: usize,
+		r_need: usize,
+		out_need: usize,
+		k_need: usize,
+	) !void {
+		// If allocator changed, release everything held under the old one
+		// before reallocating under the new one — otherwise we'd leak (or
+		// double-free if luck runs out).
+		if (self.owner_alloc) |old| {
+			if (!allocatorEq(old, allocator)) self.releaseUnsafe();
+		}
+		self.owner_alloc = allocator;
+		if (a_need != 0) try ensureSlot(allocator, &self.a_cap, &self.a_buf, a_need);
+		if (b_need != 0) try ensureSlot(allocator, &self.b_cap, &self.b_buf, b_need);
+		if (r_need != 0) try ensureSlot(allocator, &self.r_cap, &self.r_buf, r_need);
+		if (out_need != 0) try ensureSlot(allocator, &self.out_cap, &self.out_buf, out_need);
+		if (k_need != 0) try ensureSlot(allocator, &self.k_cap, &self.k_buf, k_need);
+	}
+
+	fn releaseUnsafe(self: *MulScratch) void {
+		if (self.owner_alloc) |a| {
+			if (self.a_cap != 0) a.free(self.a_buf);
+			if (self.b_cap != 0) a.free(self.b_buf);
+			if (self.r_cap != 0) a.free(self.r_buf);
+			if (self.out_cap != 0) a.free(self.out_buf);
+			if (self.k_cap != 0) a.free(self.k_buf);
+		}
+		self.* = .{};
+	}
+};
+
+pub threadlocal var mul_scratch: MulScratch = .{};
+
+/// Release any per-thread tier-3 mul scratch buffers held by this thread.
+/// Mirror of releaseFftScratch — idempotent, optional.
+pub fn releaseMulScratch() void {
+	mul_scratch.releaseUnsafe();
+}
+
 // Two-prime CRT FFT dispatch threshold (bytes per operand). Lifts the
 // per-operand cap from ~7K bytes (single-prime) to ~32K bytes by running the
 // convolution under TWO NTT-friendly primes (998244353 and 985661441) and
@@ -2560,12 +2641,15 @@ pub fn mulRawBlip(
 ) !usize {
 	const a_pay = try payloadOf(a_blip);
 	const b_pay = try payloadOf(b_blip);
-	std.debug.assert(scratch_a.len >= a_pay.len);
-	std.debug.assert(scratch_b.len >= b_pay.len);
 	std.debug.assert(scratch_r.len >= a_pay.len + b_pay.len + 1);
 
 	const a_neg = signExtByte(a_pay) == 0xFF;
 	const b_neg = signExtByte(b_pay) == 0xFF;
+	// Caller may pass empty `scratch_a`/`scratch_b` when the operand is
+	// positive (no negation needed) — saves the alloc-just-to-not-touch.
+	// When the operand IS negative we DO need real scratch to copy into.
+	std.debug.assert(!a_neg or scratch_a.len >= a_pay.len);
+	std.debug.assert(!b_neg or scratch_b.len >= b_pay.len);
 
 	// Skip the snap-to-scratch memcpy when no negation is needed — the
 	// algorithm only needs to READ the operand magnitudes, and a_pay/b_pay
