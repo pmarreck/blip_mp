@@ -142,10 +142,25 @@ inline fn digitChar(v: u8) u8 {
 	return if (v < 10) ('0' + v) else ('a' + (v - 10));
 }
 
-/// Format a non-zero value in base 10. Strategy: repeatedly divide |self| by
-/// 10^19 (largest 10^k ≤ u64.max), format each chunk with `std.fmt`. The
-/// most-significant chunk has no leading zeros; lower chunks are zero-padded
-/// to 19 digits.
+/// Format a non-zero value in base 10. Sub-quadratic via recursive split-
+/// and-conquer using precomputed powers of 10^19 (largest power of 10 ≤
+/// u64.max). Same algorithm GMP's mpz_get_str uses.
+///
+/// Asymptotic cost is O(M(N) log N) where M(N) is the multiplication cost
+/// (Karatsuba O(N^1.58) for blip_mp), vs the naive divmod-by-10^19 loop's
+/// O(N²). For an 88 KB magnitude (≈210K decimal digits at pi-blip's N=10000)
+/// this is the difference between ~1.2B and ~10M operations.
+///
+/// Algorithm:
+///   1. Build power table by repeated squaring: P[k] = (10^19)^(2^k),
+///      grow until P[top] > mag.
+///   2. Recursively split: q, r = mag divmod P[k-1]; format q into upper
+///      half, r into lower half. Bottom of recursion (k=0): mag fits in
+///      u64, format via std.fmt as exactly 19 zero-padded digits.
+///   3. Trim leading zeros of the top-level result.
+///
+/// Small-input fast path: when |mag| fits in u64 we skip the whole table
+/// setup and format directly via std.fmt.
 fn formatBase10(self: *const Mp, allocator: std.mem.Allocator) StringError![]u8 {
 	const negative = self.cachedSign() < 0;
 	const allocator_local = self.allocator;
@@ -154,75 +169,119 @@ fn formatBase10(self: *const Mp, allocator: std.mem.Allocator) StringError![]u8 
 	defer mag.deinit();
 	try sign_mod.abs(&mag, self);
 
-	const chunk_divisor: u64 = 10_000_000_000_000_000_000; // 10^19
-	var div_mp = Mp.init(allocator_local);
-	defer div_mp.deinit();
-	// 10^19 fits in u64 but not i64.maxInt — build via setBytes for the BLIP form.
-	// 10^19 = 0x8AC7230489E80000; high bit set, so canonical positive payload
-	// needs trailing zero byte: payload = LE bytes of 10^19, with extra 0x00.
-	// 9 bytes total. Header = 0x80 | 9 = 0x89.
+	// Small fast path: |mag| fits in u64 → format directly via std.fmt.
+	// A payload of ≤ 8 bytes always fits. A 9-byte payload fits ONLY when
+	// the high byte is 0x00 (a positive-sign-extension byte; the value is
+	// really an 8-byte one with the high bit set). A 9-byte payload with
+	// non-zero high byte holds values up to 2^71 which exceed u64.max.
+	const pay = mag.payload();
+	const fits_u64 = pay.len <= 8 or (pay.len == 9 and pay[8] == 0);
+	if (fits_u64) {
+		const v: u64 = magToU64(&mag);
+		var buf: [21]u8 = undefined; // "-" + up to 20 digits
+		const s = if (negative)
+			std.fmt.bufPrint(&buf, "-{d}", .{v}) catch unreachable
+		else
+			std.fmt.bufPrint(&buf, "{d}", .{v}) catch unreachable;
+		const result = allocator.alloc(u8, s.len) catch return error.OutOfMemory;
+		@memcpy(result, s);
+		return result;
+	}
+
+	// Build power-of-10^19 table by repeated squaring.
+	// table[k] = (10^19)^(2^k), grown until table[top] > mag.
+	var table = std.array_list.Managed(Mp).init(allocator_local);
+	defer {
+		for (table.items) |*p| p.deinit();
+		table.deinit();
+	}
 	{
+		// table[0] = 10^19 — build via signed 10-byte BLIP (high bit of payload
+		// is set so the canonical positive form needs a trailing 0x00 sign byte).
+		var p0 = Mp.init(allocator_local);
+		errdefer p0.deinit();
+		const chunk_divisor: u64 = 10_000_000_000_000_000_000;
 		var le: [8]u8 = undefined;
 		std.mem.writeInt(u64, &le, chunk_divisor, .little);
 		var blip: [10]u8 = undefined;
-		blip[0] = 0x89;
+		blip[0] = 0x89; // 0x80 | 9 (length-prefixed, payload = 9 bytes)
 		@memcpy(blip[1..9], &le);
 		blip[9] = 0x00;
-		try div_mp.setBytes(&blip);
+		try p0.setBytes(&blip);
+		try table.append(p0);
 	}
-
-	// chunks[i] = the i-th lowest 19-digit chunk.
-	var chunks = std.array_list.Managed(u64).init(allocator);
-	defer chunks.deinit();
-
-	var q = Mp.init(allocator_local);
-	defer q.deinit();
-	var rem = Mp.init(allocator_local);
-	defer rem.deinit();
-
-	while (mag.cachedSign() != 0) {
-		try Mp.divMod(&q, &rem, &mag, &div_mp);
-		// rem fits in [0, 10^19) → fits u64.
-		const chunk: u64 = blk: {
-			if (rem.cachedSign() == 0) break :blk 0;
-			// Extract magnitude as u64. payload is LE non-negative bytes ≤ 8.
-			const pay = rem.payload();
-			std.debug.assert(pay.len <= 9);
-			var v: u64 = 0;
-			var shift: u6 = 0;
-			for (pay) |b| {
-				v |= @as(u64, b) << shift;
-				if (shift == 56) break;
-				shift += 8;
-			}
-			break :blk v;
-		};
-		try chunks.append(chunk);
-		try mag.setBytes(q.bytes());
+	// Keep squaring until the largest power exceeds mag.
+	while (mag.cmp(&table.items[table.items.len - 1]) != .lt) {
+		var next = Mp.init(allocator_local);
+		errdefer next.deinit();
+		const last = &table.items[table.items.len - 1];
+		try Mp.mul(&next, last, last);
+		try table.append(next);
 	}
+	const top_k: u32 = @intCast(table.items.len - 1);
+	// Total digit count if we wrote the full zero-padded form = 19 * 2^top_k.
+	// We over-allocate this much and trim leading zeros at the end.
+	const total_digits: usize = @as(usize, 19) << @as(u5, @intCast(top_k));
 
-	// Now print: top chunk no padding, others padded to 19 digits, with leading '-' if negative.
-	// Estimate buffer: chunks.len * 19 + 2.
-	const out = try allocator.alloc(u8, chunks.items.len * 19 + 1);
+	const buf_len = total_digits + 1; // +1 for optional sign
+	const out = allocator.alloc(u8, buf_len) catch return error.OutOfMemory;
+	errdefer allocator.free(out);
+
 	var pos: usize = 0;
 	if (negative) {
-		out[pos] = '-';
-		pos += 1;
+		out[0] = '-';
+		pos = 1;
 	}
-	// Highest chunk first.
-	const top = chunks.items[chunks.items.len - 1];
-	const top_str = std.fmt.bufPrint(out[pos..], "{d}", .{top}) catch return error.OutOfMemory;
-	pos += top_str.len;
-	// Remaining chunks zero-padded to 19.
-	var i: usize = chunks.items.len - 1;
-	while (i > 0) {
-		i -= 1;
-		const s = std.fmt.bufPrint(out[pos..], "{d:0>19}", .{chunks.items[i]}) catch return error.OutOfMemory;
-		pos += s.len;
+	try writeRecursive(allocator_local, &mag, table.items, top_k, out[pos .. pos + total_digits]);
+
+	// Trim leading zeros in the digit region (always leave at least one digit).
+	var first_nonzero: usize = pos;
+	while (first_nonzero < pos + total_digits - 1 and out[first_nonzero] == '0') {
+		first_nonzero += 1;
 	}
-	// Shrink to actual length.
-	const final = allocator.realloc(out, pos) catch out[0..pos];
+	const trim = first_nonzero - pos;
+	if (trim != 0) {
+		std.mem.copyForwards(u8, out[pos .. pos + total_digits - trim], out[first_nonzero .. pos + total_digits]);
+	}
+	const final_len = pos + total_digits - trim;
+	const final = allocator.realloc(out, final_len) catch out[0..final_len];
 	return final;
+}
+
+/// Recursive helper for formatBase10. Writes exactly `out.len` decimal
+/// digits of |mag| left-padded with '0' as needed. out.len must equal
+/// 19 * 2^k. Caller guarantees |mag| < 10^out.len so the result fits.
+fn writeRecursive(allocator: std.mem.Allocator, mag: *const Mp, table: []const Mp, k: u32, out: []u8) StringError!void {
+	if (k == 0) {
+		// Base case: mag < 10^19, fits in u64. Emit exactly 19 zero-padded digits.
+		std.debug.assert(out.len == 19);
+		const v: u64 = magToU64(mag);
+		_ = std.fmt.bufPrint(out, "{d:0>19}", .{v}) catch unreachable;
+		return;
+	}
+	var q = Mp.init(allocator);
+	defer q.deinit();
+	var r = Mp.init(allocator);
+	defer r.deinit();
+	try Mp.divMod(&q, &r, mag, &table[k - 1]);
+	const half = out.len / 2; // = 19 * 2^(k-1)
+	try writeRecursive(allocator, &q, table, k - 1, out[0..half]);
+	try writeRecursive(allocator, &r, table, k - 1, out[half..]);
+}
+
+/// Extract the magnitude of `mag` as a u64. Caller asserts mag fits.
+/// (Payload is little-endian unsigned bytes for positive Mp.)
+fn magToU64(mag: *const Mp) u64 {
+	if (mag.cachedSign() == 0) return 0;
+	const pay = mag.payload();
+	var v: u64 = 0;
+	var shift: u6 = 0;
+	for (pay) |b| {
+		v |= @as(u64, b) << shift;
+		if (shift == 56) break;
+		shift += 8;
+	}
+	return v;
 }
 
 // ── tests ────────────────────────────────────────────────────────────────────
