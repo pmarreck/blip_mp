@@ -493,20 +493,42 @@ pub const Mp = struct {
 		const a_pay = a.payload();
 		const a_neg = a.cachedSign() < 0;
 		const allocator = r.allocator;
-		// `mag` holds the unsigned magnitude bytes (LE). For positive a this
-		// IS a copy of a_pay (minus trailing 0x00 sign-extension if any). For
-		// negative a, it's the two's-complement negation of a_pay.
-		const mag = try allocator.alloc(u8, a_pay.len);
-		defer allocator.free(mag);
-		@memcpy(mag, a_pay);
-		if (a_neg) tier3.negateInPlace(mag);
+
+		// For positive a, the magnitude IS a_pay (after trimming any trailing
+		// 0x00 sign-padding) — pass it directly with no alloc, no memcpy.
+		// For negative a, we must copy + negateInPlace, which requires a
+		// writable buffer. That buffer comes from the per-thread mul_scratch
+		// cache (same one tier3MulOp uses) when large; stack otherwise.
+		const STACK_BYTES = 4096;
+		var stack_mag: [STACK_BYTES]u8 = undefined;
+		const mag_src: []const u8 = if (!a_neg) a_pay else blk: {
+			const need = a_pay.len;
+			if (need > STACK_BYTES) {
+				try tier3.mul_scratch.ensureCapacity(allocator, need, 0, 0, 0, 0);
+			}
+			const buf: []u8 = if (need <= STACK_BYTES)
+				stack_mag[0..need]
+			else
+				tier3.mul_scratch.a_buf[0..need];
+			@memcpy(buf, a_pay);
+			tier3.negateInPlace(buf);
+			break :blk buf;
+		};
 		// Trim trailing zero bytes (so mag_len is the true magnitude length).
-		var mag_len: usize = mag.len;
-		while (mag_len > 0 and mag[mag_len - 1] == 0) mag_len -= 1;
-		// Output magnitude buffer: a's mag bytes + up to 8 carry bytes.
-		const out_mag = try allocator.alloc(u8, mag_len + 16);
-		defer allocator.free(out_mag);
-		const out_mag_len = tier3.mulMagnitudeByU64(mag, mag_len, c, out_mag);
+		var mag_len: usize = mag_src.len;
+		while (mag_len > 0 and mag_src[mag_len - 1] == 0) mag_len -= 1;
+
+		// Output magnitude buffer: a's mag bytes + up to 16 carry bytes.
+		const out_need = mag_len + 16;
+		var stack_out: [STACK_BYTES + 16]u8 = undefined;
+		const out_mag: []u8 = if (out_need <= stack_out.len)
+			stack_out[0..out_need]
+		else blk: {
+			try tier3.mul_scratch.ensureCapacity(allocator, 0, 0, 0, out_need, 0);
+			break :blk tier3.mul_scratch.out_buf[0..out_need];
+		};
+
+		const out_mag_len = tier3.mulMagnitudeByU64(mag_src, mag_len, c, out_mag);
 		if (out_mag_len == 0) {
 			try r.setI64(0);
 			return;
@@ -2867,32 +2889,22 @@ fn tier3DivModOp(q: *Mp, rem: *Mp, a: *const Mp, b: *const Mp) ArithError!void {
 	const r_pay_max = ((b_pay.len + 7) & ~@as(usize, 7)) + 2;
 	const work_need = tier3.divModSignedScratchNeed(a_pay.len, b_pay.len);
 
-	// Stack scratch for small sizes; heap for large.
+	// Stack scratch for small sizes; per-thread div_scratch cache for large.
 	const STACK_PAY = 4096;
 	const STACK_WORK = 8192;
 	var stack_q: [STACK_PAY]u8 = undefined;
 	var stack_r: [STACK_PAY]u8 = undefined;
 	var stack_w: [STACK_WORK]u8 = undefined;
-	var heap_q: ?[]u8 = null;
-	var heap_r: ?[]u8 = null;
-	var heap_w: ?[]u8 = null;
-	defer {
-		if (heap_q) |s| q.allocator.free(s);
-		if (heap_r) |s| rem.allocator.free(s);
-		if (heap_w) |s| q.allocator.free(s);
+
+	const q_cache_need: usize = if (q_pay_max > stack_q.len) q_pay_max else 0;
+	const r_cache_need: usize = if (r_pay_max > stack_r.len) r_pay_max else 0;
+	const w_cache_need: usize = if (work_need > stack_w.len) work_need else 0;
+	if (q_cache_need != 0 or r_cache_need != 0 or w_cache_need != 0) {
+		try tier3.div_scratch.ensureCapacity(q.allocator, q_cache_need, r_cache_need, w_cache_need);
 	}
-	const q_buf: []u8 = if (q_pay_max <= stack_q.len) stack_q[0..q_pay_max] else blk: {
-		heap_q = try q.allocator.alloc(u8, q_pay_max);
-		break :blk heap_q.?;
-	};
-	const r_buf: []u8 = if (r_pay_max <= stack_r.len) stack_r[0..r_pay_max] else blk: {
-		heap_r = try rem.allocator.alloc(u8, r_pay_max);
-		break :blk heap_r.?;
-	};
-	const w_buf: []u8 = if (work_need <= stack_w.len) stack_w[0..work_need] else blk: {
-		heap_w = try q.allocator.alloc(u8, work_need);
-		break :blk heap_w.?;
-	};
+	const q_buf: []u8 = if (q_pay_max <= stack_q.len) stack_q[0..q_pay_max] else tier3.div_scratch.q_buf[0..q_pay_max];
+	const r_buf: []u8 = if (r_pay_max <= stack_r.len) stack_r[0..r_pay_max] else tier3.div_scratch.r_buf[0..r_pay_max];
+	const w_buf: []u8 = if (work_need <= stack_w.len) stack_w[0..work_need] else tier3.div_scratch.w_buf[0..work_need];
 
 	const got = tier3.divModSigned(a_pay, b_pay, q_buf, r_buf, w_buf);
 
@@ -5187,11 +5199,12 @@ test "divMod: divisor > 64K-bit doesn't overflow tier3.divModKnuthU64 stack scra
 	// pi spigot at ~1700 digits) push past it. Build a divisor with ~70K
 	// significant bits and verify divMod still works.
 	const allocator = testing.allocator;
-	// The .mul call below at the end of this test allocates the per-thread
-	// tier-3 mul scratch cache (since divisor > 64K-bit forces large heap
-	// fallback). Release it on test exit so DebugAllocator's leak-detector
-	// stays happy. (Same pattern as releaseFftScratch.)
+	// The .mul + .divMod calls below allocate the per-thread tier-3 mul
+	// and div scratch caches (divisor > 64K-bit forces large heap fallback).
+	// Release them on test exit so DebugAllocator's leak-detector stays
+	// happy. (Same pattern as releaseFftScratch.)
 	defer tier3.releaseMulScratch();
+	defer tier3.releaseDivScratch();
 	var dividend = Mp.init(allocator);
 	defer dividend.deinit();
 	var divisor = Mp.init(allocator);

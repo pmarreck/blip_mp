@@ -201,6 +201,56 @@ pub fn releaseMulScratch() void {
 	mul_scratch.releaseUnsafe();
 }
 
+// ── Per-thread tier-3 divMod scratch cache ────────────────────────────────────
+//
+// Same pattern as MulScratch but for tier3DivModOp's q/r/w buffers. Kept
+// as a SEPARATE struct rather than sharing slots with mul_scratch because
+// divMod and mul can be intermixed inside a single algorithm (e.g. invMod,
+// gcd, modular exponentiation) — overlapping the scratch slots would
+// create wrong-buffer-size bugs if one caller resizes another's slot.
+const DivScratch = struct {
+	q_cap: usize = 0,
+	r_cap: usize = 0,
+	w_cap: usize = 0,
+	q_buf: []u8 = &.{},
+	r_buf: []u8 = &.{},
+	w_buf: []u8 = &.{},
+	owner_alloc: ?std.mem.Allocator = null,
+
+	pub fn ensureCapacity(
+		self: *DivScratch,
+		allocator: std.mem.Allocator,
+		q_need: usize,
+		r_need: usize,
+		w_need: usize,
+	) !void {
+		if (self.owner_alloc) |old| {
+			if (!allocatorEq(old, allocator)) self.releaseUnsafe();
+		}
+		self.owner_alloc = allocator;
+		if (q_need != 0) try MulScratch.ensureSlot(allocator, &self.q_cap, &self.q_buf, q_need);
+		if (r_need != 0) try MulScratch.ensureSlot(allocator, &self.r_cap, &self.r_buf, r_need);
+		if (w_need != 0) try MulScratch.ensureSlot(allocator, &self.w_cap, &self.w_buf, w_need);
+	}
+
+	fn releaseUnsafe(self: *DivScratch) void {
+		if (self.owner_alloc) |a| {
+			if (self.q_cap != 0) a.free(self.q_buf);
+			if (self.r_cap != 0) a.free(self.r_buf);
+			if (self.w_cap != 0) a.free(self.w_buf);
+		}
+		self.* = .{};
+	}
+};
+
+pub threadlocal var div_scratch: DivScratch = .{};
+
+/// Release any per-thread tier-3 divMod scratch buffers held by this thread.
+/// Mirror of releaseMulScratch — idempotent, optional.
+pub fn releaseDivScratch() void {
+	div_scratch.releaseUnsafe();
+}
+
 // Two-prime CRT FFT dispatch threshold (bytes per operand). Lifts the
 // per-operand cap from ~7K bytes (single-prime) to ~32K bytes by running the
 // convolution under TWO NTT-friendly primes (998244353 and 985661441) and
