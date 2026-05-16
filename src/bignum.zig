@@ -2960,8 +2960,17 @@ fn tier3MulOp(r: *Mp, a: *const Mp, b: *const Mp) ArithError!void {
 	const r_pay_max = a_pay_len + b_pay_len + 1;
 	const out_need = r_pay_max + 10; // +10 for header
 
+	// Sign of each operand. Only when an operand is negative does
+	// mulRawBlip touch its scratch_* buffer (to copy + negate). For positive
+	// operands we can pass an empty slice and skip the alloc entirely.
+	// The sign byte is the most-significant byte of the payload (LE 2's-comp).
+	const a_sign_byte = if (a_bytes[0] < 0x80) a_bytes[0] else a_bytes[a_bytes.len - 1];
+	const b_sign_byte = if (b_bytes[0] < 0x80) b_bytes[0] else b_bytes[b_bytes.len - 1];
+	const a_neg = (a_sign_byte & 0x80) != 0;
+	const b_neg = (b_sign_byte & 0x80) != 0;
+
 	// 4 KB per operand for mul (results double, so 8 KB result + out).
-	// Covers up to ~32768-bit operands without spilling to allocator.
+	// Covers up to ~32768-bit operands without spilling to the cache.
 	const STACK_BYTES = 4096;
 	var stack_a: [STACK_BYTES]u8 = undefined;
 	var stack_b: [STACK_BYTES]u8 = undefined;
@@ -2974,38 +2983,59 @@ fn tier3MulOp(r: *Mp, a: *const Mp, b: *const Mp) ArithError!void {
 	else
 		0;
 	var stack_k: [STACK_BYTES * 16 + 256]u8 = undefined;
-	var heap_a: ?[]u8 = null;
-	var heap_b: ?[]u8 = null;
-	var heap_r: ?[]u8 = null;
-	var heap_out: ?[]u8 = null;
-	var heap_k: ?[]u8 = null;
-	defer {
-		if (heap_a) |s| r.allocator.free(s);
-		if (heap_b) |s| r.allocator.free(s);
-		if (heap_r) |s| r.allocator.free(s);
-		if (heap_out) |s| r.allocator.free(s);
-		if (heap_k) |s| r.allocator.free(s);
+
+	// Determine which buffers spill out of the stack buckets and into the
+	// per-thread mul_scratch cache. heap_a/heap_b are needed ONLY if the
+	// operand is actually negative (positive operands skip the snap-into-
+	// scratch path entirely — mulRawBlip reads payloadOf(a_blip) directly).
+	const a_cache_need: usize = if (a_neg and a_pay_len > STACK_BYTES) a_pay_len else 0;
+	const b_cache_need: usize = if (b_neg and b_pay_len > STACK_BYTES) b_pay_len else 0;
+	const r_cache_need: usize = if (r_pay_max > stack_r.len) r_pay_max else 0;
+	const out_cache_need: usize = if (out_need > stack_out.len) out_need else 0;
+	const k_cache_need: usize = if (k_need > stack_k.len) k_need else 0;
+
+	if (a_cache_need != 0 or b_cache_need != 0 or r_cache_need != 0 or out_cache_need != 0 or k_cache_need != 0) {
+		try tier3.mul_scratch.ensureCapacity(
+			r.allocator,
+			a_cache_need,
+			b_cache_need,
+			r_cache_need,
+			out_cache_need,
+			k_cache_need,
+		);
 	}
-	const sa: []u8 = if (a_pay_len <= STACK_BYTES) stack_a[0..a_pay_len] else blk: {
-		heap_a = try r.allocator.alloc(u8, a_pay_len);
-		break :blk heap_a.?;
-	};
-	const sb: []u8 = if (b_pay_len <= STACK_BYTES) stack_b[0..b_pay_len] else blk: {
-		heap_b = try r.allocator.alloc(u8, b_pay_len);
-		break :blk heap_b.?;
-	};
-	const sr: []u8 = if (r_pay_max <= stack_r.len) stack_r[0..r_pay_max] else blk: {
-		heap_r = try r.allocator.alloc(u8, r_pay_max);
-		break :blk heap_r.?;
-	};
-	const out_buf: []u8 = if (out_need <= stack_out.len) stack_out[0..out_need] else blk: {
-		heap_out = try r.allocator.alloc(u8, out_need);
-		break :blk heap_out.?;
-	};
-	const sk: []u8 = if (k_need == 0) &[_]u8{} else if (k_need <= stack_k.len) stack_k[0..k_need] else blk: {
-		heap_k = try r.allocator.alloc(u8, k_need);
-		break :blk heap_k.?;
-	};
+
+	const sa: []u8 = if (!a_neg)
+		// Positive operand — mulRawBlip won't touch scratch_a.
+		&[_]u8{}
+	else if (a_pay_len <= STACK_BYTES)
+		stack_a[0..a_pay_len]
+	else
+		tier3.mul_scratch.a_buf[0..a_pay_len];
+
+	const sb: []u8 = if (!b_neg)
+		&[_]u8{}
+	else if (b_pay_len <= STACK_BYTES)
+		stack_b[0..b_pay_len]
+	else
+		tier3.mul_scratch.b_buf[0..b_pay_len];
+
+	const sr: []u8 = if (r_pay_max <= stack_r.len)
+		stack_r[0..r_pay_max]
+	else
+		tier3.mul_scratch.r_buf[0..r_pay_max];
+
+	const out_buf: []u8 = if (out_need <= stack_out.len)
+		stack_out[0..out_need]
+	else
+		tier3.mul_scratch.out_buf[0..out_need];
+
+	const sk: []u8 = if (k_need == 0)
+		&[_]u8{}
+	else if (k_need <= stack_k.len)
+		stack_k[0..k_need]
+	else
+		tier3.mul_scratch.k_buf[0..k_need];
 
 	const written = try tier3.mulRawBlip(a_bytes, b_bytes, sa, sb, sr, sk, out_buf, r.allocator);
 	try r.setBytes(out_buf[0..written]);
@@ -5157,6 +5187,11 @@ test "divMod: divisor > 64K-bit doesn't overflow tier3.divModKnuthU64 stack scra
 	// pi spigot at ~1700 digits) push past it. Build a divisor with ~70K
 	// significant bits and verify divMod still works.
 	const allocator = testing.allocator;
+	// The .mul call below at the end of this test allocates the per-thread
+	// tier-3 mul scratch cache (since divisor > 64K-bit forces large heap
+	// fallback). Release it on test exit so DebugAllocator's leak-detector
+	// stays happy. (Same pattern as releaseFftScratch.)
+	defer tier3.releaseMulScratch();
 	var dividend = Mp.init(allocator);
 	defer dividend.deinit();
 	var divisor = Mp.init(allocator);
