@@ -824,6 +824,112 @@ pub fn mulMagnitudes(a: []const u8, b: []const u8, r: []u8) void {
 	mulMagnitudesU64Unaligned(a, b, r);
 }
 
+/// Squaring a × a. Exploits the symmetry r[i+j] = a[i]*a[j] = a[j]*a[i] to do
+/// roughly n²/2 word multiplications instead of n² (general schoolbook).
+/// Same correctness, ~2× faster for large operands. Direct analogue of GMP's
+/// `mpn_sqr_basecase`.
+///
+/// Algorithm (Knuth Vol 2 §4.3.1 Algorithm S):
+///   1. Compute strict-upper-triangular cross products into r:
+///        for i in 0..n: for j in i+1..n: r[i+j..] += a[i] * a[j]
+///      (n(n-1)/2 word multiplications)
+///   2. Double r via a single left-shift by 1 bit.
+///   3. Add diagonal squares:
+///        for i in 0..n: r[2i..] += a[i]²
+///      (n word multiplications)
+///   Total: n(n+1)/2 ≈ n²/2 word multiplications. ~50% reduction.
+///
+/// Peter's insight: with blip_mp's byte-LE representation, the doubling in
+/// step 2 is essentially a "free" O(N) bit-shift over the data — GMP's
+/// limbs require the same shift cost, so this isn't a blip-vs-gmp lever
+/// per se, but it's a real cost reduction either way.
+///
+/// Aligned u64-chunked variant. Caller must guarantee a.len % 8 == 0 and
+/// r.len >= 2 * a.len. Result is unsigned, always non-negative (a² ≥ 0).
+pub fn squareMagnitudesU64(a: []const u8, r: []u8) void {
+	std.debug.assert(a.len % 8 == 0);
+	std.debug.assert(r.len >= 2 * a.len);
+	if (a.len == 0) return;
+	const a_n = a.len / 8;
+	const r_n = 2 * a_n;
+	@memset(r[0 .. 2 * a.len], 0);
+
+	// Step 1: strict-upper-triangular cross products.
+	// for i < j: r[(i+j)*8..] += a[i] * a[j]
+	var i: usize = 0;
+	while (i < a_n) : (i += 1) {
+		const ai = std.mem.readInt(u64, a[i * 8 ..][0..8], .little);
+		if (ai == 0) continue;
+		var carry: u64 = 0;
+		var j: usize = i + 1;
+		while (j < a_n) : (j += 1) {
+			const aj = std.mem.readInt(u64, a[j * 8 ..][0..8], .little);
+			const r_chunk = std.mem.readInt(u64, r[(i + j) * 8 ..][0..8], .little);
+			const prod: u128 = @as(u128, ai) * @as(u128, aj) + r_chunk + carry;
+			std.mem.writeInt(u64, r[(i + j) * 8 ..][0..8], @truncate(prod), .little);
+			carry = @intCast(prod >> 64);
+		}
+		// Propagate any final carry into higher positions.
+		var pos = i + a_n; // == i + (a_n - 1) + 1
+		while (carry != 0 and pos < r_n) {
+			const r_chunk = std.mem.readInt(u64, r[pos * 8 ..][0..8], .little);
+			const sum: u128 = @as(u128, r_chunk) + @as(u128, carry);
+			std.mem.writeInt(u64, r[pos * 8 ..][0..8], @truncate(sum), .little);
+			carry = @intCast(sum >> 64);
+			pos += 1;
+		}
+	}
+
+	// Step 2: double the result via single bit left-shift.
+	// (Equivalent to multiplying the cross-product sum by 2, since each
+	// off-diagonal term appears symmetrically as a[i]*a[j] + a[j]*a[i].)
+	var shift_carry: u64 = 0;
+	var k: usize = 0;
+	while (k < r_n) : (k += 1) {
+		const chunk = std.mem.readInt(u64, r[k * 8 ..][0..8], .little);
+		const shifted = (chunk << 1) | shift_carry;
+		shift_carry = chunk >> 63;
+		std.mem.writeInt(u64, r[k * 8 ..][0..8], shifted, .little);
+	}
+	// shift_carry overflowing the result buffer would be a sizing bug —
+	// the strict-upper-triangular sum < 2^(64*r_n - 1) so doubling fits.
+	std.debug.assert(shift_carry == 0);
+
+	// Step 3: add diagonal squares a[i]² at position 2i.
+	var sq_carry: u64 = 0;
+	i = 0;
+	while (i < a_n) : (i += 1) {
+		const ai = std.mem.readInt(u64, a[i * 8 ..][0..8], .little);
+		const sq: u128 = @as(u128, ai) * @as(u128, ai);
+		// Low 64 bits → r[2i].
+		const r0 = std.mem.readInt(u64, r[2 * i * 8 ..][0..8], .little);
+		const s0: u128 = @as(u128, r0) + @as(u128, @as(u64, @truncate(sq))) + @as(u128, sq_carry);
+		std.mem.writeInt(u64, r[2 * i * 8 ..][0..8], @truncate(s0), .little);
+		const c0: u64 = @intCast(s0 >> 64);
+		// High 64 bits → r[2i+1].
+		const r1 = std.mem.readInt(u64, r[(2 * i + 1) * 8 ..][0..8], .little);
+		const s1: u128 = @as(u128, r1) + @as(u128, @as(u64, @intCast(sq >> 64))) + @as(u128, c0);
+		std.mem.writeInt(u64, r[(2 * i + 1) * 8 ..][0..8], @truncate(s1), .little);
+		sq_carry = @intCast(s1 >> 64);
+	}
+	std.debug.assert(sq_carry == 0); // result always fits in 2n words.
+}
+
+/// Squaring dispatcher: aligned variant when possible, otherwise fall back
+/// to general mulMagnitudes (correct but no symmetry advantage).
+pub fn squareMagnitudes(a: []const u8, r: []u8) void {
+	if (a.len == 0) {
+		@memset(r[0 .. 2 * a.len], 0);
+		return;
+	}
+	if (a.len % 8 == 0) {
+		squareMagnitudesU64(a, r);
+		return;
+	}
+	// Unaligned: fall through to general mul. Same correctness, no speedup.
+	mulMagnitudesU64Unaligned(a, a, r);
+}
+
 // ── Karatsuba multiplication ─────────────────────────────────────────────────
 //
 // Asymptotic O(n^1.58) vs schoolbook O(n^2). Splits each n-byte operand
@@ -2752,7 +2858,19 @@ pub fn mulRawBlip(
 		@memset(scratch_r[0..r_len], 0);
 		mulKaratsuba(a_mag, b_mag, scratch_r[0..r_len], scratch_k);
 	} else {
-		mulMagnitudes(a_mag, b_mag, scratch_r[0..r_len]);
+		// Same-pointer detect: when caller invoked Mp.mul(&x, &x) we land
+		// here with a_blip and b_blip pointing at the same underlying bytes,
+		// AND (after the snap-or-pass dance above) a_mag and b_mag pointing
+		// at the same magnitude buffer too. Dispatch to the specialized
+		// squaring path (GMP `mpn_sqr_basecase` analogue) — does ~n²/2
+		// word multiplications instead of n². Applies to the schoolbook
+		// tier only; Karatsuba/Toom-3 above don't yet have squaring
+		// variants. (RSA 2048 lands in schoolbook on aarch64.)
+		if (a_blip.ptr == b_blip.ptr and a_blip.len == b_blip.len) {
+			squareMagnitudes(a_mag, scratch_r[0..r_len]);
+		} else {
+			mulMagnitudes(a_mag, b_mag, scratch_r[0..r_len]);
+		}
 	}
 
 	// Check for zero result (canonical encoding is single 0x00 byte).
