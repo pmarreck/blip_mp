@@ -50,7 +50,9 @@ Apple Silicon (M-series), aarch64-darwin, Zig 0.16.0 ReleaseFast, libc malloc.
 - **Large multiplication (16384+ bits via Toom-3): 1.03× faster** (modest)
 - **Modular exponentiation (RSA-2048): 13% faster than GMP** (Mp.powm with Montgomery, M7-4.3 + Möller-Granlund-improved inner div). At 1024 we beat by 3%; at 3072 by 8%. This is the headliner for any serious crypto workload (RSA encrypt/decrypt/sign, DH key exchange, ECC scalar mul).
 - **Long division (2048-bit / 1024-bit): 24% faster than GMP** (Mp.divMod with u64-base Knuth Algorithm D) — 36× faster than the byte-base implementation that originally lagged by 28.8×.
-- **Correctness: 12029/12029 random GMP cross-validation tests pass** across add, sub, mul, div, mod, divMod, powm, invMod — the complete modular-arithmetic API.
+- **Correctness: 13029/13029 random GMP cross-validation tests pass** across add, sub, mul, div, mod, divMod, powm, invMod, and `Fp` (rational) cross-checks against `mpq_t` — the complete modular-arithmetic + exact-rational API.
+- **Real-world: pi-spigot at 10,000 digits runs within 1.22× of GMP** — a streaming Gibbons spigot port with mul-heavy ratio. Started a session at 3.55×; closed 72% of the gap via the same techniques GMP uses (`mpn_mul_1` dispatch for single-limb operand, per-thread scratch caches, specialized squaring, sub-quadratic `mpz_get_str`). At small N (≤100 digits) pi-blip is tied or faster than pi-c (C + GMP-with-asm).
+- **Modular exponentiation at 1024-bit: 21% FASTER than GMP** (after specialized squaring landed) — RSA-1024 modexp falls into blip_mp's schoolbook tier where the n²/2 squaring symmetry trick directly pays out.
 
 ### The honest losses
 
@@ -87,7 +89,7 @@ git clone https://github.com/pmarreck/blip_mp
 cd blip_mp
 
 ./build           # native ReleaseFast build via nix; also builds bp
-./test            # ~451 unit tests + 13029 GMP cross-checks + C FFI smoke + bp CLI smoke
+./test            # 461 unit tests + 13029 GMP cross-checks + C FFI smoke + bp CLI smoke
 ./result/bin/blip_mp_bench    # run the bench (after nix build .#packages.<sys>.bench)
 ```
 
@@ -184,9 +186,8 @@ Full details in [`CODE_MINIMAP.md`](CODE_MINIMAP.md), benchmark history in [`BEN
 
 **What it isn't (yet):**
 - **FFT multiplication is correctness-shipped but gated off** — full single-prime NTT + two-prime CRT + NEON-SIMD vectorized butterflies live in `src/fft.zig`, all bit-identical to GMP across 8240/8240 cross-checks at sizes up to 256K-bit. But constant factors keep Toom-3 ahead at every operand size in our supported range (M-series-specific finding: pure-NEON Montgomery integrates slower than the existing scalar-inside-vector form because it crowds the NEON pipe and starves M4's dual scalar mul pipes). The 13–15% remaining gap needs alloc-elimination + inline asm, planned in M6-4-E.
-- **Modular inverse lags GMP** by ~4-6× at 1024-2048 bit (down from 29-38× before M9 Lehmer; further down from 7-8× after M10 wider-window Lehmer). Headline: 2048-bit invMod is now 3.96× behind GMP (was 7.85× pre-M10). Closing the remainder requires true recursive half-GCD, planned as M11.
-- **Two platforms validated** — aarch64-darwin (Apple M-series) is the headline, x86_64-linux (AMD Zen 4 with AVX-512) is the cross-check. Library is bit-portable: 213 unit tests + 12029 GMP cross-validations + C FFI smoke pass on both. The asm-vs-clang result is M-series-specific; on x86_64 GMP's hand-asm is genuinely load-bearing (1.65–3.88× over GMP-noasm). Windows (x86_64 + aarch64) is covered by the Garnix CI cross-build matrix.
-- **No C FFI yet** — public surface is Zig-only. Adding `include/blip_mp.h` is a clear extension.
+- **Modular inverse lags GMP** by ~2.5–4× at 256-2048 bit (down from 29-38× before M9 Lehmer; down from 7-8× after M10 wider-window Lehmer; down from 4-6× after M11 recursive HGCD + the divMod/mul scratch caches landed). Headline: 2048-bit invMod is now 2.49× behind GMP (was 3.96× post-M11, 7.85× pre-M10). Further closure would need the FFT-mul-as-HGCD-leaf option flipped on (M11.2 PROD enablement, blocked on FFT viability).
+- **Two platforms validated** — aarch64-darwin (Apple M-series) is the headline, x86_64-linux (AMD Zen 4 with AVX-512) is the cross-check. Library is bit-portable: 461 unit tests + 13029 GMP cross-validations + C FFI smoke + bp CLI smoke pass on both. The asm-vs-clang result is M-series-specific; on x86_64 GMP's hand-asm is genuinely load-bearing (1.65–3.88× over GMP-noasm). Windows (x86_64 + aarch64) is covered by the Garnix CI cross-build matrix.
 - **Not optimized for non-aligned operand sizes** — `tier3Op` works on any size but is fastest when payload lengths are multiples of 8 bytes (which most cryptographic sizes are).
 
 **What it isn't trying to be:**
@@ -200,19 +201,23 @@ Full details in [`CODE_MINIMAP.md`](CODE_MINIMAP.md), benchmark history in [`BEN
 
 **In priority order:**
 
-1. **Finish the FFT-vs-Toom-3 flip** (M6-4-E in PLAN.md). The FFT primitives, CRT extension, and NEON-SIMD butterfly are all shipped and correctness-validated; closed Toom-3 gap from 1.93× to 1.15×. Remaining 13–15% needs caller-supplied scratch (eliminates 4 per-call allocs ≈ 6–9K ns), wiring Stockham into production, and possibly hand-scheduled aarch64 inline asm for the butterfly inner loop.
+1. **Finish the FFT-vs-Toom-3 flip** (M6-4-E in PLAN.md). The FFT primitives, CRT extension, and NEON-SIMD butterfly are all shipped and correctness-validated; closed Toom-3 gap from 1.93× to 1.15×. Remaining 13–15% needs caller-supplied scratch (eliminates 4 per-call allocs ≈ 6–9K ns — partially done via the per-thread scratch caches), wiring Stockham into production, and possibly hand-scheduled aarch64 inline asm for the butterfly inner loop.
 
-2. ~~**Tighter `tier3Op` bookkeeping**~~ — DONE 2026-05-02. Five new add wins (768/1536/2048/3072/4096 bit); 128-bit gap closed by ~40%; 1024-bit at parity. Implementation: fast-path specialization for fixed payload sizes that compile to single uN +% ADC chains, plus an inline-fits stack path.
+2. ~~**Tighter `tier3Op` bookkeeping**~~ — DONE 2026-05-02. Five new add wins (768/1536/2048/3072/4096 bit); 128-bit gap closed by ~40%; 1024-bit at parity.
 
-3. **Cross-platform validation on x86_64 Linux + Windows.** Two M-series-specific findings need verification on x86_64: (a) "GMP asm gives ~0% on M-series, AVX-512 may shift it" (M5-5); (b) "pure-NEON Montgomery loses to scalar-inside-vector because of M4's dual scalar mul pipes" (M6-4-A.6) — different scheduler may flip this.
+3. ~~**Cross-platform validation on x86_64 Linux + Windows.**~~ — DONE. Garnix builds aarch64/x86_64 on Linux/Darwin/Windows; cross-platform x86_64 Zen 4 run confirmed (a) GMP-asm IS load-bearing on x86_64 (1.65–3.88× over GMP-noasm — different result than M-series); (b) BLIP storage paradigm still wins vs GMP-noasm-x86_64.
 
-4. **True recursive half-GCD for `Mp.invMod` (M11)** — closes the remaining 4-6× gap to GMP. M10 (wider-window Lehmer) just landed at 3.96× of GMP at 2048-bit; true recursive HGCD with multi-precision matrix entries is sub-quadratic and would close most of what's left.
+4. ~~**True recursive half-GCD for `Mp.invMod` (M11)**~~ — DONE 2026-05-03. Closed 2048-bit invMod from 7.85× → 2.49× of GMP. Further closure would need M11.2 PROD enablement (blocked on FFT mul viability).
 
-5. **C FFI header** (`include/blip_mp.h`) for downstream consumers.
+5. ~~**C FFI header** (`include/blip_mp.h`)~~ — DONE 2026-05 (M8). `bp` CLI uses it; downstream Rust/Lua/Python bindings get the same surface.
 
-6. **Toom-Cook 4-way** for 4K-16K bit mul. Deprioritized — its modest 15-30% gain isn't worth the implementation cost while FFT remains the headliner. M6-2.1 + M6-2.2 helpers (`divExactBy5`, `mulSmallSignedConst`) are in tier3.zig as future-work building blocks.
+6. **Karatsuba/Toom-3 squaring variants** — schoolbook squaring (`mpn_sqr_basecase` analogue) is shipped and gives 21% on RSA-1024 powm. The recursive Karatsuba and Toom-3 variants for squaring would close the remaining gap at 4K+ bit modular exponentiation (RSA-4096 / DH-4096).
 
-7. **`hyperfine` integration** in `./bm` for proper statistical benchmark aggregation. Current numbers are 3-run hand medians.
+7. **Direct-to-`r.heap_buf` write in `Mp.mulU64`** — currently writes to scratch + memcpys via `writeMpFromPayload`. Direct-write would save the trailing memcpy (≈5–10% on mul-by-small-constant-heavy workloads like the pi spigot).
+
+8. **Toom-Cook 4-way** for 4K-16K bit mul. Deprioritized — its modest 15-30% gain isn't worth the implementation cost while FFT remains the headliner.
+
+9. **`hyperfine` integration** in `./bm` for proper statistical benchmark aggregation. Current numbers are 3-run hand medians.
 
 ---
 
