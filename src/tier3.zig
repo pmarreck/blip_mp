@@ -1661,6 +1661,51 @@ pub fn divModKnuthScratchNeed(u_len: usize, v_len: usize) usize {
 }
 
 // ────────────────────────────────────────────────────────────────────────────
+// M15-1 building blocks: byte-direct in-place bit-shift helpers (magnitude
+// only — no sign extension). Used for B-Z normalization (shift divisor so
+// its top bit is set, shift dividend by the same amount). Distinct from
+// `bitwise.shl`/`shr` which operate on signed `Mp` values with two's-comp
+// sign-extension semantics.
+// ────────────────────────────────────────────────────────────────────────────
+
+/// Shift `in_buf[0..len]` LEFT by `s` bits (s in 1..7) into `out_buf`.
+/// Returns canonical magnitude length (trailing-zero-trimmed). Caller must
+/// ensure `out_buf.len >= len + 1` to hold a possible carry-out byte.
+inline fn shiftLeftByBitsMag(in_buf: []const u8, len: usize, s: u3, out_buf: []u8) usize {
+	std.debug.assert(s >= 1 and s <= 7);
+	std.debug.assert(out_buf.len >= len + 1);
+	if (len == 0) return 0;
+	const inv_s: u3 = @intCast(8 - @as(u4, s));
+	var carry: u8 = 0;
+	var i: usize = 0;
+	while (i < len) : (i += 1) {
+		const v = in_buf[i];
+		out_buf[i] = (v << s) | carry;
+		carry = v >> inv_s;
+	}
+	out_buf[len] = carry;
+	var out_len: usize = if (carry != 0) len + 1 else len;
+	while (out_len > 0 and out_buf[out_len - 1] == 0) out_len -= 1;
+	return out_len;
+}
+
+/// Shift `buf[0..len]` RIGHT by `s` bits (s in 1..7) IN PLACE. Returns
+/// canonical magnitude length. Pure unsigned (no sign-fill).
+inline fn shiftRightByBitsMag(buf: []u8, len: usize, s: u3) usize {
+	std.debug.assert(s >= 1 and s <= 7);
+	if (len == 0) return 0;
+	const inv_s: u3 = @intCast(8 - @as(u4, s));
+	var i: usize = 0;
+	while (i + 1 < len) : (i += 1) {
+		buf[i] = (buf[i] >> s) | (buf[i + 1] << inv_s);
+	}
+	buf[len - 1] = buf[len - 1] >> s;
+	var out_len = len;
+	while (out_len > 0 and buf[out_len - 1] == 0) out_len -= 1;
+	return out_len;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
 // M15-1: Burnikel-Ziegler recursive divider — byte-direct from day one.
 // ────────────────────────────────────────────────────────────────────────────
 //
@@ -5303,6 +5348,88 @@ test "montMul: 8-limb (512-bit) random equivalence to schoolbook + Knuth div" {
 // ────────────────────────────────────────────────────────────────────────────
 // M15-1: Burnikel-Ziegler recursive divider — failing tests (TDD-first)
 // ────────────────────────────────────────────────────────────────────────────
+
+test "shiftLeftByBitsMag: shift by 0 is rejected by assert (no-op contract violation)" {
+	// Helper requires s in 1..7. s=0 should be handled by caller as no-op (memcpy).
+	// We can't easily test the assert, so just exercise the s=1..7 cases.
+}
+
+test "shiftLeftByBitsMag: single byte by 4 (0x0F → 0xF0, no carry)" {
+	const in_buf = [_]u8{0x0F};
+	var out_buf = [_]u8{ 0, 0, 0 };
+	const out_len = shiftLeftByBitsMag(&in_buf, in_buf.len, 4, &out_buf);
+	try testing.expectEqual(@as(usize, 1), out_len);
+	try testing.expectEqual(@as(u8, 0xF0), out_buf[0]);
+}
+
+test "shiftLeftByBitsMag: single byte by 4 with carry (0xFF → 0xF0 + new byte 0x0F)" {
+	const in_buf = [_]u8{0xFF};
+	var out_buf = [_]u8{ 0, 0, 0 };
+	const out_len = shiftLeftByBitsMag(&in_buf, in_buf.len, 4, &out_buf);
+	try testing.expectEqual(@as(usize, 2), out_len);
+	try testing.expectEqual(@as(u8, 0xF0), out_buf[0]);
+	try testing.expectEqual(@as(u8, 0x0F), out_buf[1]);
+}
+
+test "shiftLeftByBitsMag: two bytes by 1 (0x0001 → 0x0002; LE 0x01,0x00 → 0x02,0x00)" {
+	const in_buf = [_]u8{ 0x01, 0x00 };
+	var out_buf = [_]u8{ 0, 0, 0 };
+	const out_len = shiftLeftByBitsMag(&in_buf, in_buf.len, 1, &out_buf);
+	try testing.expectEqual(@as(usize, 1), out_len);
+	try testing.expectEqual(@as(u8, 0x02), out_buf[0]);
+}
+
+test "shiftLeftByBitsMag: cross-byte carry (LE 0x80,0x01 → << 1 → 0x00,0x03)" {
+	// 0x0180 = 384; << 1 = 768 = 0x0300 LE: 0x00, 0x03.
+	const in_buf = [_]u8{ 0x80, 0x01 };
+	var out_buf = [_]u8{ 0, 0, 0 };
+	const out_len = shiftLeftByBitsMag(&in_buf, in_buf.len, 1, &out_buf);
+	try testing.expectEqual(@as(usize, 2), out_len);
+	try testing.expectEqual(@as(u8, 0x00), out_buf[0]);
+	try testing.expectEqual(@as(u8, 0x03), out_buf[1]);
+}
+
+test "shiftRightByBitsMag: single byte by 4 (0xF0 → 0x0F)" {
+	var buf = [_]u8{0xF0};
+	const out_len = shiftRightByBitsMag(&buf, buf.len, 4);
+	try testing.expectEqual(@as(usize, 1), out_len);
+	try testing.expectEqual(@as(u8, 0x0F), buf[0]);
+}
+
+test "shiftRightByBitsMag: cross-byte borrow (LE 0x00,0x03 → >> 1 → 0x80,0x01)" {
+	var buf = [_]u8{ 0x00, 0x03 };
+	const out_len = shiftRightByBitsMag(&buf, buf.len, 1);
+	try testing.expectEqual(@as(usize, 2), out_len);
+	try testing.expectEqual(@as(u8, 0x80), buf[0]);
+	try testing.expectEqual(@as(u8, 0x01), buf[1]);
+}
+
+test "shiftRightByBitsMag: shrinks length when top byte becomes 0 (0x10 → >> 5 → 0x00, len=0)" {
+	var buf = [_]u8{0x10};
+	const out_len = shiftRightByBitsMag(&buf, buf.len, 5);
+	try testing.expectEqual(@as(usize, 0), out_len);
+}
+
+test "shiftLeft then shiftRight by same amount is identity (random)" {
+	const allocator = std.testing.allocator;
+	var rng = std.Random.DefaultPrng.init(0xB12_5417_5417_C0DE);
+	const r_rng = rng.random();
+	var trial: usize = 0;
+	while (trial < 100) : (trial += 1) {
+		const len = 1 + @as(usize, r_rng.uintLessThan(u32, 64));
+		const orig = try allocator.alloc(u8, len);
+		defer allocator.free(orig);
+		for (orig) |*p| p.* = r_rng.int(u8);
+		if (orig[len - 1] == 0) orig[len - 1] = 1;
+		const shifted = try allocator.alloc(u8, len + 1);
+		defer allocator.free(shifted);
+		const s: u3 = @intCast(1 + r_rng.uintLessThan(u32, 7));
+		const shifted_len = shiftLeftByBitsMag(orig, len, s, shifted);
+		const recovered_len = shiftRightByBitsMag(shifted, shifted_len, s);
+		try testing.expectEqual(len, recovered_len);
+		try testing.expectEqualSlices(u8, orig[0..len], shifted[0..recovered_len]);
+	}
+}
 
 test "divModBurnikelZiegler: tiny known case (0xFFFF / 0x0102 → q=0xFE r=0x03)" {
 	// 65535 / 258 = 254 r 3 — same case used in divModKnuth's known-small test.
