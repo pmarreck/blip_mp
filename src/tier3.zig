@@ -1660,6 +1660,84 @@ pub fn divModKnuthScratchNeed(u_len: usize, v_len: usize) usize {
 	return u_len + 1 + v_len;
 }
 
+// ────────────────────────────────────────────────────────────────────────────
+// M15-1: Burnikel-Ziegler recursive divider — byte-direct from day one.
+// ────────────────────────────────────────────────────────────────────────────
+//
+// Algorithm: Burnikel & Ziegler, "Fast Recursive Division" (MPI tech report,
+// 1998). The classical schoolbook divider (Knuth Algorithm D) is O(n²).
+// Burnikel-Ziegler reformulates as O(M(n) log n) by replacing the inner-loop
+// trial-quotient + multiply-subtract with two recursive 3n/2-by-n divisions
+// per step, glued together by Karatsuba/Toom-3 multiplications already
+// available in this module via `mulMagnitudes`.
+//
+// Storage paradigm: this implementation operates directly on `[]u8` BLIP
+// magnitude payloads. No `[]u64` limb-array storage anywhere on the B-Z
+// recursion path. The arithmetic primitives it composes — `addUnsignedLE`,
+// `subUnsignedLE`, `cmpUnsignedLE`, `mulMagnitudes` — already read chunked
+// u64 values from byte buffers via `readChunkOrZero`. The leaf case
+// currently bottoms out into `divModKnuthU64` (limb-based, fast); M15-2
+// will replace that leaf with a byte-direct Knuth D so the entire tree is
+// byte-direct.
+
+/// Burnikel-Ziegler recursive divider. Byte-direct magnitude-only API
+/// (caller handles signs). Currently a transparent delegation to the
+/// existing Knuth D byte-direct kernel — recursive logic lands in
+/// subsequent commits per the TDD ladder.
+///
+/// Preconditions:
+///   - v_len >= 1, v[v_len-1] != 0 (caller passes canonical divisor magnitude).
+///   - q_out has capacity >= max(1, u_len - v_len + 1) bytes.
+///   - r_out has capacity >= v_len bytes.
+///   - work has capacity >= divModBurnikelZieglerScratchNeed(u_len, v_len).
+pub fn divModBurnikelZiegler(
+	u: []const u8, u_len: usize,
+	v: []const u8, v_len: usize,
+	q_out: []u8, r_out: []u8,
+	work: []u8,
+) struct { q_len: usize, r_len: usize } {
+	// Stub: delegate to byte-direct Knuth D. Recursion lands in M15-1.2+.
+	// divModKnuth requires v_len >= 2; for single-byte divisors the caller
+	// dispatches to divModSingleU64 already, but we mirror its precondition
+	// here so the test cases match. If v_len == 1 we still need to handle
+	// it cleanly because the API doesn't otherwise constrain it.
+	if (v_len == 1) {
+		// Single-byte divisor — synthesize via divModSingleU64-style loop
+		// on the dividend bytes. Not the B-Z path, but a clean degenerate
+		// case for the stub.
+		const divisor: u64 = v[0];
+		// Copy u into work scratch as the in-place quotient buffer.
+		const u_scratch = work[0..u_len];
+		@memcpy(u_scratch, u[0..u_len]);
+		const out = divModSingleU64(u_scratch, u_len, divisor);
+		@memcpy(q_out[0..out.q_len], u_scratch[0..out.q_len]);
+		const q_len_out = if (out.q_len == 0) blk: {
+			q_out[0] = 0;
+			break :blk @as(usize, 1);
+		} else out.q_len;
+		// Remainder as LE bytes (single byte fits in r_out[0]).
+		var rem = out.rem;
+		var i: usize = 0;
+		while (rem != 0 or i == 0) : (i += 1) {
+			r_out[i] = @truncate(rem);
+			rem >>= 8;
+			if (i + 1 >= r_out.len) break;
+		}
+		var r_len_out = i;
+		while (r_len_out > 1 and r_out[r_len_out - 1] == 0) r_len_out -= 1;
+		return .{ .q_len = q_len_out, .r_len = r_len_out };
+	}
+	const leaf = divModKnuth(u, u_len, v, v_len, q_out, r_out, work);
+	return .{ .q_len = leaf.q_len, .r_len = leaf.r_len };
+}
+
+/// Worst-case scratch needed by `divModBurnikelZiegler`. For the stub
+/// delegation this is just `divModKnuthScratchNeed`; once recursion lands
+/// the bound widens to cover the temporary product buffers at each level.
+pub fn divModBurnikelZieglerScratchNeed(u_len: usize, v_len: usize) usize {
+	return divModKnuthScratchNeed(u_len, v_len);
+}
+
 /// Möller-Granlund 2/1 reciprocal: precompute `v = floor((2^128 - 1)/d) - 2^64`
 /// where `d` is a normalized 64-bit divisor (high bit set). Used by the
 /// `div2by1` primitive in Knuth's q_hat estimate to replace a hardware
@@ -5219,5 +5297,89 @@ test "montMul: 8-limb (512-bit) random equivalence to schoolbook + Knuth div" {
 			}
 		}
 		try testing.expectEqualSlices(u64, &acc, &c);
+	}
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// M15-1: Burnikel-Ziegler recursive divider — failing tests (TDD-first)
+// ────────────────────────────────────────────────────────────────────────────
+
+test "divModBurnikelZiegler: tiny known case (0xFFFF / 0x0102 → q=0xFE r=0x03)" {
+	// 65535 / 258 = 254 r 3 — same case used in divModKnuth's known-small test.
+	const allocator = std.testing.allocator;
+	const u = [_]u8{ 0xFF, 0xFF };
+	const v = [_]u8{ 0x02, 0x01 };
+	var q: [4]u8 = undefined;
+	var r: [4]u8 = undefined;
+	const work = try allocator.alloc(u8, divModBurnikelZieglerScratchNeed(u.len, v.len));
+	defer allocator.free(work);
+	const got = divModBurnikelZiegler(&u, u.len, &v, v.len, &q, &r, work);
+	try testing.expectEqual(@as(usize, 1), got.q_len);
+	try testing.expectEqual(@as(u8, 0xFE), q[0]);
+	try testing.expectEqual(@as(usize, 1), got.r_len);
+	try testing.expectEqual(@as(u8, 0x03), r[0]);
+}
+
+test "divModBurnikelZiegler: single-byte divisor degenerate case (256 / 3)" {
+	// 256 = 85*3 + 1; checks the v_len == 1 branch.
+	const allocator = std.testing.allocator;
+	const u = [_]u8{ 0x00, 0x01 };
+	const v = [_]u8{ 0x03 };
+	var q: [4]u8 = undefined;
+	var r: [4]u8 = undefined;
+	const work = try allocator.alloc(u8, divModBurnikelZieglerScratchNeed(u.len, v.len));
+	defer allocator.free(work);
+	const got = divModBurnikelZiegler(&u, u.len, &v, v.len, &q, &r, work);
+	try testing.expectEqual(@as(usize, 1), got.q_len);
+	try testing.expectEqual(@as(u8, 85), q[0]);
+	try testing.expectEqual(@as(usize, 1), got.r_len);
+	try testing.expectEqual(@as(u8, 1), r[0]);
+}
+
+test "divModBurnikelZiegler: cross-check vs divModKnuth on 200 random pairs" {
+	// Once the recursive B-Z path lands, this test guards against drift between
+	// the recursive path and the (canonical) Knuth D baseline. While the stub
+	// just delegates, this serves as a smoke test that the API contract is
+	// stable across sizes.
+	const allocator = std.testing.allocator;
+	var rng = std.Random.DefaultPrng.init(0xB12B1ECE_C0DEBA5E);
+	const r_rng = rng.random();
+	var trial: usize = 0;
+	while (trial < 200) : (trial += 1) {
+		// Use sizes that span the eventual B-Z threshold (~256 bytes).
+		const u_len = 16 + @as(usize, r_rng.uintLessThan(u32, 480));
+		const v_len = 4 + @as(usize, r_rng.uintLessThan(u32, @intCast(u_len - 4)));
+		const u = try allocator.alloc(u8, u_len);
+		defer allocator.free(u);
+		const v = try allocator.alloc(u8, v_len);
+		defer allocator.free(v);
+		for (u) |*p| p.* = r_rng.int(u8);
+		for (v) |*p| p.* = r_rng.int(u8);
+		if (u[u_len - 1] == 0) u[u_len - 1] = 1;
+		if (v[v_len - 1] == 0) v[v_len - 1] = 1;
+
+		const q_ref = try allocator.alloc(u8, u_len + 1);
+		defer allocator.free(q_ref);
+		const r_ref = try allocator.alloc(u8, v_len);
+		defer allocator.free(r_ref);
+		const work_ref = try allocator.alloc(u8, divModKnuthScratchNeed(u_len, v_len));
+		defer allocator.free(work_ref);
+		const got_ref = divModKnuth(u, u_len, v, v_len, q_ref, r_ref, work_ref);
+
+		const q_bz = try allocator.alloc(u8, u_len + 1);
+		defer allocator.free(q_bz);
+		const r_bz = try allocator.alloc(u8, v_len);
+		defer allocator.free(r_bz);
+		const work_bz = try allocator.alloc(u8, divModBurnikelZieglerScratchNeed(u_len, v_len));
+		defer allocator.free(work_bz);
+		const got_bz = divModBurnikelZiegler(u, u_len, v, v_len, q_bz, r_bz, work_bz);
+
+		testing.expectEqual(got_ref.q_len, got_bz.q_len) catch |e| {
+			std.debug.print("trial {d}: u_len={d} v_len={d}\n", .{ trial, u_len, v_len });
+			return e;
+		};
+		try testing.expectEqualSlices(u8, q_ref[0..got_ref.q_len], q_bz[0..got_bz.q_len]);
+		try testing.expectEqual(got_ref.r_len, got_bz.r_len);
+		try testing.expectEqualSlices(u8, r_ref[0..got_ref.r_len], r_bz[0..got_bz.r_len]);
 	}
 }
