@@ -338,15 +338,21 @@ Every M14-N item lands as: (a) failing test added that exercises the API as the 
 - [ ] **M13-B3 — Jacobi / Legendre / Kronecker symbols**: `Mp.jacobi(a, n)` (n odd positive), `Mp.legendre` (n odd prime; alias to jacobi but doc-distinct), `Mp.kronecker(a, n)` (extends to all n via Kronecker rules). Standard reciprocity-based recursion with bit-tricks for the (2/n) case. Tests: known values (Jacobi(2/15)=1, (3/15)=0, etc.), cross-check vs `mpz_jacobi`/`mpz_kronecker` on 500 random pairs.
 - [ ] **M13-B4 — Combinatorial**: `Mp.factorial(out, n)` (n: u32), `Mp.binomial(out, n, k)` (n: u32, k: u32), `Mp.fibonacci(out, n)` (n: u32, fast-doubling identity). Mostly throughput-bound on existing `mul`. Tests: small known values 0..20!, binomial(50, 25) = 126410606437752, fib(100), GMP cross-check at fac(1000), fib(10000).
 
-## Milestone 15 — Complete the storage-paradigm victory (limbless divMod)
+## Milestone 15 — Complete the storage-paradigm victory (fully limbless)
 
-**Goal:** Eliminate the last remaining `[]u64` fixed-width-limb array allocation from blip_mp's main arithmetic paths. Today blip_mp's add/sub/mul/sqr/mulU64/toString/etc. all operate **byte-direct** — payload bytes are read on demand into transient u64 register values (`readInt(u64, payload[i*8..][0..8], .little)`). Those u64s live in CPU registers for the duration of one inner-loop iteration, then evaporate. They are **values**, not stored limbs.
+**Goal:** Eliminate ALL `[]u64` fixed-width-limb-array storage from blip_mp, including the FFT NTT path. Today blip_mp's add/sub/mul/sqr/mulU64/toString/etc. all operate **byte-direct** — payload bytes are read on demand into transient u64 register values (`readInt(u64, payload[i*8..][0..8], .little)`). Those u64s live in CPU registers for the duration of one inner-loop iteration, then evaporate. They are **values**, not stored limbs.
 
-**One exception:** `tier3DivModSignedLarge` (`tier3.zig:2241`) packs the BLIP payload into a heap-allocated `[]u64` u_lim/v_lim limb array via `payloadToMagLimbs`, runs Knuth Algorithm D on it, then unpacks back to bytes via `writeMagLimbsAsTwosComp`. This is the one place "limb" is a meaningful *storage* concept in blip_mp.
+**Two remaining exceptions** to retire:
+1. `tier3DivModSignedLarge` (`tier3.zig:2241`) packs the BLIP payload into a heap-allocated `[]u64` u_lim/v_lim limb array via `payloadToMagLimbs`, runs Knuth Algorithm D on it, then unpacks back to bytes via `writeMagLimbsAsTwosComp`.
+2. The FFT NTT path (`fft.zig`) stores NTT residues in `[]u64` arrays (`fft_scratch.pa`/`pb`/`tw_fwd`/`tw_inv`/`stockham`).
 
-(The FFT NTT path also uses `[]u64` arrays for modular-ring element storage, but that's **mathematically required** — NTT operates in ℤ/pℤ for an NTT-friendly prime p and needs uniform-width modular arithmetic. It's an algorithmic requirement, not a representational choice. After M15, the claim "blip_mp is limbless except where the underlying mathematics genuinely demands fixed-width modular arithmetic" is honestly true.)
+**Important nuance** (clarified 2026-05-16 per Peter): the FFT's `[]u64` storage is a *representational choice*, NOT a mathematical requirement. What IS mathematically required is **u64-wide modular arithmetic** for the NTT ring operations (multiply two residues → u128 product → reduce mod p → u64 residue). The STORAGE for those residues can be a byte buffer with chunked u64 reads/writes (`readChunkOrZero` / `writeChunkTruncated`) just as easily as a `[]u64` array — both compile to the same machine code in ReleaseFast since chunked reads at 8-byte-aligned offsets are a single LDR. The only thing that changes is the buffer's type signature.
 
-**Research already done** (2026-05-16 session): byte-direct Knuth D is feasible. No published variant exists in the literature (GMP, BearSSL, Java BigInteger, num-bigint, Zig std `math.big` all use uniform-limb storage) — but the math allows it. The inner-loop u64 arithmetic stays unchanged (preserves the 36× speedup over the byte-base divMod that was retired in M51); only the marshalling shim disappears. Estimated win: ~5-15% on divMod at 2K-8K bit (the size where marshalling overhead is meaningful), no regression elsewhere. Sub-task ordering matters — do B-Z first because it's the bigger general-purpose win AND it can be designed byte-direct from day one.
+So fully-limbless is achievable, and the architectural claim becomes the cleaner:
+
+> **blip_mp stores ALL values — including FFT NTT intermediates — as byte buffers. Arithmetic always operates via chunked u64 register reads/writes. There is no `[]u64` storage type in the library. Fixed-width modular arithmetic is a property of the *operations*, not of the *storage*.**
+
+**Research already done** (2026-05-16 session): byte-direct Knuth D is feasible. No published variant exists in the literature (GMP, BearSSL, Java BigInteger, num-bigint, Zig std `math.big` all use uniform-limb storage) — but the math allows it. The inner-loop u64 arithmetic stays unchanged (preserves the 36× speedup over the byte-base divMod that was retired in M51); only the marshalling shim disappears. Estimated win: ~5-15% on divMod at 2K-8K bit (the size where marshalling overhead is meaningful), no regression elsewhere. Sub-task ordering matters — do B-Z first because it's the bigger general-purpose win AND it can be designed byte-direct from day one. FFT migration is mostly mechanical (last to land, after divMod is done).
 
 ### M15-1 — Burnikel-Ziegler recursive division (byte-direct from day one)
 - [ ] Implement `tier3.divModBurnikelZiegler` as a 2n/n recursive divider. Inputs/outputs are `[]u8` byte payloads. Inner-loop arithmetic uses chunked-u64 reads via existing `readChunkOrZero`/`writeChunkTruncated` primitives. The recursion eventually bottoms out into the existing `divModKnuthU64` kernel as the small-divisor base case (~2-3K bit threshold, empirically tuned).
@@ -364,21 +370,30 @@ Every M14-N item lands as: (a) failing test added that exercises the API as the 
 - [ ] **Verification strategy:** keep the existing `divModKnuthU64` as `divModKnuthLimbsLegacy`, run both in parallel under a debug feature flag for 10K+ cross-check iterations covering every partial-chunk width × every sign combo × every normalization shift amount. Assert bit-identical output. Drop the legacy after a green run.
 - [ ] **Expected impact:** ~5-15% on divMod at 2K-8K bit (eliminates `payloadToMagLimbs` + `writeMagLimbsAsTwosComp` allocation + memcpy on the hot path). Larger relative win at smaller sizes.
 
-### M15-3 — Storage-paradigm completeness audit
-- [ ] Grep audit: `rg '\[\]u64' src/tier3.zig src/bignum.zig` should return zero hits for ARITHMETIC paths after M15-2 lands. Acceptable remaining hits: (a) FFT NTT path in `fft.zig` (mathematical requirement); (b) `fft_scratch` cache; (c) test code; (d) inline-loop locals (`var carry: u64 = 0;` etc. — those are values, not arrays).
-- [ ] Update `RESULTS.md` "Architecture" section to claim "limbless except FFT" with the audit as evidence.
-- [ ] Update `README.md` "Architecture in one paragraph" to drop the implicit-limb language (currently the byte-direct claim has the divMod exception we'd be retiring).
-- [ ] Update `CODE_MINIMAP.md` for `tier3DivModSignedLarge` — note it no longer packs to limbs.
+### M15-3 — Migrate FFT NTT storage from `[]u64` to byte buffers
+- [ ] Convert `FftScratch.pa`, `pb`, `tw_fwd`, `tw_inv`, `stockham` from `[]u64` to `[]u8` (sized as `N * 8` bytes each, 8-aligned via aligned allocator). Each "residue slot" is an 8-byte chunk holding a u64 modular value (typically 30-bit for the standard NTT-friendly prime).
+- [ ] Replace all `pa[i]` / `pb[i]` etc. indexing with `readInt(u64, pa[i*8..][0..8], .little)` and `writeInt(u64, pa[i*8..][0..8], val, .little)`. Or wrap in a thin inline helper `residue(buf, i)` / `setResidue(buf, i, val)`.
+- [ ] Verify NTT correctness with the existing FFT mul test suite (8240+ cross-validation tests pass at sizes up to 256K-bit). Bit-identical output required.
+- [ ] Verify no perf regression — the chunked-u64 reads at 8-aligned offsets compile to single LDR/STR (verify by inspecting LLVM IR or objdump). If a regression appears at the FFT inner loop, fall back to a typed-view approach (`@ptrCast` the `[]u8` buffer to `[*]u64` at function entry, then index normally — semantically equivalent, type-safer locally, still backed by byte storage).
+- [ ] **Expected impact:** zero perf delta (same machine code), but **the `[]u64` storage type is now eliminated from blip_mp entirely**. The architectural claim becomes fully honest.
+- [ ] **Note:** the FFT_THRESHOLD is still 99999 (FFT path gated off in production) for unrelated perf reasons (M6-4-E ladder). M15-3 makes the storage migration anyway so when FFT does get enabled, the storage is already byte-native.
+
+### M15-4 — Storage-paradigm completeness audit + docs
+- [ ] Grep audit: `rg '\[\]u64' src/` should return ZERO hits for storage allocations (all of: tier3.zig, bignum.zig, fft.zig, string_io.zig, sign.zig, encoding.zig). Acceptable remaining hits: (a) test code; (b) inline-loop locals (`var carry: u64 = 0;` etc. — those are values, not arrays); (c) function-parameter views like `(buf: []u8) ... readInt(u64, buf[...], ...)` (those are byte buffers being viewed as u64, not u64 arrays).
+- [ ] Update `RESULTS.md` "Architecture" section to claim **fully limbless** with the audit as evidence.
+- [ ] Update `README.md` "Architecture in one paragraph" to drop the implicit-limb language and replace with the clean claim: "No `[]u64` storage anywhere — even FFT NTT intermediates live in byte buffers. Fixed-width modular arithmetic is a property of the *operations*, not of the *storage*."
+- [ ] Update `CODE_MINIMAP.md` for `tier3DivModSignedLarge` (no longer packs to limbs) and `FftScratch` (now byte-backed).
+- [ ] Consider an explicit `IsBlipMpLimbless()` compile-time test that statically asserts no `[]u64` field types exist in any struct in `src/` (or similar machine-checkable invariant).
 
 ### Sequencing
-M15-1 (B-Z) lands first — biggest general-purpose win, designed byte-direct from the start, and B-Z's existence makes the Knuth D path the small-divisor minority case (so even if M15-2 slips, the architectural claim is mostly true: "main divMod path is byte-direct, only the small-divisor fallback uses packed limbs"). M15-2 (byte-direct Knuth D) completes the picture and is the smaller standalone effort. M15-3 (audit + docs) ships when both M15-1 and M15-2 are green.
+M15-1 (B-Z) lands first — biggest general-purpose win, designed byte-direct from the start. M15-2 (byte-direct Knuth D) completes divMod's byte-direct picture. M15-3 (FFT storage migration) is mostly mechanical and last — should be a small, contained PR. M15-4 (audit + docs) lands when all three are green.
 
 ### Out of scope for M15
 - **Newton-Raphson reciprocal** for repeated-divisor contexts (powm's Montgomery loop). Possible future work if a workload demands it. The research-agent's analysis was: NR is wrong for pi spigot (divisor changes every iter), but right for any constant-modulus-many-divisions workload. Park as a future milestone if/when one materializes.
 - **Barrett reduction.** Montgomery is already 21% faster than GMP at 1024-bit powm; Barrett wouldn't add anything for that workload.
 
 ### Terminology note (added 2026-05-16 per Peter)
-Going forward, **"limb"** is used ONLY for genuinely stored fixed-width `[]u64` array elements (currently just FFT NTT and divMod's about-to-be-retired internals). **"u64 chunk"** or **"u64 view"** is the correct term for blip_mp's byte-direct register-resident reads. A u64 that lives in a CPU register for one inner-loop iteration is a *value*, not a limb. This distinction motivates M15: today the word "limb" is doing real work in our divMod internals; after M15 it's only doing work in the FFT (where it's mathematically required).
+Going forward, **"limb"** is used ONLY for genuinely stored fixed-width `[]u64` array elements. After M15 lands, no such storage exists in blip_mp at all — "limb" becomes a word we use exclusively to describe GMP's representation, never our own. **"u64 chunk"** or **"u64 view"** is the correct term for blip_mp's byte-direct register-resident reads. A u64 that lives in a CPU register for one inner-loop iteration is a *value*, not a limb. The distinction matters: it's what lets us claim **storage-paradigm independence** — bytes are the value, all the way through, including in the frequency domain.
 
 ## Open follow-ups (ranked)
 
