@@ -1725,6 +1725,115 @@ inline fn shiftRightByBitsMag(buf: []u8, len: usize, s: u3) usize {
 // will replace that leaf with a byte-direct Knuth D so the entire tree is
 // byte-direct.
 
+/// 2n/n recursive divider (Burnikel-Ziegler Algorithm 2): given u of length 2n
+/// and v of length n with v[n-1] top bit set (normalized), compute Q (≤ n bytes
+/// canonical) and R (≤ n bytes canonical) such that u = Q·v + R, 0 ≤ R < v.
+///
+/// Strategy: split u into two halves, perform two 3n/2-by-n divisions via
+/// `bzDiv3n_2n`, concatenate the partial quotients. Each call to bzDiv3n_2n
+/// consumes the top 3n/2 of (u || prev_remainder).
+///
+/// Preconditions:
+///   - u.len == 2 * n
+///   - v.len == n; v[n-1] >> 7 == 1 (top bit set / normalized)
+///   - n is even (n/2 must be integer; needed for the split)
+///   - n >= 2
+///   - q_out.len >= n + 1 (carry slack)
+///   - r_out.len >= n
+fn bzDiv2nByN(
+	u: []const u8, n: usize,
+	v: []const u8,
+	q_out: []u8, r_out: []u8,
+	allocator: std.mem.Allocator,
+) std.mem.Allocator.Error!struct { q_len: usize, r_len: usize } {
+	std.debug.assert(u.len == 2 * n);
+	std.debug.assert(v.len == n);
+	std.debug.assert(n >= 2 and n % 2 == 0);
+	std.debug.assert((v[n - 1] >> 7) == 1);
+
+	const half = n / 2;
+
+	// First sub-divide: top 3n/2 of u (= u[half..2n]) by v.
+	const dividend1 = u[half .. 2 * n]; // length 3n/2
+	const sub1_q = try allocator.alloc(u8, half + 1);
+	defer allocator.free(sub1_q);
+	const sub1_r = try allocator.alloc(u8, n);
+	defer allocator.free(sub1_r);
+	const got1 = try bzDiv3n_2n(dividend1, n, v, sub1_q, sub1_r, allocator);
+	// got1.q_len ≤ half (algorithm invariant); got1.r_len ≤ n.
+
+	// Second sub-divide: [u[0..half] || R1] (length 3n/2) by v.
+	const dividend2 = try allocator.alloc(u8, 3 * half); // 3n/2 bytes
+	defer allocator.free(dividend2);
+	@memset(dividend2, 0);
+	@memcpy(dividend2[0..half], u[0..half]);
+	@memcpy(dividend2[half .. half + got1.r_len], sub1_r[0..got1.r_len]);
+	const sub2_q = try allocator.alloc(u8, half + 1);
+	defer allocator.free(sub2_q);
+	const sub2_r = try allocator.alloc(u8, n);
+	defer allocator.free(sub2_r);
+	const got2 = try bzDiv3n_2n(dividend2, n, v, sub2_q, sub2_r, allocator);
+
+	// Combine: Q = Q1·β^half + Q2 (LE: low half = Q2, high half = Q1).
+	@memset(q_out[0 .. n + 1], 0);
+	@memcpy(q_out[0..got2.q_len], sub2_q[0..got2.q_len]);
+	@memcpy(q_out[half .. half + got1.q_len], sub1_q[0..got1.q_len]);
+	var q_len: usize = half + got1.q_len;
+	if (q_len == 0 or got1.q_len == 0) {
+		// Q1 == 0 → Q = Q2 only.
+		q_len = got2.q_len;
+	}
+	while (q_len > 0 and q_out[q_len - 1] == 0) q_len -= 1;
+
+	// R = R2.
+	@memcpy(r_out[0..got2.r_len], sub2_r[0..got2.r_len]);
+	return .{ .q_len = q_len, .r_len = got2.r_len };
+}
+
+/// 3n/2-by-n recursive divider (Burnikel-Ziegler Algorithm 3). Currently a
+/// stub: delegates to byte-direct Knuth D. Real recursive form lands in the
+/// next commit (mutual recursion with `bzDiv2nByN` at half-size).
+///
+/// Preconditions:
+///   - u.len == 3 * (n / 2)  (caller passes exactly the 3n/2-byte view)
+///   - v.len == n; v normalized as in bzDiv2nByN
+///   - n is even, n >= 2
+///   - q_out.len >= n/2 + 1
+///   - r_out.len >= n
+fn bzDiv3n_2n(
+	u: []const u8, n: usize,
+	v: []const u8,
+	q_out: []u8, r_out: []u8,
+	allocator: std.mem.Allocator,
+) std.mem.Allocator.Error!struct { q_len: usize, r_len: usize } {
+	std.debug.assert(u.len == 3 * (n / 2));
+	std.debug.assert(v.len == n);
+	std.debug.assert(n >= 2 and n % 2 == 0);
+
+	// Trim u to canonical length.
+	var u_len: usize = u.len;
+	while (u_len > 0 and u[u_len - 1] == 0) u_len -= 1;
+	if (u_len == 0) {
+		// Zero dividend.
+		return .{ .q_len = 0, .r_len = 0 };
+	}
+
+	// v's top is normalized, so v_len == n (no trailing-zero trim possible).
+	const v_len = n;
+
+	// Knuth D requires u_len >= v_len AND v_len >= 2. v_len = n >= 2 is
+	// guaranteed. If u_len < v_len, q = 0, r = u — handle directly.
+	if (u_len < v_len) {
+		@memcpy(r_out[0..u_len], u[0..u_len]);
+		return .{ .q_len = 0, .r_len = u_len };
+	}
+
+	const work = try allocator.alloc(u8, divModKnuthScratchNeed(u_len, v_len));
+	defer allocator.free(work);
+	const got = divModKnuth(u, u_len, v, v_len, q_out, r_out, work);
+	return .{ .q_len = got.q_len, .r_len = got.r_len };
+}
+
 /// Burnikel-Ziegler recursive divider. Byte-direct magnitude-only API
 /// (caller handles signs). Currently a transparent delegation to the
 /// existing Knuth D byte-direct kernel — recursive logic lands in
@@ -5348,6 +5457,57 @@ test "montMul: 8-limb (512-bit) random equivalence to schoolbook + Knuth div" {
 // ────────────────────────────────────────────────────────────────────────────
 // M15-1: Burnikel-Ziegler recursive divider — failing tests (TDD-first)
 // ────────────────────────────────────────────────────────────────────────────
+
+test "bzDiv2nByN: cross-check vs divModKnuth at n=2,4,8,16,32 bytes" {
+	// Spec: u has length 2n, v has length n, v[n-1] != 0 (caller normalized).
+	// Output: Q (canonical, ≤ n bytes), R (canonical, ≤ n bytes).
+	const allocator = std.testing.allocator;
+	var rng = std.Random.DefaultPrng.init(0xB12B_12B1_AAAA_BBBB);
+	const r_rng = rng.random();
+	const sizes = [_]usize{ 2, 4, 8, 16, 32 };
+	for (sizes) |n| {
+		var trial: usize = 0;
+		while (trial < 40) : (trial += 1) {
+			const u = try allocator.alloc(u8, 2 * n);
+			defer allocator.free(u);
+			const v = try allocator.alloc(u8, n);
+			defer allocator.free(v);
+			for (u) |*p| p.* = r_rng.int(u8);
+			for (v) |*p| p.* = r_rng.int(u8);
+			// Ensure v's top byte is non-zero AND has top bit set (normalized).
+			v[n - 1] |= 0x80;
+			// Ensure u's top byte is non-zero so cross-check sees full length.
+			if (u[2 * n - 1] == 0) u[2 * n - 1] = 1;
+
+			// Reference: Knuth D on canonicalized inputs.
+			var u_len_ref: usize = 2 * n;
+			while (u_len_ref > 0 and u[u_len_ref - 1] == 0) u_len_ref -= 1;
+			var v_len_ref: usize = n;
+			while (v_len_ref > 0 and v[v_len_ref - 1] == 0) v_len_ref -= 1;
+			const q_ref = try allocator.alloc(u8, u_len_ref + 1);
+			defer allocator.free(q_ref);
+			const r_ref = try allocator.alloc(u8, v_len_ref);
+			defer allocator.free(r_ref);
+			const work_ref = try allocator.alloc(u8, divModKnuthScratchNeed(u_len_ref, v_len_ref));
+			defer allocator.free(work_ref);
+			const got_ref = divModKnuth(u, u_len_ref, v, v_len_ref, q_ref, r_ref, work_ref);
+
+			const q_bz = try allocator.alloc(u8, n + 1);
+			defer allocator.free(q_bz);
+			const r_bz = try allocator.alloc(u8, n);
+			defer allocator.free(r_bz);
+			const got_bz = try bzDiv2nByN(u, n, v, q_bz, r_bz, allocator);
+
+			testing.expectEqual(got_ref.q_len, got_bz.q_len) catch |e| {
+				std.debug.print("n={d} trial={d}: q_len mismatch\n", .{ n, trial });
+				return e;
+			};
+			try testing.expectEqualSlices(u8, q_ref[0..got_ref.q_len], q_bz[0..got_bz.q_len]);
+			try testing.expectEqual(got_ref.r_len, got_bz.r_len);
+			try testing.expectEqualSlices(u8, r_ref[0..got_ref.r_len], r_bz[0..got_bz.r_len]);
+		}
+	}
+}
 
 test "shiftLeftByBitsMag: shift by 0 is rejected by assert (no-op contract violation)" {
 	// Helper requires s in 1..7. s=0 should be handled by caller as no-op (memcpy).
