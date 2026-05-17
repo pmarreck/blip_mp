@@ -400,6 +400,39 @@ Going forward, **"limb"** is used ONLY for genuinely stored fixed-width `[]u64` 
 
 The `bp` tool serves the architectural mandate (CLI dogfoods the C FFI, not direct Zig import). It's a Forth-style stack calculator that lets users do exact arbitrary-precision arithmetic from the shell.
 
+## GMP-parity striving (2026-05-17 session findings)
+
+User goal: match or beat GMP at all sizes. Honest current state on M4 aarch64
+(bench variance is high — 17-60% run-to-run under thermal load — so all numbers
+±30%):
+
+| Op | blip strength | blip gap to GMP |
+|----|---------------|-----------------|
+| mul | **WINS 1.08-1.63× across 128-bit through 8K-bit** | loses 1.35-1.70× at 16K+ (GMP uses FFT) |
+| powm | **WINS 7-12% at RSA-2048/3072** | tied at 1024-bit, 4.8% behind at 512-bit |
+| divMod | competitive at 256-bit | 1.30-1.42× behind at 1K-8K (inner-kernel gap); 1.65-2.55× at 16K-64K (GMP uses Mu-Division/BZ) |
+| invMod | — | **2.7-3.6× behind across all tested sizes** (256-bit through 2048-bit) |
+
+### Optimization attempts this session
+
+**Shipped (perf-neutral correctness improvements):**
+- `divModKnuthU64`: alias `v→vn` when s=0 (skip normalization memcpy). 1-4% measured but within noise.
+- B-Z thread-local arena (`tier3.bzArena`). Cuts B-Z's per-call malloc cost ~43% but B-Z still 15× slower than limb-Knuth at common sizes; scaffold for future.
+
+**Reverted (failed micro-optimizations):**
+- mul-sub unroll-by-2: regresses 17-25% at sizes ≥ 2K-bit (register pressure / dependency chain serialization).
+- `noalias` annotations: regresses ~2× across all sizes (Zig's noalias has different semantics than C restrict here).
+- GMP-style single-`cl` carry-borrow chain: regresses 14-35% at sizes ≥ 1K-bit (LLVM gives more ILP slack with two separate chains).
+- Raised classical-EEA threshold for invMod from 96 to 256 bits: classical is 5× slower than Lehmer at 256-bit; original dispatch was correct.
+
+### Identified-but-deferred levers
+
+1. **Hand-asm aarch64 inner loops** (mpn_submul_1 equivalent). Would close the 1.3-1.4× mid-size divMod gap. Substantial fragile work; high risk of regression on x86_64.
+2. **Stein's binary GCD with Bezout tracking** for small invMod. Would close the 2.7-3.6× invMod gap at 256-2048 bits. Substantial new algorithm.
+3. **FFT mul activation** (continuing M6-4-E.3 NEON inline asm). Would close the 1.65-2.55× large-size divMod gap by making B-Z viable in production.
+4. **Specialized 2-limb divisor divider** (mpn_divrem_2 equivalent). Modest gain at 256-bit divMod.
+5. **Statistical bench harness** (hyperfine wrapper or N-run aggregation). **Critical prerequisite** for further work: current single-run bench variance (17-60%) under thermal load makes 1-10% optimization gains unmeasurable.
+
 ## Open follow-ups (ranked)
 
 - [ ] **M6-4-E.3** — hand-scheduled aarch64 inline asm for the FFT butterfly inner loop. Would close the residual 13-15% FFT-vs-Toom-3 gap on M-series and finally enable FFT_THRESHOLD < 99999 in production. **Status update (2026-05-04):** x86_64 picture has now landed (see x86_64 task below). On x86_64-linux Zen 4, GMP-asm advantage over GMP-noasm is 1.65–3.88× — the equivalent x86_64 hand-asm investment is large but its target is well-defined. The M-series-specific NEON inline-asm work for FFT butterflies is now justified on its own merits (closes a real ~13-15% gap that nothing else will), with no need to wait further. Fragile but isolated to one inner loop.
