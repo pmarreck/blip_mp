@@ -1751,7 +1751,7 @@ fn bzDiv2nByN(
 	std.debug.assert(n >= 2);
 	std.debug.assert((v[n - 1] >> 7) == 1);
 
-	// Odd n forces Knuth — bzDiv3n_2n's recursion needs even n to split.
+	// Odd n forces leaf — bzDiv3n_2n's recursion needs even n to split.
 	if ((n & 1) != 0) {
 		var u_len: usize = 2 * n;
 		while (u_len > 0 and u[u_len - 1] == 0) u_len -= 1;
@@ -1760,9 +1760,7 @@ fn bzDiv2nByN(
 			@memcpy(r_out[0..u_len], u[0..u_len]);
 			return .{ .q_len = 0, .r_len = u_len };
 		}
-		const work = try allocator.alloc(u8, divModKnuthScratchNeed(u_len, n));
-		defer allocator.free(work);
-		const got = divModKnuth(u, u_len, v, n, q_out, r_out, work);
+		const got = try divModBZLeaf(u, u_len, v, n, q_out, r_out, allocator);
 		return .{ .q_len = got.q_len, .r_len = got.r_len };
 	}
 
@@ -1810,6 +1808,76 @@ fn bzDiv2nByN(
 /// correctness this can be any value ≥ 2.
 const BZ_RECURSE_THRESHOLD: usize = 4;
 
+/// Leaf divider used by the B-Z recursion. Picks the fastest available
+/// kernel for the operand sizes: byte-direct `divModKnuth` for single-
+/// limb divisors (v_len ≤ 8), limb-packed `divModKnuthU64` for ≥ 2 limb
+/// divisors. The pack/unpack at the leaf boundary is a single @memcpy
+/// in each direction since LE bytes and LE u64 limbs are bit-identical
+/// at 8-byte-aligned offsets.
+fn divModBZLeaf(
+	u_pay: []const u8, u_pay_len: usize,
+	v_pay: []const u8, v_pay_len: usize,
+	q_out: []u8, r_out: []u8,
+	allocator: std.mem.Allocator,
+) std.mem.Allocator.Error!struct { q_len: usize, r_len: usize } {
+	// Small divisors (≤ 8 bytes = 1 limb): byte-direct Knuth is correct and
+	// avoids divModKnuthU64's v_len >= 2 (limb) precondition.
+	if (v_pay_len <= 8) {
+		const work = try allocator.alloc(u8, divModKnuthScratchNeed(u_pay_len, v_pay_len));
+		defer allocator.free(work);
+		const got = divModKnuth(u_pay, u_pay_len, v_pay, v_pay_len, q_out, r_out, work);
+		return .{ .q_len = got.q_len, .r_len = got.r_len };
+	}
+
+	// Limb-packed path: allocate a single 8-byte-aligned scratch covering
+	// u (with D1 carry slot) + v + q + r limb regions, blit bytes in, run
+	// divModKnuthU64, blit back. Same machine code as the limb path inside
+	// divModSignedLarge — but with byte-payload I/O at the boundary.
+	const u_limbs = (u_pay_len + 7) / 8 + 1; // +1 slot for D1 normalization carry-out
+	const v_limbs = (v_pay_len + 7) / 8;
+	const q_limbs = u_limbs;
+	const r_limbs = v_limbs;
+	const total_bytes = (u_limbs + v_limbs + q_limbs + r_limbs) * 8;
+
+	const buf = try allocator.alignedAlloc(u8, .@"8", total_bytes);
+	defer allocator.free(buf);
+	@memset(buf, 0);
+
+	var off: usize = 0;
+	const u_buf = buf[off .. off + u_limbs * 8];
+	off += u_limbs * 8;
+	const v_buf = buf[off .. off + v_limbs * 8];
+	off += v_limbs * 8;
+	const q_buf = buf[off .. off + q_limbs * 8];
+	off += q_limbs * 8;
+	const r_buf = buf[off .. off + r_limbs * 8];
+
+	@memcpy(u_buf[0..u_pay_len], u_pay[0..u_pay_len]);
+	@memcpy(v_buf[0..v_pay_len], v_pay[0..v_pay_len]);
+
+	const u_lim: []u64 = @alignCast(std.mem.bytesAsSlice(u64, u_buf));
+	const v_lim_const: []const u64 = @alignCast(std.mem.bytesAsSlice(u64, v_buf));
+	const q_lim: []u64 = @alignCast(std.mem.bytesAsSlice(u64, q_buf));
+	const r_lim: []u64 = @alignCast(std.mem.bytesAsSlice(u64, r_buf));
+
+	const u_lim_len_canon = (u_pay_len + 7) / 8;
+	const v_lim_len_canon = (v_pay_len + 7) / 8;
+
+	const got = divModKnuthU64(u_lim, u_lim_len_canon, v_lim_const, v_lim_len_canon, q_lim, r_lim);
+
+	// Bytes back. divModKnuthU64 returns canonical limb lengths; we still
+	// need to trim trailing-zero bytes within the top limb.
+	var q_byte_len: usize = got.q_len * 8;
+	while (q_byte_len > 0 and q_buf[q_byte_len - 1] == 0) q_byte_len -= 1;
+	@memcpy(q_out[0..q_byte_len], q_buf[0..q_byte_len]);
+
+	var r_byte_len: usize = got.r_len * 8;
+	while (r_byte_len > 0 and r_buf[r_byte_len - 1] == 0) r_byte_len -= 1;
+	@memcpy(r_out[0..r_byte_len], r_buf[0..r_byte_len]);
+
+	return .{ .q_len = q_byte_len, .r_len = r_byte_len };
+}
+
 /// In-place decrement of a canonical LE magnitude buffer. `len_ptr` is
 /// updated to reflect the new canonical length. Caller must guarantee
 /// `buf[0..len_ptr.*]` represents a value > 0.
@@ -1856,9 +1924,10 @@ fn bzDiv3n_2n(
 	std.debug.assert(n >= 2 and n % 2 == 0);
 	std.debug.assert((v[n - 1] >> 7) == 1);
 
-	// Base case: small n OR odd n → byte-direct Knuth D. Odd n must bottom
-	// out here because the recursive case calls bzDiv2nByN at half scale,
-	// which requires n be even (to split halves cleanly).
+	// Base case: small n OR odd n → leaf divider (limb-Knuth for ≥ 2 limbs,
+	// byte-Knuth otherwise). Odd n must bottom out here because the recursive
+	// case calls bzDiv2nByN at half scale, which requires n be even (to
+	// split halves cleanly).
 	if (n < BZ_RECURSE_THRESHOLD or (n & 1) != 0) {
 		var u_len: usize = u.len;
 		while (u_len > 0 and u[u_len - 1] == 0) u_len -= 1;
@@ -1867,9 +1936,7 @@ fn bzDiv3n_2n(
 			@memcpy(r_out[0..u_len], u[0..u_len]);
 			return .{ .q_len = 0, .r_len = u_len };
 		}
-		const work = try allocator.alloc(u8, divModKnuthScratchNeed(u_len, n));
-		defer allocator.free(work);
-		const got = divModKnuth(u, u_len, v, n, q_out, r_out, work);
+		const got = try divModBZLeaf(u, u_len, v, n, q_out, r_out, allocator);
 		return .{ .q_len = got.q_len, .r_len = got.r_len };
 	}
 

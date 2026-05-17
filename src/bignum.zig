@@ -2950,7 +2950,7 @@ fn powmMontgomery(r: *Mp, base_red: *const Mp, exp: *const Mp, m: *const Mp, w: 
 /// caching to eliminate per-call malloc. Until those land, the existing
 /// limb-Knuth path with Möller-Granlund reciprocal q_hat is faster up
 /// through the largest tested size (8K-bit).
-const BZ_INTEGRATION_THRESHOLD: usize = 99999; // effectively disabled
+const BZ_INTEGRATION_THRESHOLD: usize = 99999; // gated off; needs Karatsuba-in-mul to win
 
 fn tier3DivModOp(q: *Mp, rem: *Mp, a: *const Mp, b: *const Mp) ArithError!void {
 	const a_bytes = a.bytes();
