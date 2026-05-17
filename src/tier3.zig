@@ -1808,6 +1808,83 @@ fn bzDiv2nByN(
 /// correctness this can be any value ≥ 2.
 const BZ_RECURSE_THRESHOLD: usize = 4;
 
+/// Magnitude multiplication with auto-dispatch to Toom-3 / Karatsuba / chunked
+/// schoolbook based on operand sizes. Equal-length operands ≥ TOOM3_THRESHOLD
+/// route to Toom-3; ≥ KARATSUBA_THRESHOLD route to Karatsuba; below or for
+/// unequal lengths, chunked-u64 schoolbook. Allocates internal scratch via
+/// the supplied allocator (for Karatsuba/Toom paths only). Pads the shorter
+/// operand with leading zeros to enable the equal-length sub-quadratic paths
+/// when one operand is just under the other.
+///
+/// Used by B-Z's internal multiplication (D = Q · B2). The recursion's
+/// algorithmic speedup over O(n²) Knuth depends on M(n) being sub-quadratic,
+/// so the right answer for B-Z is "always use the fastest mul available".
+fn mulMagAuto(
+	a: []const u8, b: []const u8,
+	r: []u8,
+	allocator: std.mem.Allocator,
+) std.mem.Allocator.Error!void {
+	std.debug.assert(r.len >= a.len + b.len);
+	if (a.len == 0 or b.len == 0) {
+		@memset(r[0 .. a.len + b.len], 0);
+		return;
+	}
+
+	const longer_len = @max(a.len, b.len);
+
+	// Schoolbook fast path: below the sub-quadratic threshold, no padding,
+	// no allocator usage (zero-overhead common case). The schoolbook impls
+	// memset their own output region (a.len + b.len bytes).
+	if (longer_len < KARATSUBA_THRESHOLD) {
+		if (a.len % 8 == 0 and b.len % 8 == 0) {
+			mulMagnitudesU64(a, b, r);
+		} else {
+			mulMagnitudesU64Unaligned(a, b, r);
+		}
+		return;
+	}
+
+	// Sub-quadratic paths write to r[0..2*longer_len] — caller's r might be
+	// sized just for a.len + b.len, which is smaller when shorter operand is
+	// padded. Assert we have room and zero the full output region.
+	std.debug.assert(r.len >= 2 * longer_len);
+	@memset(r[0 .. 2 * longer_len], 0);
+
+	// Sub-quadratic paths need equal-length operands. Pad the shorter side
+	// with leading zeros (no value change). Use named flags for the free
+	// guard so the conditional-defer pattern doesn't snare us.
+	const a_padded: ?[]u8 = if (a.len < longer_len) blk: {
+		const pad = try allocator.alloc(u8, longer_len);
+		@memset(pad, 0);
+		@memcpy(pad[0..a.len], a);
+		break :blk pad;
+	} else null;
+	defer if (a_padded) |p| allocator.free(p);
+
+	const b_padded: ?[]u8 = if (b.len < longer_len) blk: {
+		const pad = try allocator.alloc(u8, longer_len);
+		@memset(pad, 0);
+		@memcpy(pad[0..b.len], b);
+		break :blk pad;
+	} else null;
+	defer if (b_padded) |p| allocator.free(p);
+
+	const a_eff: []const u8 = if (a_padded) |p| p else a;
+	const b_eff: []const u8 = if (b_padded) |p| p else b;
+	const n = longer_len;
+
+	if (n >= TOOM3_THRESHOLD) {
+		const scratch = try allocator.alloc(u8, toom3ScratchNeed(n));
+		defer allocator.free(scratch);
+		mulToom3(a_eff, b_eff, r[0 .. 2 * n], scratch);
+		return;
+	}
+	// n >= KARATSUBA_THRESHOLD by the early-return guard above.
+	const scratch = try allocator.alloc(u8, karatsubaScratchNeed(n));
+	defer allocator.free(scratch);
+	mulKaratsuba(a_eff, b_eff, r[0 .. 2 * n], scratch);
+}
+
 /// Leaf divider used by the B-Z recursion. Picks the fastest available
 /// kernel for the operand sizes: byte-direct `divModKnuth` for single-
 /// limb divisors (v_len ≤ 8), limb-packed `divModKnuthU64` for ≥ 2 limb
@@ -1977,12 +2054,15 @@ fn bzDiv3n_2n(
 	}
 
 	// Compute D = Q · B2 (length up to q_len + half bytes).
-	const d_buf_cap = q_len + half + 1;
+	// d_buf sized for the worst-case sub-quadratic mul output (2 * half), since
+	// mulMagAuto pads the shorter operand to `longer_len` (= half) when above
+	// the Karatsuba threshold. Schoolbook would only need q_len + half + 1.
+	const d_buf_cap = 2 * half + 1;
 	const d_buf = try allocator.alloc(u8, d_buf_cap);
 	defer allocator.free(d_buf);
 	@memset(d_buf, 0);
 	if (q_len > 0) {
-		mulMagnitudes(q_out[0..q_len], B2, d_buf);
+		try mulMagAuto(q_out[0..q_len], B2, d_buf, allocator);
 	}
 	var d_len = q_len + half;
 	while (d_len > 0 and d_buf[d_len - 1] == 0) d_len -= 1;

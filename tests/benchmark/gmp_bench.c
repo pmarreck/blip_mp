@@ -65,6 +65,9 @@ static const LargeBucket DIVMOD_BUCKETS[] = {
 	{"2048-bit", 2048},
 	{"4096-bit", 4096},
 	{"8192-bit", 8192},
+	{"16384-bit", 16384},
+	{"32768-bit", 32768},
+	{"65536-bit", 65536},
 };
 static const LargeBucket POWM_BUCKETS[] = {
 	{"512-bit",  512},
@@ -83,7 +86,10 @@ static uint64_t divmod_iters(int bits) {
 	if (bits <= 512) return 200000ULL;
 	if (bits <= 2048) return 50000ULL;
 	if (bits <= 4096) return 20000ULL;
-	return 5000ULL;
+	if (bits <= 8192) return 5000ULL;
+	if (bits <= 16384) return 1000ULL;
+	if (bits <= 32768) return 300ULL;
+	return 100ULL;
 }
 static uint64_t powm_iters(int bits) {
 	if (bits <= 512) return 5000ULL;
