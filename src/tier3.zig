@@ -1748,8 +1748,23 @@ fn bzDiv2nByN(
 ) std.mem.Allocator.Error!struct { q_len: usize, r_len: usize } {
 	std.debug.assert(u.len == 2 * n);
 	std.debug.assert(v.len == n);
-	std.debug.assert(n >= 2 and n % 2 == 0);
+	std.debug.assert(n >= 2);
 	std.debug.assert((v[n - 1] >> 7) == 1);
+
+	// Odd n forces Knuth — bzDiv3n_2n's recursion needs even n to split.
+	if ((n & 1) != 0) {
+		var u_len: usize = 2 * n;
+		while (u_len > 0 and u[u_len - 1] == 0) u_len -= 1;
+		if (u_len == 0) return .{ .q_len = 0, .r_len = 0 };
+		if (u_len < n) {
+			@memcpy(r_out[0..u_len], u[0..u_len]);
+			return .{ .q_len = 0, .r_len = u_len };
+		}
+		const work = try allocator.alloc(u8, divModKnuthScratchNeed(u_len, n));
+		defer allocator.free(work);
+		const got = divModKnuth(u, u_len, v, n, q_out, r_out, work);
+		return .{ .q_len = got.q_len, .r_len = got.r_len };
+	}
 
 	const half = n / 2;
 
@@ -1841,8 +1856,10 @@ fn bzDiv3n_2n(
 	std.debug.assert(n >= 2 and n % 2 == 0);
 	std.debug.assert((v[n - 1] >> 7) == 1);
 
-	// Base case: small n → byte-direct Knuth D.
-	if (n < BZ_RECURSE_THRESHOLD) {
+	// Base case: small n OR odd n → byte-direct Knuth D. Odd n must bottom
+	// out here because the recursive case calls bzDiv2nByN at half scale,
+	// which requires n be even (to split halves cleanly).
+	if (n < BZ_RECURSE_THRESHOLD or (n & 1) != 0) {
 		var u_len: usize = u.len;
 		while (u_len > 0 and u[u_len - 1] == 0) u_len -= 1;
 		if (u_len == 0) return .{ .q_len = 0, .r_len = 0 };
@@ -1959,34 +1976,44 @@ fn bzDiv3n_2n(
 	return .{ .q_len = q_len, .r_len = rp_len };
 }
 
-/// Burnikel-Ziegler recursive divider. Byte-direct magnitude-only API
-/// (caller handles signs). Currently a transparent delegation to the
-/// existing Knuth D byte-direct kernel — recursive logic lands in
-/// subsequent commits per the TDD ladder.
+/// Threshold (in v_len bytes) above which `divModBurnikelZiegler` engages
+/// the B-Z path; below, delegates to Knuth D. Tuned later via benchmark;
+/// 64 (= 512-bit divisor) is a conservative starting point.
+const BZ_TOPLEVEL_THRESHOLD: usize = 64;
+
+/// Burnikel-Ziegler recursive divider — top-level entry. Byte-direct,
+/// magnitude-only (caller handles signs). For divisor sizes ≥
+/// BZ_TOPLEVEL_THRESHOLD AND even (so the recursive halving lands cleanly),
+/// runs the B-Z algorithm: normalize the divisor so its top bit is set,
+/// shift the dividend identically, pad the dividend to a multiple of n,
+/// then iterate top-block-to-bottom calling bzDiv2nByN with the carried
+/// remainder of the previous block. Otherwise delegates to byte-direct
+/// Knuth D.
 ///
 /// Preconditions:
-///   - v_len >= 1, v[v_len-1] != 0 (caller passes canonical divisor magnitude).
-///   - q_out has capacity >= max(1, u_len - v_len + 1) bytes.
-///   - r_out has capacity >= v_len bytes.
-///   - work has capacity >= divModBurnikelZieglerScratchNeed(u_len, v_len).
+///   - v_len >= 1, v[v_len-1] != 0 (canonical divisor magnitude).
+///   - q_out.len >= max(1, u_len - v_len + 1) bytes.
+///   - r_out.len >= v_len bytes.
 pub fn divModBurnikelZiegler(
-	u: []const u8, u_len: usize,
+	u: []const u8, u_len_in: usize,
 	v: []const u8, v_len: usize,
 	q_out: []u8, r_out: []u8,
-	work: []u8,
-) struct { q_len: usize, r_len: usize } {
-	// Stub: delegate to byte-direct Knuth D. Recursion lands in M15-1.2+.
-	// divModKnuth requires v_len >= 2; for single-byte divisors the caller
-	// dispatches to divModSingleU64 already, but we mirror its precondition
-	// here so the test cases match. If v_len == 1 we still need to handle
-	// it cleanly because the API doesn't otherwise constrain it.
+	allocator: std.mem.Allocator,
+) std.mem.Allocator.Error!struct { q_len: usize, r_len: usize } {
+	// Trim u to canonical length.
+	var u_len: usize = u_len_in;
+	while (u_len > 0 and u[u_len - 1] == 0) u_len -= 1;
+	if (u_len == 0) {
+		q_out[0] = 0;
+		r_out[0] = 0;
+		return .{ .q_len = 1, .r_len = 1 };
+	}
+
+	// Single-byte divisor — degenerate fast path.
 	if (v_len == 1) {
-		// Single-byte divisor — synthesize via divModSingleU64-style loop
-		// on the dividend bytes. Not the B-Z path, but a clean degenerate
-		// case for the stub.
 		const divisor: u64 = v[0];
-		// Copy u into work scratch as the in-place quotient buffer.
-		const u_scratch = work[0..u_len];
+		const u_scratch = try allocator.alloc(u8, u_len);
+		defer allocator.free(u_scratch);
 		@memcpy(u_scratch, u[0..u_len]);
 		const out = divModSingleU64(u_scratch, u_len, divisor);
 		@memcpy(q_out[0..out.q_len], u_scratch[0..out.q_len]);
@@ -1994,7 +2021,6 @@ pub fn divModBurnikelZiegler(
 			q_out[0] = 0;
 			break :blk @as(usize, 1);
 		} else out.q_len;
-		// Remainder as LE bytes (single byte fits in r_out[0]).
 		var rem = out.rem;
 		var i: usize = 0;
 		while (rem != 0 or i == 0) : (i += 1) {
@@ -2006,13 +2032,131 @@ pub fn divModBurnikelZiegler(
 		while (r_len_out > 1 and r_out[r_len_out - 1] == 0) r_len_out -= 1;
 		return .{ .q_len = q_len_out, .r_len = r_len_out };
 	}
-	const leaf = divModKnuth(u, u_len, v, v_len, q_out, r_out, work);
-	return .{ .q_len = leaf.q_len, .r_len = leaf.r_len };
+
+	// u < v → q=0, r=u.
+	if (u_len < v_len) {
+		@memcpy(r_out[0..u_len], u[0..u_len]);
+		q_out[0] = 0;
+		return .{ .q_len = 1, .r_len = u_len };
+	}
+
+	// Knuth fallback when divisor is small OR odd (B-Z needs even n).
+	if (v_len < BZ_TOPLEVEL_THRESHOLD or (v_len & 1) != 0) {
+		const work = try allocator.alloc(u8, divModKnuthScratchNeed(u_len, v_len));
+		defer allocator.free(work);
+		const leaf = divModKnuth(u, u_len, v, v_len, q_out, r_out, work);
+		return .{ .q_len = leaf.q_len, .r_len = leaf.r_len };
+	}
+
+	// ── B-Z PATH ─────────────────────────────────────────────────────────
+	// Block size n = v_len (caller's canonical divisor length, even).
+	const n_block: usize = v_len;
+	const s: u3 = @intCast(@clz(v[v_len - 1])); // leading zero bits in top byte
+
+	// Normalize v (left-shift by s bits so v_norm[v_len-1] top bit = 1).
+	const v_norm = try allocator.alloc(u8, v_len + 1);
+	defer allocator.free(v_norm);
+	if (s == 0) {
+		@memcpy(v_norm[0..v_len], v[0..v_len]);
+		v_norm[v_len] = 0;
+	} else {
+		const written = shiftLeftByBitsMag(v[0..v_len], v_len, s, v_norm);
+		// Shift by s = clz(top) just promotes top bit to position 7; no
+		// new high byte. Assert this invariant.
+		std.debug.assert(written == v_len);
+		v_norm[v_len] = 0;
+	}
+	std.debug.assert((v_norm[v_len - 1] >> 7) == 1);
+
+	// Normalize u (same shift, may extend by 1 byte).
+	const u_norm_cap = u_len + 1;
+	const u_norm = try allocator.alloc(u8, u_norm_cap);
+	defer allocator.free(u_norm);
+	const u_norm_len: usize = if (s == 0) blk: {
+		@memcpy(u_norm[0..u_len], u[0..u_len]);
+		u_norm[u_len] = 0;
+		break :blk u_len;
+	} else shiftLeftByBitsMag(u[0..u_len], u_len, s, u_norm);
+
+	// Number of n-byte blocks needed to hold u (round up).
+	const num_blocks = (u_norm_len + n_block - 1) / n_block;
+	const u_padded_len = num_blocks * n_block;
+	const u_padded = try allocator.alloc(u8, u_padded_len);
+	defer allocator.free(u_padded);
+	@memset(u_padded, 0);
+	@memcpy(u_padded[0..u_norm_len], u_norm[0..u_norm_len]);
+
+	// Q accumulator (full size; canonical trim at end).
+	const q_total_cap = u_padded_len;
+	const q_total = try allocator.alloc(u8, q_total_cap);
+	defer allocator.free(q_total);
+	@memset(q_total, 0);
+
+	// R carry between iterations (always n_block bytes, leading-zero-padded).
+	const r_carry = try allocator.alloc(u8, n_block);
+	defer allocator.free(r_carry);
+	@memset(r_carry, 0);
+
+	// Reusable per-iteration scratch.
+	const sub_dividend = try allocator.alloc(u8, 2 * n_block);
+	defer allocator.free(sub_dividend);
+	const sub_q = try allocator.alloc(u8, n_block + 1);
+	defer allocator.free(sub_q);
+	const sub_r = try allocator.alloc(u8, n_block);
+	defer allocator.free(sub_r);
+
+	// Block iteration: top block first.
+	var i: usize = num_blocks;
+	while (i > 0) {
+		i -= 1;
+		// sub_dividend (LE) = [u_block_i || r_carry] of length 2n.
+		// In LE the LOW n bytes are the current block, HIGH n bytes are r_carry.
+		@memcpy(sub_dividend[0..n_block], u_padded[i * n_block .. (i + 1) * n_block]);
+		@memcpy(sub_dividend[n_block .. 2 * n_block], r_carry);
+
+		const got = try bzDiv2nByN(sub_dividend, n_block, v_norm[0..v_len], sub_q, sub_r, allocator);
+
+		// Write Q block into q_total at this block's quotient position.
+		@memcpy(q_total[i * n_block .. i * n_block + got.q_len], sub_q[0..got.q_len]);
+		if (got.q_len < n_block) {
+			@memset(q_total[i * n_block + got.q_len .. (i + 1) * n_block], 0);
+		}
+
+		// R becomes the carry for the next (lower) block.
+		@memset(r_carry, 0);
+		@memcpy(r_carry[0..got.r_len], sub_r[0..got.r_len]);
+	}
+
+	// Canonicalize Q.
+	var q_canon_len = q_total_cap;
+	while (q_canon_len > 0 and q_total[q_canon_len - 1] == 0) q_canon_len -= 1;
+	if (q_canon_len == 0) {
+		q_out[0] = 0;
+		q_canon_len = 1;
+	} else {
+		@memcpy(q_out[0..q_canon_len], q_total[0..q_canon_len]);
+	}
+
+	// Denormalize R: right-shift by s bits to undo the normalization.
+	var r_canon_len: usize = n_block;
+	while (r_canon_len > 0 and r_carry[r_canon_len - 1] == 0) r_canon_len -= 1;
+	if (s != 0 and r_canon_len > 0) {
+		r_canon_len = shiftRightByBitsMag(r_carry, r_canon_len, s);
+	}
+	if (r_canon_len == 0) {
+		r_out[0] = 0;
+		r_canon_len = 1;
+	} else {
+		@memcpy(r_out[0..r_canon_len], r_carry[0..r_canon_len]);
+	}
+
+	return .{ .q_len = q_canon_len, .r_len = r_canon_len };
 }
 
-/// Worst-case scratch needed by `divModBurnikelZiegler`. For the stub
-/// delegation this is just `divModKnuthScratchNeed`; once recursion lands
-/// the bound widens to cover the temporary product buffers at each level.
+/// Legacy: keep callable but the work-byte path is no longer the source of
+/// truth. New callers pass an allocator; this returns the worst-case Knuth
+/// scratch (still valid as a lower bound for any caller still passing flat
+/// scratch through some non-allocator wrapper).
 pub fn divModBurnikelZieglerScratchNeed(u_len: usize, v_len: usize) usize {
 	return divModKnuthScratchNeed(u_len, v_len);
 }
@@ -5764,6 +5908,50 @@ test "shiftLeft then shiftRight by same amount is identity (random)" {
 	}
 }
 
+test "divModBurnikelZiegler: large asymmetric (u_len ~3x v_len) vs Knuth at sizes {64,128,256,512}" {
+	// Exercises the top-level B-Z wrapper (blocking + normalization). Sizes
+	// chosen to bracket where B-Z would dominate Knuth in production. Mixed
+	// even/odd v_len (102, 256, 510) verifies the odd-n Knuth fallback.
+	const allocator = std.testing.allocator;
+	var rng = std.Random.DefaultPrng.init(0xB12B_D7C_4321_1234);
+	const r_rng = rng.random();
+	const v_sizes = [_]usize{ 64, 100, 128, 256, 510, 512 };
+	for (v_sizes) |v_len| {
+		var trial: usize = 0;
+		while (trial < 20) : (trial += 1) {
+			// Random dividend ~3x divisor length.
+			const u_len = 2 * v_len + @as(usize, r_rng.uintLessThan(u32, @intCast(v_len)));
+			const u = try allocator.alloc(u8, u_len);
+			defer allocator.free(u);
+			const v = try allocator.alloc(u8, v_len);
+			defer allocator.free(v);
+			for (u) |*p| p.* = r_rng.int(u8);
+			for (v) |*p| p.* = r_rng.int(u8);
+			if (u[u_len - 1] == 0) u[u_len - 1] = 1;
+			if (v[v_len - 1] == 0) v[v_len - 1] = 1;
+
+			const q_ref = try allocator.alloc(u8, u_len + 1);
+			defer allocator.free(q_ref);
+			const r_ref = try allocator.alloc(u8, v_len);
+			defer allocator.free(r_ref);
+			const work_ref = try allocator.alloc(u8, divModKnuthScratchNeed(u_len, v_len));
+			defer allocator.free(work_ref);
+			const got_ref = divModKnuth(u, u_len, v, v_len, q_ref, r_ref, work_ref);
+
+			const q_bz = try allocator.alloc(u8, u_len + 1);
+			defer allocator.free(q_bz);
+			const r_bz = try allocator.alloc(u8, v_len);
+			defer allocator.free(r_bz);
+			const got_bz = try divModBurnikelZiegler(u, u_len, v, v_len, q_bz, r_bz, allocator);
+
+			try testing.expectEqual(got_ref.q_len, got_bz.q_len);
+			try testing.expectEqualSlices(u8, q_ref[0..got_ref.q_len], q_bz[0..got_bz.q_len]);
+			try testing.expectEqual(got_ref.r_len, got_bz.r_len);
+			try testing.expectEqualSlices(u8, r_ref[0..got_ref.r_len], r_bz[0..got_bz.r_len]);
+		}
+	}
+}
+
 test "divModBurnikelZiegler: tiny known case (0xFFFF / 0x0102 → q=0xFE r=0x03)" {
 	// 65535 / 258 = 254 r 3 — same case used in divModKnuth's known-small test.
 	const allocator = std.testing.allocator;
@@ -5771,9 +5959,7 @@ test "divModBurnikelZiegler: tiny known case (0xFFFF / 0x0102 → q=0xFE r=0x03)
 	const v = [_]u8{ 0x02, 0x01 };
 	var q: [4]u8 = undefined;
 	var r: [4]u8 = undefined;
-	const work = try allocator.alloc(u8, divModBurnikelZieglerScratchNeed(u.len, v.len));
-	defer allocator.free(work);
-	const got = divModBurnikelZiegler(&u, u.len, &v, v.len, &q, &r, work);
+	const got = try divModBurnikelZiegler(&u, u.len, &v, v.len, &q, &r, allocator);
 	try testing.expectEqual(@as(usize, 1), got.q_len);
 	try testing.expectEqual(@as(u8, 0xFE), q[0]);
 	try testing.expectEqual(@as(usize, 1), got.r_len);
@@ -5787,9 +5973,7 @@ test "divModBurnikelZiegler: single-byte divisor degenerate case (256 / 3)" {
 	const v = [_]u8{ 0x03 };
 	var q: [4]u8 = undefined;
 	var r: [4]u8 = undefined;
-	const work = try allocator.alloc(u8, divModBurnikelZieglerScratchNeed(u.len, v.len));
-	defer allocator.free(work);
-	const got = divModBurnikelZiegler(&u, u.len, &v, v.len, &q, &r, work);
+	const got = try divModBurnikelZiegler(&u, u.len, &v, v.len, &q, &r, allocator);
 	try testing.expectEqual(@as(usize, 1), got.q_len);
 	try testing.expectEqual(@as(u8, 85), q[0]);
 	try testing.expectEqual(@as(usize, 1), got.r_len);
@@ -5830,9 +6014,7 @@ test "divModBurnikelZiegler: cross-check vs divModKnuth on 200 random pairs" {
 		defer allocator.free(q_bz);
 		const r_bz = try allocator.alloc(u8, v_len);
 		defer allocator.free(r_bz);
-		const work_bz = try allocator.alloc(u8, divModBurnikelZieglerScratchNeed(u_len, v_len));
-		defer allocator.free(work_bz);
-		const got_bz = divModBurnikelZiegler(u, u_len, v, v_len, q_bz, r_bz, work_bz);
+		const got_bz = try divModBurnikelZiegler(u, u_len, v, v_len, q_bz, r_bz, allocator);
 
 		testing.expectEqual(got_ref.q_len, got_bz.q_len) catch |e| {
 			std.debug.print("trial {d}: u_len={d} v_len={d}\n", .{ trial, u_len, v_len });
