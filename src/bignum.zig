@@ -2971,6 +2971,13 @@ fn tier3DivModOp(q: *Mp, rem: *Mp, a: *const Mp, b: *const Mp) ArithError!void {
 		return;
 	}
 
+	// M15-2 byte-direct path scaffolding (tier3.divModSignedLargeBytes) exists
+	// and is tested, but production stays on the limb path until M15-2 step 3
+	// lands: rewriting divModKnuthU64's body byte-direct via readChunkOrZero
+	// is what actually unlocks the perf win. The wiring-alone change measured
+	// at ~equal or marginally slower (per-call malloc dominates at small
+	// sizes; at large sizes both paths converge on the same Knuth core).
+
 	// Quotient/remainder buffers must be large enough to hold the LIMB-aligned
 	// (8-byte multiple) raw write from divModKnuthU64 before its trailing-zero
 	// trim. Round up to the next multiple of 8, then add +2 slack for sign

@@ -3009,6 +3009,50 @@ pub fn divModSigned(
 /// limbsToBytes×2, byte-trim×2, encodeMagAsTwosComp×2) into 2 limb-level passes
 /// + 2 limb→byte writes. At 2K-bit / 1K-bit this saves ~150-200 ns of pure
 /// data shuffling.
+/// Byte-direct variant of divModSignedLarge (M15-2 step 2). Same semantics
+/// but uses `divModKnuthU64Bytes` (byte-buffer Knuth D entry) instead of the
+/// limb-packed `divModKnuthU64`. Takes an allocator for the scratch instead
+/// of a flat work buffer.
+pub fn divModSignedLargeBytes(
+	a_pay: []const u8, b_pay: []const u8,
+	a_neg: bool, b_neg: bool,
+	q_pay: []u8, r_pay: []u8,
+	allocator: std.mem.Allocator,
+) std.mem.Allocator.Error!DivModResult {
+	// Materialize positive byte magnitudes. u needs +8 bytes of slack for the
+	// D1 normalization carry chunk that divModKnuthU64Bytes' Knuth core reads.
+	const u_cap = a_pay.len + 8;
+	const u_buf = try allocator.alignedAlloc(u8, .@"8", u_cap);
+	defer allocator.free(u_buf);
+	@memcpy(u_buf[0..a_pay.len], a_pay);
+	@memset(u_buf[a_pay.len..], 0);
+	if (a_neg) negateInPlace(u_buf[0..a_pay.len]);
+	var a_mag_len: usize = a_pay.len;
+	while (a_mag_len > 0 and u_buf[a_mag_len - 1] == 0) a_mag_len -= 1;
+
+	const v_buf = try allocator.alloc(u8, b_pay.len);
+	defer allocator.free(v_buf);
+	@memcpy(v_buf, b_pay);
+	if (b_neg) negateInPlace(v_buf);
+	var b_mag_len: usize = v_buf.len;
+	while (b_mag_len > 0 and v_buf[b_mag_len - 1] == 0) b_mag_len -= 1;
+
+	// Zero dividend → q = 0, r = 0.
+	if (a_mag_len == 0) {
+		q_pay[0] = 0;
+		r_pay[0] = 0;
+		return .{ .q_len = 1, .r_len = 1 };
+	}
+
+	const got = try divModKnuthU64Bytes(u_buf, a_mag_len, v_buf, b_mag_len, q_pay, r_pay, allocator);
+
+	const q_is_neg = (a_neg != b_neg) and got.q_len != 0;
+	const r_is_neg = a_neg and got.r_len != 0;
+	const q_pay_len = encodeMagAsTwosComp(q_pay, got.q_len, q_is_neg);
+	const r_pay_len = encodeMagAsTwosComp(r_pay, got.r_len, r_is_neg);
+	return .{ .q_len = q_pay_len, .r_len = r_pay_len };
+}
+
 fn divModSignedLarge(
 	a_pay: []const u8, b_pay: []const u8,
 	a_neg: bool, b_neg: bool,
