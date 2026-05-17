@@ -2950,7 +2950,13 @@ fn powmMontgomery(r: *Mp, base_red: *const Mp, exp: *const Mp, m: *const Mp, w: 
 /// caching to eliminate per-call malloc. Until those land, the existing
 /// limb-Knuth path with Möller-Granlund reciprocal q_hat is faster up
 /// through the largest tested size (8K-bit).
-const BZ_INTEGRATION_THRESHOLD: usize = 99999; // gated off; needs Karatsuba-in-mul to win
+const BZ_INTEGRATION_THRESHOLD: usize = 99999; // gated off — see B-Z perf-work notes below
+// B-Z viable only when FFT mul beats Toom-3 in production (gated at
+// FFT_THRESHOLD = 99999 itself). Without FFT, B-Z's recursion adds
+// 2× overhead per level without algorithmic gain. Measured at 64K-bit:
+// baseline (limb-Knuth alone) = 886K ns; B-Z with limb-Knuth-leaf +
+// Karatsuba/Toom-3 dispatch = 1.46M ns (1.7× SLOWER); GMP = 350K
+// (uses FFT mul). Re-enable when FFT mul lands in production.
 
 fn tier3DivModOp(q: *Mp, rem: *Mp, a: *const Mp, b: *const Mp) ArithError!void {
 	const a_bytes = a.bytes();

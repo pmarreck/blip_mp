@@ -93,6 +93,9 @@ const DIVMOD_BUCKETS = [_]LargeBucket{
 	.{ .name = "2048-bit",  .bits = 2048 },
 	.{ .name = "4096-bit",  .bits = 4096 },
 	.{ .name = "8192-bit",  .bits = 8192 },
+	.{ .name = "16384-bit", .bits = 16384 },
+	.{ .name = "32768-bit", .bits = 32768 },
+	.{ .name = "65536-bit", .bits = 65536 },
 };
 const POWM_BUCKETS = [_]LargeBucket{
 	.{ .name = "512-bit",   .bits = 512 },
@@ -408,7 +411,10 @@ fn divModIters(bits: usize) usize {
 	if (bits <= 512) return 200_000;
 	if (bits <= 2048) return 50_000;
 	if (bits <= 4096) return 20_000;
-	return 5_000;
+	if (bits <= 8192) return 5_000;
+	if (bits <= 16384) return 1_000;
+	if (bits <= 32768) return 300;
+	return 100;
 }
 
 fn benchmarkMpDivModLarge(allocator: std.mem.Allocator, lb: LargeBucket) !f64 {
