@@ -2004,12 +2004,12 @@ pub fn divModBurnikelZiegler(
 	var u_len: usize = u_len_in;
 	while (u_len > 0 and u[u_len - 1] == 0) u_len -= 1;
 	if (u_len == 0) {
-		q_out[0] = 0;
-		r_out[0] = 0;
-		return .{ .q_len = 1, .r_len = 1 };
+		// Match Knuth's convention: q_len = 0 / r_len = 0 means zero magnitude.
+		return .{ .q_len = 0, .r_len = 0 };
 	}
 
-	// Single-byte divisor — degenerate fast path.
+	// Single-byte divisor — degenerate fast path. Knuth convention: empty
+	// magnitude (q_len = 0 or r_len = 0) means zero.
 	if (v_len == 1) {
 		const divisor: u64 = v[0];
 		const u_scratch = try allocator.alloc(u8, u_len);
@@ -2017,27 +2017,33 @@ pub fn divModBurnikelZiegler(
 		@memcpy(u_scratch, u[0..u_len]);
 		const out = divModSingleU64(u_scratch, u_len, divisor);
 		@memcpy(q_out[0..out.q_len], u_scratch[0..out.q_len]);
-		const q_len_out = if (out.q_len == 0) blk: {
-			q_out[0] = 0;
-			break :blk @as(usize, 1);
-		} else out.q_len;
 		var rem = out.rem;
 		var i: usize = 0;
-		while (rem != 0 or i == 0) : (i += 1) {
+		while (rem != 0) : (i += 1) {
 			r_out[i] = @truncate(rem);
 			rem >>= 8;
 			if (i + 1 >= r_out.len) break;
 		}
-		var r_len_out = i;
-		while (r_len_out > 1 and r_out[r_len_out - 1] == 0) r_len_out -= 1;
-		return .{ .q_len = q_len_out, .r_len = r_len_out };
+		return .{ .q_len = out.q_len, .r_len = i };
 	}
 
-	// u < v → q=0, r=u.
+	// u < v → q=0 (q_len = 0), r=u.
 	if (u_len < v_len) {
 		@memcpy(r_out[0..u_len], u[0..u_len]);
-		q_out[0] = 0;
-		return .{ .q_len = 1, .r_len = u_len };
+		return .{ .q_len = 0, .r_len = u_len };
+	}
+	// Same-length u and v: compare values. If u < v, q=0, r=u; if u == v, q=1, r=0.
+	if (u_len == v_len) {
+		const cmp = cmpUnsignedLE(u, u_len, v, v_len);
+		if (cmp < 0) {
+			@memcpy(r_out[0..u_len], u[0..u_len]);
+			return .{ .q_len = 0, .r_len = u_len };
+		}
+		if (cmp == 0) {
+			q_out[0] = 1;
+			return .{ .q_len = 1, .r_len = 0 };
+		}
+		// u > v at same length — fall through to main algorithm.
 	}
 
 	// Knuth fallback when divisor is small OR odd (B-Z needs even n).
@@ -2127,15 +2133,10 @@ pub fn divModBurnikelZiegler(
 		@memcpy(r_carry[0..got.r_len], sub_r[0..got.r_len]);
 	}
 
-	// Canonicalize Q.
+	// Canonicalize Q (Knuth convention: q_len = 0 means zero quotient).
 	var q_canon_len = q_total_cap;
 	while (q_canon_len > 0 and q_total[q_canon_len - 1] == 0) q_canon_len -= 1;
-	if (q_canon_len == 0) {
-		q_out[0] = 0;
-		q_canon_len = 1;
-	} else {
-		@memcpy(q_out[0..q_canon_len], q_total[0..q_canon_len]);
-	}
+	@memcpy(q_out[0..q_canon_len], q_total[0..q_canon_len]);
 
 	// Denormalize R: right-shift by s bits to undo the normalization.
 	var r_canon_len: usize = n_block;
@@ -2143,12 +2144,7 @@ pub fn divModBurnikelZiegler(
 	if (s != 0 and r_canon_len > 0) {
 		r_canon_len = shiftRightByBitsMag(r_carry, r_canon_len, s);
 	}
-	if (r_canon_len == 0) {
-		r_out[0] = 0;
-		r_canon_len = 1;
-	} else {
-		@memcpy(r_out[0..r_canon_len], r_carry[0..r_canon_len]);
-	}
+	@memcpy(r_out[0..r_canon_len], r_carry[0..r_canon_len]);
 
 	return .{ .q_len = q_canon_len, .r_len = r_canon_len };
 }
@@ -2855,7 +2851,7 @@ fn divModSignedLarge(
 ///   - If negative: payload = (~magnitude + 1) of length L, possibly with
 ///     extra 0xFF sign-extension byte if high bit of high byte is clear after negation.
 ///   - Then canonicalize trailing 0x00 / 0xFF.
-inline fn encodeMagAsTwosComp(buf: []u8, mag_len: usize, is_negative: bool) usize {
+pub fn encodeMagAsTwosComp(buf: []u8, mag_len: usize, is_negative: bool) usize {
 	if (mag_len == 0) {
 		buf[0] = 0x00;
 		return 1;
@@ -5905,6 +5901,48 @@ test "shiftLeft then shiftRight by same amount is identity (random)" {
 		const recovered_len = shiftRightByBitsMag(shifted, shifted_len, s);
 		try testing.expectEqual(len, recovered_len);
 		try testing.expectEqualSlices(u8, orig[0..len], shifted[0..recovered_len]);
+	}
+}
+
+test "divModBurnikelZiegler: SAME-length random inputs (where u may < v numerically)" {
+	// The cross-validation surfaced cases where u_len == v_len but u < v
+	// numerically; without an early value-compare check the algorithm
+	// produced wrong Q. This pins the early-exit behavior.
+	const allocator = std.testing.allocator;
+	var rng = std.Random.DefaultPrng.init(0xC0FF_EE_42_1337);
+	const r_rng = rng.random();
+	const sizes = [_]usize{ 64, 128, 256 };
+	for (sizes) |n| {
+		var trial: usize = 0;
+		while (trial < 30) : (trial += 1) {
+			const u = try allocator.alloc(u8, n);
+			defer allocator.free(u);
+			const v = try allocator.alloc(u8, n);
+			defer allocator.free(v);
+			for (u) |*p| p.* = r_rng.int(u8);
+			for (v) |*p| p.* = r_rng.int(u8);
+			if (u[n - 1] == 0) u[n - 1] = 1;
+			if (v[n - 1] == 0) v[n - 1] = 1;
+
+			const q_ref = try allocator.alloc(u8, n + 1);
+			defer allocator.free(q_ref);
+			const r_ref = try allocator.alloc(u8, n);
+			defer allocator.free(r_ref);
+			const work_ref = try allocator.alloc(u8, divModKnuthScratchNeed(n, n));
+			defer allocator.free(work_ref);
+			const got_ref = divModKnuth(u, n, v, n, q_ref, r_ref, work_ref);
+
+			const q_bz = try allocator.alloc(u8, n + 1);
+			defer allocator.free(q_bz);
+			const r_bz = try allocator.alloc(u8, n);
+			defer allocator.free(r_bz);
+			const got_bz = try divModBurnikelZiegler(u, n, v, n, q_bz, r_bz, allocator);
+
+			try testing.expectEqual(got_ref.q_len, got_bz.q_len);
+			try testing.expectEqualSlices(u8, q_ref[0..got_ref.q_len], q_bz[0..got_bz.q_len]);
+			try testing.expectEqual(got_ref.r_len, got_bz.r_len);
+			try testing.expectEqualSlices(u8, r_ref[0..got_ref.r_len], r_bz[0..got_bz.r_len]);
+		}
 	}
 }
 
