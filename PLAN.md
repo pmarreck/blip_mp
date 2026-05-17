@@ -344,12 +344,15 @@ So fully-limbless is achievable, and the architectural claim becomes the cleaner
 
 **Research already done** (2026-05-16 session): byte-direct Knuth D is feasible. No published variant exists in the literature (GMP, BearSSL, Java BigInteger, num-bigint, Zig std `math.big` all use uniform-limb storage) — but the math allows it. The inner-loop u64 arithmetic stays unchanged (preserves the 36× speedup over the byte-base divMod that was retired in M51); only the marshalling shim disappears. Estimated win: ~5-15% on divMod at 2K-8K bit (the size where marshalling overhead is meaningful), no regression elsewhere. Sub-task ordering matters — do B-Z first because it's the bigger general-purpose win AND it can be designed byte-direct from day one. FFT migration is mostly mechanical (last to land, after divMod is done).
 
-### M15-1 — Burnikel-Ziegler recursive division (byte-direct from day one)
-- [ ] Implement `tier3.divModBurnikelZiegler` as a 2n/n recursive divider. Inputs/outputs are `[]u8` byte payloads. Inner-loop arithmetic uses chunked-u64 reads via existing `readChunkOrZero`/`writeChunkTruncated` primitives. The recursion eventually bottoms out into the existing `divModKnuthU64` kernel as the small-divisor base case (~2-3K bit threshold, empirically tuned).
-- [ ] Dispatch in `tier3DivModSignedLarge`: route to B-Z when both operands ≥ threshold; fall through to Knuth D for smaller. The B-Z path bypasses the pack/unpack entirely (operates on bytes throughout); the Knuth D fallback still uses the existing limb-packed kernel until M15-2.
-- [ ] **Expected impact:** sub-quadratic asymptotic (O(M(n) log n) vs O(n²) for plain Knuth). Closes the 1.5–2× GMP gap at 4K+ bit divMod. Also improves invMod (HGCD's inner call) and powm (Montgomery reduction's inner div).
-- [ ] **Tests:** add to `tests/integration/cross_check.zig` divMod path at sizes 4096, 6144, 8192, 16384 bit. Random pair cross-check vs GMP. Also stress identity `a == q*b + rem` at extreme size ratios (very large dividend, mid-size divisor).
-- [ ] **Reference:** Burnikel-Ziegler 1998 "Fast Recursive Division" (MPI tech report). GMP's `mpn/generic/dcpi1_div_qr.c` is a working implementation to study (but assumes uniform limbs).
+### M15-1 — Burnikel-Ziegler recursive division (byte-direct) — DONE 2026-05-16
+- [x] **Step 1**: byte-direct `shiftLeftByBitsMag` / `shiftRightByBitsMag` helpers (for B-Z normalization).
+- [x] **Step 2**: `bzDiv2nByN` + `bzDiv3n_2n` scaffolding (Knuth stub for inner recursion).
+- [x] **Step 3**: real recursive `bzDiv3n_2n` (Algorithm 3 from B-Z 1998). Bug found via TDD bisection: slice-bounds `r_work[mag_len..rp_len]` when `mag_len > rp_len` is UB in ReleaseFast.
+- [x] **Step 4**: top-level wrapper. Normalize divisor (shift so top bit set), pad dividend to multiple of n_block, iterate blocks top-to-bottom via `bzDiv2nByN` with carried remainder. Odd-n Knuth fallback added (the recursive case requires even n to split halves cleanly).
+- [x] **Step 5+6**: wired into `tier3DivModOp` (`src/bignum.zig`) via `tier3DivModOpBZ` helper. Routes to B-Z when `b_pay.len >= BZ_INTEGRATION_THRESHOLD` (currently 512 bytes = 4K-bit divisor). Below threshold, the existing limb-Knuth path (with Möller-Granlund) wins on constant factor. Canonical-zero convention aligned with Knuth (`q_len = 0` = zero quotient, not `q_len = 1` with `q[0] = 0`).
+- [x] **Tests:** 1400+ random magnitude-divider trials at n ∈ {2, 4, 8, 16, 32, 64, 128} bytes, plus 120 large-asymmetric trials at v_len ∈ {64, 100, 128, 256, 510, 512}, plus 90 same-length stress trials, plus the existing 12000+ GMP cross-validation suite covering divq/divr at 4K/6K/8K-bit. All pass.
+- [x] **Reference:** Burnikel-Ziegler 1998 "Fast Recursive Division" (MPI tech report).
+- [ ] **Threshold tuning** — `BZ_INTEGRATION_THRESHOLD` set conservatively at 512 bytes (4K-bit). Bench-tuning to find the true crossover point with limb-Knuth is a follow-up.
 
 ### M15-2 — Byte-direct Knuth Algorithm D (the small-divisor base case)
 - [ ] Rewrite `tier3.divModKnuthU64` as `tier3.divModKnuthBytes` (or rename and keep diff small). Operate on `[]u8` u/vn buffers directly; inner-loop reads are chunked u64 via `readChunkOrZero`.

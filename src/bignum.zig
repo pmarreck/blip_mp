@@ -2940,12 +2940,17 @@ fn powmMontgomery(r: *Mp, base_red: *const Mp, exp: *const Mp, m: *const Mp, w: 
 /// Sign convention matches GMP `mpz_tdiv_qr` (see `Mp.divMod` doc).
 /// Threshold (in payload bytes of the divisor) above which `tier3DivModOp`
 /// routes to the byte-direct Burnikel-Ziegler divider instead of the existing
-/// limb-packed Knuth path. Below this, limb-Knuth (with Möller-Granlund
-/// reciprocal q_hat) wins because its constant factor is smaller. Above,
-/// B-Z's sub-quadratic asymptotic dominates. Conservative starting point;
-/// bench-tuned later. Note BZ requires v_len even at the top level — odd
-/// v_len falls through to limb-Knuth regardless.
-const BZ_INTEGRATION_THRESHOLD: usize = 512; // 4K-bit divisor
+/// limb-packed Knuth path. Currently gated OFF in production (set to a value
+/// the system never reaches): empirical benchmark shows B-Z at 4K-bit
+/// divisor is ~40× SLOWER than limb-Knuth (244K vs 6K ns/op) because the
+/// byte-direct base case + per-call malloc dominate. The B-Z scaffolding is
+/// correct (verified by 12K+ GMP cross-checks) but needs the perf-work
+/// follow-ups to win: (a) Karatsuba-aware mulMagnitudes inside the recursion,
+/// (b) limb-Knuth at the leaf instead of byte-Knuth, (c) per-thread scratch
+/// caching to eliminate per-call malloc. Until those land, the existing
+/// limb-Knuth path with Möller-Granlund reciprocal q_hat is faster up
+/// through the largest tested size (8K-bit).
+const BZ_INTEGRATION_THRESHOLD: usize = 99999; // effectively disabled
 
 fn tier3DivModOp(q: *Mp, rem: *Mp, a: *const Mp, b: *const Mp) ArithError!void {
 	const a_bytes = a.bytes();
