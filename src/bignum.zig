@@ -2938,11 +2938,27 @@ fn powmMontgomery(r: *Mp, base_red: *const Mp, exp: *const Mp, m: *const Mp, w: 
 /// Tier-3 truncated division: writes a/b into q.heap_buf and a%b into rem.heap_buf.
 /// Sign-magnitude dispatch + Knuth Algorithm D (or single-u64 division for small b).
 /// Sign convention matches GMP `mpz_tdiv_qr` (see `Mp.divMod` doc).
+/// Threshold (in payload bytes of the divisor) above which `tier3DivModOp`
+/// routes to the byte-direct Burnikel-Ziegler divider instead of the existing
+/// limb-packed Knuth path. Below this, limb-Knuth (with Möller-Granlund
+/// reciprocal q_hat) wins because its constant factor is smaller. Above,
+/// B-Z's sub-quadratic asymptotic dominates. Conservative starting point;
+/// bench-tuned later. Note BZ requires v_len even at the top level — odd
+/// v_len falls through to limb-Knuth regardless.
+const BZ_INTEGRATION_THRESHOLD: usize = 512; // 4K-bit divisor
+
 fn tier3DivModOp(q: *Mp, rem: *Mp, a: *const Mp, b: *const Mp) ArithError!void {
 	const a_bytes = a.bytes();
 	const b_bytes = b.bytes();
 	const a_pay = a_bytes[a.cached_pay_off .. a.cached_pay_off + a.cached_pay_len];
 	const b_pay = b_bytes[b.cached_pay_off .. b.cached_pay_off + b.cached_pay_len];
+
+	// Burnikel-Ziegler dispatch for large divisors. Falls through to the
+	// limb-Knuth path otherwise.
+	if (b_pay.len >= BZ_INTEGRATION_THRESHOLD) {
+		try tier3DivModOpBZ(q, rem, a_pay, b_pay);
+		return;
+	}
 
 	// Quotient/remainder buffers must be large enough to hold the LIMB-aligned
 	// (8-byte multiple) raw write from divModKnuthU64 before its trailing-zero
@@ -2974,6 +2990,64 @@ fn tier3DivModOp(q: *Mp, rem: *Mp, a: *const Mp, b: *const Mp) ArithError!void {
 	// Write canonical BLIP for q and rem from the produced two's-comp payloads.
 	try writeMpFromPayload(q, q_buf[0..got.q_len]);
 	try writeMpFromPayload(rem, r_buf[0..got.r_len]);
+}
+
+/// B-Z dispatch for tier3DivModOp at large divisor sizes. Extracts positive
+/// magnitudes (negating in-place if needed), runs byte-direct B-Z, re-encodes
+/// quotient/remainder as canonical two's-complement BLIP payloads with the
+/// truncated-division sign convention (sign(q) = sign(a) XOR sign(b);
+/// sign(r) = sign(a)), then installs into the destination Mp's.
+fn tier3DivModOpBZ(q: *Mp, rem: *Mp, a_pay: []const u8, b_pay: []const u8) ArithError!void {
+	const allocator = q.allocator;
+	const a_neg = tier3.signExtByte(a_pay) == 0xFF;
+	const b_neg = tier3.signExtByte(b_pay) == 0xFF;
+
+	// Materialize positive magnitudes.
+	const a_mag = allocator.alloc(u8, a_pay.len) catch return error.OutOfMemory;
+	defer allocator.free(a_mag);
+	@memcpy(a_mag, a_pay);
+	if (a_neg) tier3.negateInPlace(a_mag);
+	var a_mag_len: usize = a_mag.len;
+	while (a_mag_len > 0 and a_mag[a_mag_len - 1] == 0) a_mag_len -= 1;
+
+	const b_mag = allocator.alloc(u8, b_pay.len) catch return error.OutOfMemory;
+	defer allocator.free(b_mag);
+	@memcpy(b_mag, b_pay);
+	if (b_neg) tier3.negateInPlace(b_mag);
+	var b_mag_len: usize = b_mag.len;
+	while (b_mag_len > 0 and b_mag[b_mag_len - 1] == 0) b_mag_len -= 1;
+
+	// Zero dividend → q = 0, rem = 0.
+	if (a_mag_len == 0) {
+		var zero = [_]u8{0};
+		try writeMpFromPayload(q, zero[0..1]);
+		try writeMpFromPayload(rem, zero[0..1]);
+		return;
+	}
+
+	// Output magnitude buffers — quotient ≤ a_mag_len bytes, remainder ≤
+	// b_mag_len bytes (canonical). +2 slack for the two's-comp sign-extension
+	// byte that encodeMagAsTwosComp may append.
+	const q_mag = allocator.alloc(u8, a_mag_len + 2) catch return error.OutOfMemory;
+	defer allocator.free(q_mag);
+	const r_mag = allocator.alloc(u8, b_mag_len + 2) catch return error.OutOfMemory;
+	defer allocator.free(r_mag);
+
+	const got = tier3.divModBurnikelZiegler(a_mag, a_mag_len, b_mag, b_mag_len, q_mag, r_mag, allocator) catch return error.OutOfMemory;
+
+	// Sign conventions (truncated): q's sign = sign(a) XOR sign(b) iff q != 0;
+	// r's sign = sign(a) iff r != 0. B-Z returns q_len=0 / r_len=0 for zero.
+	const q_is_neg = (a_neg != b_neg) and got.q_len != 0;
+	const r_is_neg = a_neg and got.r_len != 0;
+
+	// encodeMagAsTwosComp writes "[0x00]" for zero magnitude AND for any mag
+	// with mag_len = 0 (clean canonical zero payload). The single-byte 0x00
+	// is the canonical BLIP zero payload.
+	const q_pay_len = tier3.encodeMagAsTwosComp(q_mag, got.q_len, q_is_neg);
+	const r_pay_len = tier3.encodeMagAsTwosComp(r_mag, got.r_len, r_is_neg);
+
+	try writeMpFromPayload(q, q_mag[0..q_pay_len]);
+	try writeMpFromPayload(rem, r_mag[0..r_pay_len]);
 }
 
 /// Encode a canonical two's-complement LE payload `pay` (length ≥ 1) as a
