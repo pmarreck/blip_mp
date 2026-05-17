@@ -1706,6 +1706,99 @@ inline fn shiftRightByBitsMag(buf: []u8, len: usize, s: u3) usize {
 }
 
 // ────────────────────────────────────────────────────────────────────────────
+// M15-2: byte-direct Knuth Algorithm D entry. The caller-facing API takes
+// []u8 byte buffers (canonical LE magnitudes). Initial implementation
+// delegates to `divModKnuthU64` via in-place limb casting on an 8-byte-aligned
+// byte buffer (no separate pack/unpack pass — bytes ARE the u64 limbs at
+// 8-byte-aligned offsets). Later commits push the byte-direct logic into
+// the Knuth body itself; this commit establishes the API + correctness.
+//
+// Precondition on `u`:
+//   - 8-byte aligned start (caller uses `allocator.alignedAlloc(u8, .@"8", ...)`).
+//   - Capacity ≥ u_len_in + 8 bytes (D1 normalization carry chunk).
+//   - u[u_len_in..u.len] is undefined on entry, may be clobbered on exit.
+//
+// Returns canonical byte lengths (q_len ≤ u_len_in - v_len + 1; r_len ≤ v_len).
+pub fn divModKnuthU64Bytes(
+	u: []u8, u_len_in: usize,
+	v: []const u8, v_len: usize,
+	q_out: []u8, r_out: []u8,
+	allocator: std.mem.Allocator,
+) std.mem.Allocator.Error!struct { q_len: usize, r_len: usize } {
+	// Trim u to canonical byte length.
+	var u_len: usize = u_len_in;
+	while (u_len > 0 and u[u_len - 1] == 0) u_len -= 1;
+	if (u_len == 0) return .{ .q_len = 0, .r_len = 0 };
+	if (u_len < v_len) {
+		@memcpy(r_out[0..u_len], u[0..u_len]);
+		return .{ .q_len = 0, .r_len = u_len };
+	}
+	// Trim v.
+	var v_len_canon: usize = v_len;
+	while (v_len_canon > 0 and v[v_len_canon - 1] == 0) v_len_canon -= 1;
+	std.debug.assert(v_len_canon >= 1);
+	// Single-byte divisor — divModSingleU64 (limb-Knuth requires v_len >= 2).
+	if (v_len_canon == 1) {
+		const u_copy = try allocator.alloc(u8, u_len);
+		defer allocator.free(u_copy);
+		@memcpy(u_copy, u[0..u_len]);
+		const out = divModSingleU64(u_copy, u_len, v[0]);
+		@memcpy(q_out[0..out.q_len], u_copy[0..out.q_len]);
+		var rem = out.rem;
+		var i: usize = 0;
+		while (rem != 0) : (i += 1) {
+			r_out[i] = @truncate(rem);
+			rem >>= 8;
+			if (i + 1 >= r_out.len) break;
+		}
+		return .{ .q_len = out.q_len, .r_len = i };
+	}
+
+	// Limb-aligned slot layout (byte buffer, aligned). u is the caller's
+	// existing aligned buffer; v/q/r need their own.
+	const u_lim_len_canon = (u_len + 7) / 8;
+	const v_lim_len_canon = (v_len_canon + 7) / 8;
+	// u must have capacity for the D1 normalization carry → u_lim_len_canon + 1 limbs.
+	std.debug.assert(u.len >= (u_lim_len_canon + 1) * 8);
+
+	const v_buf_bytes = v_lim_len_canon * 8;
+	const q_buf_bytes = u_lim_len_canon * 8; // q has at most u_len - v_len + 1 limbs; round up.
+	const r_buf_bytes = v_lim_len_canon * 8;
+	const buf = try allocator.alignedAlloc(u8, .@"8", v_buf_bytes + q_buf_bytes + r_buf_bytes);
+	defer allocator.free(buf);
+	@memset(buf, 0);
+
+	const v_buf = buf[0..v_buf_bytes];
+	const q_buf = buf[v_buf_bytes .. v_buf_bytes + q_buf_bytes];
+	const r_buf = buf[v_buf_bytes + q_buf_bytes ..];
+
+	// Byte copies into aligned limb regions. LE bytes ≡ LE u64 chunks at
+	// 8-byte-aligned offsets, so no byte-shuffling needed.
+	@memcpy(v_buf[0..v_len_canon], v[0..v_len_canon]);
+	// u: zero the D1 carry chunk past u_len.
+	@memset(u[u_len..@min(u.len, (u_lim_len_canon + 1) * 8)], 0);
+
+	const u_lim: []u64 = @alignCast(std.mem.bytesAsSlice(u64, u[0 .. (u_lim_len_canon + 1) * 8]));
+	const v_lim_const: []const u64 = @alignCast(std.mem.bytesAsSlice(u64, v_buf));
+	const q_lim: []u64 = @alignCast(std.mem.bytesAsSlice(u64, q_buf));
+	const r_lim: []u64 = @alignCast(std.mem.bytesAsSlice(u64, r_buf));
+
+	const got = divModKnuthU64(u_lim, u_lim_len_canon, v_lim_const, v_lim_len_canon, q_lim, r_lim);
+
+	// Bytes back. Canonical byte length = limb-length × 8 minus trailing zero
+	// bytes within the top limb.
+	var q_byte_len: usize = got.q_len * 8;
+	while (q_byte_len > 0 and q_buf[q_byte_len - 1] == 0) q_byte_len -= 1;
+	@memcpy(q_out[0..q_byte_len], q_buf[0..q_byte_len]);
+
+	var r_byte_len: usize = got.r_len * 8;
+	while (r_byte_len > 0 and r_buf[r_byte_len - 1] == 0) r_byte_len -= 1;
+	@memcpy(r_out[0..r_byte_len], r_buf[0..r_byte_len]);
+
+	return .{ .q_len = q_byte_len, .r_len = r_byte_len };
+}
+
+// ────────────────────────────────────────────────────────────────────────────
 // M15-1: Burnikel-Ziegler recursive divider — byte-direct from day one.
 // ────────────────────────────────────────────────────────────────────────────
 //
@@ -5183,6 +5276,62 @@ test "divModKnuthU64: cross-check vs byte-base divModKnuth (random small)" {
 		try testing.expectEqualSlices(u8, q_ref[0..ref.q_len], q_lim_bytes[0..q_lim_byte_len]);
 		try testing.expectEqual(ref.r_len, r_lim_byte_len);
 		try testing.expectEqualSlices(u8, r_ref[0..ref.r_len], r_lim_bytes[0..r_lim_byte_len]);
+	}
+}
+
+test "divModKnuthU64Bytes: cross-check vs divModKnuth (M15-2 byte-direct entry)" {
+	// New byte-direct Knuth D entry. The first implementation delegates to
+	// divModKnuthU64 via pack/unpack; later commits push byte-direct logic
+	// inward. This test pins the contract and behavior.
+	const allocator = std.testing.allocator;
+	var rng = std.Random.DefaultPrng.init(0xB17E_5817_5817_C0DE);
+	const r_rng = rng.random();
+	const sizes = [_]struct { u: usize, v: usize }{
+		.{ .u = 16, .v = 9 },     // 1-byte tail past 1-limb boundary
+		.{ .u = 17, .v = 10 },    // odd lengths
+		.{ .u = 64, .v = 32 },    // clean 8-byte multiples
+		.{ .u = 100, .v = 50 },   // mid-size, odd tail
+		.{ .u = 256, .v = 128 },  // 2K-bit dividend / 1K-bit divisor
+		.{ .u = 512, .v = 256 },  // 4K-bit dividend / 2K-bit divisor
+	};
+	for (sizes) |sz| {
+		var trial: usize = 0;
+		while (trial < 30) : (trial += 1) {
+			const u = try allocator.alloc(u8, sz.u);
+			defer allocator.free(u);
+			const v = try allocator.alloc(u8, sz.v);
+			defer allocator.free(v);
+			for (u) |*p| p.* = r_rng.int(u8);
+			for (v) |*p| p.* = r_rng.int(u8);
+			if (u[sz.u - 1] == 0) u[sz.u - 1] = 1;
+			if (v[sz.v - 1] == 0) v[sz.v - 1] = 1;
+
+			// Reference via byte-direct divModKnuth.
+			const q_ref = try allocator.alloc(u8, sz.u + 1);
+			defer allocator.free(q_ref);
+			const r_ref = try allocator.alloc(u8, sz.v);
+			defer allocator.free(r_ref);
+			const work_ref = try allocator.alloc(u8, divModKnuthScratchNeed(sz.u, sz.v));
+			defer allocator.free(work_ref);
+			const ref = divModKnuth(u, sz.u, v, sz.v, q_ref, r_ref, work_ref);
+
+			// Under test: divModKnuthU64Bytes. Allocate u with +8 bytes slack
+			// for the D1 normalization carry chunk.
+			const u_buf = try allocator.alignedAlloc(u8, .@"8", sz.u + 8);
+			defer allocator.free(u_buf);
+			@memcpy(u_buf[0..sz.u], u);
+			@memset(u_buf[sz.u..], 0);
+			const q_new = try allocator.alloc(u8, sz.u + 1);
+			defer allocator.free(q_new);
+			const r_new = try allocator.alloc(u8, sz.v);
+			defer allocator.free(r_new);
+			const got = try divModKnuthU64Bytes(u_buf, sz.u, v, sz.v, q_new, r_new, allocator);
+
+			try testing.expectEqual(ref.q_len, got.q_len);
+			try testing.expectEqualSlices(u8, q_ref[0..ref.q_len], q_new[0..got.q_len]);
+			try testing.expectEqual(ref.r_len, got.r_len);
+			try testing.expectEqualSlices(u8, r_ref[0..ref.r_len], r_new[0..got.r_len]);
+		}
 	}
 }
 
