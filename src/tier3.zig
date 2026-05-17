@@ -1706,6 +1706,38 @@ inline fn shiftRightByBitsMag(buf: []u8, len: usize, s: u3) usize {
 }
 
 // ────────────────────────────────────────────────────────────────────────────
+// Per-thread Burnikel-Ziegler scratch arena. B-Z makes many small allocations
+// during its recursive descent (sub-dividends, sub-quotients, multiply scratch,
+// correction temps). With a system allocator, each call to Mp.divMod that
+// routes through B-Z pays ~5-15 µs of pure malloc/free overhead — enough to
+// fully account for B-Z's prior measured 1.7× slowdown vs limb-Knuth.
+//
+// The arena bump-allocates from a thread-local buffer that the page allocator
+// fills lazily; reset() returns to the start of the buffer between calls so
+// every B-Z dispatch sees a "warm" arena from call #2 onward. Same idiom as
+// `mul_scratch` and `div_scratch` above.
+threadlocal var bz_arena: ?std.heap.ArenaAllocator = null;
+
+/// Get (lazily initializing) the thread-local B-Z arena. Caller is expected
+/// to `reset()` the returned arena once the B-Z call returns.
+pub fn bzArena(backing: std.mem.Allocator) *std.heap.ArenaAllocator {
+	if (bz_arena == null) {
+		bz_arena = std.heap.ArenaAllocator.init(backing);
+	}
+	return &(bz_arena.?);
+}
+
+/// Release the per-thread B-Z arena (frees its underlying buffer).
+/// Idempotent. Tests call this from `defer` to keep DebugAllocator's
+/// leak-detector happy.
+pub fn releaseBzArena() void {
+	if (bz_arena) |*a| {
+		a.deinit();
+		bz_arena = null;
+	}
+}
+
+// ────────────────────────────────────────────────────────────────────────────
 // M15-2: byte-direct Knuth Algorithm D entry. The caller-facing API takes
 // []u8 byte buffers (canonical LE magnitudes). Initial implementation
 // delegates to `divModKnuthU64` via in-place limb casting on an 8-byte-aligned
@@ -2585,37 +2617,39 @@ pub fn divModKnuthU64(
 	const top = v[v_len - 1];
 	const s: u6 = @intCast(@clz(top));
 
-	// Normalized divisor `vn`: stack fast-path for v_len ≤ 1024 limbs (= 64K
-	// bit divisor — covers RSA-32K and below); per-thread cached heap
-	// fallback (vn_scratch) for anything larger. The streaming pi-spigot in
-	// ../pi pushes past the stack cap at ~1700 digits (divisor t grows
-	// linearly with iteration count), so the cache turns N divs' worth of
-	// 88 KB mallocs into a single first-call alloc + reuse.
+	// Normalized divisor `vn`. When s == 0 (v already normalized — top bit
+	// set in v[v_len-1], ~50% of random divisors), alias v directly: no
+	// scratch needed, no memcpy. Saves v_len * 8 bytes of copying per call.
+	// When s != 0, allocate scratch: stack fast-path for v_len ≤ 1024 limbs
+	// (= 64K-bit, covers RSA-32K+); per-thread cached heap fallback
+	// (vn_scratch) for anything larger.
 	const VN_FAST_MAX = 1024;
 	var vn_stack: [VN_FAST_MAX]u64 = undefined;
-	const vn: []u64 = if (v_len <= VN_FAST_MAX) vn_stack[0..v_len] else blk: {
-		vn_scratch.ensureCapacity(v_len);
-		break :blk vn_scratch.buf[0..v_len];
-	};
-
-	if (s == 0) {
-		var i: usize = 0;
-		while (i < v_len) : (i += 1) vn[i] = v[i];
-		// u stays as-is; high "extra" limb is set to 0 below.
-		u[u_len] = 0;
-	} else {
-		// Left-shift v by s bits across limbs.
+	const vn: []const u64 = if (s == 0) v[0..v_len] else blk: {
+		const buf: []u64 = if (v_len <= VN_FAST_MAX) vn_stack[0..v_len] else heap_blk: {
+			vn_scratch.ensureCapacity(v_len);
+			break :heap_blk vn_scratch.buf[0..v_len];
+		};
+		// Left-shift v by s bits across limbs into buf.
 		var carry_v: u64 = 0;
 		var i: usize = 0;
 		while (i < v_len) : (i += 1) {
 			const lo = v[i] << s;
-			vn[i] = lo | carry_v;
+			buf[i] = lo | carry_v;
 			carry_v = v[i] >> @as(u6, @intCast(64 - @as(u7, s)));
 		}
 		std.debug.assert(carry_v == 0);
-		// Left-shift u by s bits in place; carry goes into u[u_len].
+		break :blk buf;
+	};
+
+	if (s == 0) {
+		// u stays as-is; high "extra" limb is set to 0.
+		u[u_len] = 0;
+	} else {
+		// vn already shifted above. Left-shift u by s bits in place; carry
+		// goes into u[u_len].
 		var carry_u: u64 = 0;
-		i = 0;
+		var i: usize = 0;
 		while (i < u_len) : (i += 1) {
 			const lo = u[i] << s;
 			const hi = u[i] >> @as(u6, @intCast(64 - @as(u7, s)));
@@ -2672,8 +2706,12 @@ pub fn divModKnuthU64(
 		//   diff = u[j+k] - total_sub_lo  (with borrow tracking)
 		//   carry_lo := total_sub_hi + p_hi (next position's pending subtraction lo)
 		//   borrow accumulates across limbs.
-		var carry_lo: u64 = 0; // pending sub from previous mul step (high half of prior product + sub-overflow)
-		var borrow: u64 = 0;   // 0 or 1 from previous limb's sub
+		// (Tried collapsing carry_lo + borrow into a single `cl` chain à la
+		// GMP's plain-C mpn_submul_1 — empirically LLVM compiles this two-var
+		// form ~20-30% faster at sizes ≥ 2K-bit because the independent
+		// chains give the dual ALU pipes more slack to interleave.)
+		var carry_lo: u64 = 0;
+		var borrow: u64 = 0;
 		var k: usize = 0;
 		while (k < n) : (k += 1) {
 			const p: u128 = @as(u128, qhat) * @as(u128, vn[k]);

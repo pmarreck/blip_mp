@@ -2950,13 +2950,13 @@ fn powmMontgomery(r: *Mp, base_red: *const Mp, exp: *const Mp, m: *const Mp, w: 
 /// caching to eliminate per-call malloc. Until those land, the existing
 /// limb-Knuth path with Möller-Granlund reciprocal q_hat is faster up
 /// through the largest tested size (8K-bit).
-const BZ_INTEGRATION_THRESHOLD: usize = 99999; // gated off — see B-Z perf-work notes below
-// B-Z viable only when FFT mul beats Toom-3 in production (gated at
-// FFT_THRESHOLD = 99999 itself). Without FFT, B-Z's recursion adds
-// 2× overhead per level without algorithmic gain. Measured at 64K-bit:
-// baseline (limb-Knuth alone) = 886K ns; B-Z with limb-Knuth-leaf +
-// Karatsuba/Toom-3 dispatch = 1.46M ns (1.7× SLOWER); GMP = 350K
-// (uses FFT mul). Re-enable when FFT mul lands in production.
+const BZ_INTEGRATION_THRESHOLD: usize = 99999; // gated off
+// Arena-cached B-Z (tier3.bzArena) eliminates the per-call malloc overhead
+// that previously dominated B-Z. With arena warm, B-Z at 8K-bit drops from
+// ~162K ns → ~92K ns/op (43% better). But limb-Knuth at the same size is
+// 6K ns: B-Z is still 15× slower because the schoolbook/Karatsuba mul work
+// per recursion level dominates. Arena scaffolding stays for future use
+// when FFT mul becomes viable in production.
 
 fn tier3DivModOp(q: *Mp, rem: *Mp, a: *const Mp, b: *const Mp) ArithError!void {
 	const a_bytes = a.bytes();
@@ -3016,7 +3016,12 @@ fn tier3DivModOp(q: *Mp, rem: *Mp, a: *const Mp, b: *const Mp) ArithError!void {
 /// truncated-division sign convention (sign(q) = sign(a) XOR sign(b);
 /// sign(r) = sign(a)), then installs into the destination Mp's.
 fn tier3DivModOpBZ(q: *Mp, rem: *Mp, a_pay: []const u8, b_pay: []const u8) ArithError!void {
-	const allocator = q.allocator;
+	// Thread-local arena: bump-allocates from a recycled buffer instead of
+	// hitting the system allocator for every B-Z sub-allocation. Reset on
+	// exit so the next call sees an empty (but pre-warmed) arena.
+	const arena_ptr = tier3.bzArena(q.allocator);
+	defer _ = arena_ptr.reset(.retain_capacity);
+	const allocator = arena_ptr.allocator();
 	const a_neg = tier3.signExtByte(a_pay) == 0xFF;
 	const b_neg = tier3.signExtByte(b_pay) == 0xFF;
 
@@ -5207,6 +5212,10 @@ test "invModHGCD matches invModLehmer: 1000+ random pairs across bit-widths" {
 	// Lehmer-vs-classical test so we get coverage across the recursion
 	// threshold (HGCD only kicks in above the threshold; below, it
 	// degenerates to Lehmer).
+	defer tier3.releaseBzArena();
+	defer tier3.releaseMulScratch();
+	defer tier3.releaseDivScratch();
+	defer tier3.releaseVnScratch();
 	const SIZES = [_]usize{ 64, 128, 192, 256, 320, 384, 448, 512, 768, 1024, 1536, 2048, 3072, 4096 };
 	const ITERS_PER_SIZE: usize = 80;
 	var prng = std.Random.DefaultPrng.init(0xC0FFEE_F00D_BEE0);
@@ -5262,6 +5271,10 @@ test "invModHGCDRecursive matches invModHGCD: random pairs across bit-widths" {
 	// agrees with invModLehmer; invModHGCDRecursive must agree bit-for-bit.
 	// Bit-widths span the recursive HGCD threshold (1024) so we exercise
 	// both the fallback path and the recursive path.
+	defer tier3.releaseBzArena();
+	defer tier3.releaseMulScratch();
+	defer tier3.releaseDivScratch();
+	defer tier3.releaseVnScratch();
 	const SIZES = [_]usize{ 256, 512, 768, 1024, 1536, 2048, 3072, 4096 };
 	const ITERS_PER_SIZE: usize = 130;
 	var prng = std.Random.DefaultPrng.init(0xDEAD_F00D_C0DE_F00D);
@@ -5361,6 +5374,7 @@ test "divMod: divisor > 64K-bit doesn't overflow tier3.divModKnuthU64 stack scra
 	defer tier3.releaseMulScratch();
 	defer tier3.releaseDivScratch();
 	defer tier3.releaseVnScratch();
+	defer tier3.releaseBzArena();
 	var dividend = Mp.init(allocator);
 	defer dividend.deinit();
 	var divisor = Mp.init(allocator);
@@ -5457,6 +5471,10 @@ test "bench: invModLehmer vs invModHGCD across bit-widths" {
 	// Microbench. Runs both invModLehmer and invModHGCD on the same fixed
 	// random (a, m) pairs at 1024/2048/4096-bit widths, prints ns/op and
 	// the speedup ratio. Used to validate M10 numbers.
+	defer tier3.releaseBzArena();
+	defer tier3.releaseMulScratch();
+	defer tier3.releaseDivScratch();
+	defer tier3.releaseVnScratch();
 	const SIZES = [_]usize{ 1024, 2048, 4096, 8192 };
 	const ITERS_BY_SIZE = [_]usize{ 200, 100, 25, 8 };
 	var prng = std.Random.DefaultPrng.init(0xBABE_CAFE_F00D);
