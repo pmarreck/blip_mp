@@ -104,9 +104,14 @@ const POWM_BUCKETS = [_]LargeBucket{
 	.{ .name = "3072-bit",  .bits = 3072 },
 };
 const INVMOD_BUCKETS = [_]LargeBucket{
+	.{ .name = "128-bit",   .bits = 128 },
+	.{ .name = "192-bit",   .bits = 192 },
 	.{ .name = "256-bit",   .bits = 256 },
+	.{ .name = "384-bit",   .bits = 384 },
 	.{ .name = "512-bit",   .bits = 512 },
+	.{ .name = "768-bit",   .bits = 768 },
 	.{ .name = "1024-bit",  .bits = 1024 },
+	.{ .name = "1536-bit",  .bits = 1536 },
 	.{ .name = "2048-bit",  .bits = 2048 },
 };
 
