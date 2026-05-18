@@ -12,6 +12,11 @@
 #                        # sizes; skip large/long-running modular-arith ops
 #   ./bm --hyperfine      # wrap each bench binary in `hyperfine` for
 #                        # statistical aggregation (10 runs, warmup 2)
+#   ./bm --stable [N]    # run each bench binary N times (default 7),
+#                        # aggregate per-bucket: median + (min..max) range.
+#                        # Gives reliable per-op timings under thermal load
+#                        # that single-run mode can't measure (variance is
+#                        # 17-60% on M-series under load).
 #   ./bm --raw            # dump the raw RESULT lines verbatim, no parsing
 #   ./bm --micro          # FFT primitive microbench only (fft_microbench)
 #   ./bm -h | --help      # this message
@@ -21,10 +26,26 @@
 set -u
 
 mode="full"
-for arg in "$@"; do
+stable_runs=7
+args=("$@")
+i=0
+while [ $i -lt ${#args[@]} ]; do
+	arg="${args[$i]}"
 	case "$arg" in
 		--quick) mode="quick" ;;
 		--hyperfine) mode="hyperfine" ;;
+		--stable)
+			mode="stable"
+			# Optional positional arg N immediately after --stable.
+			next_idx=$((i + 1))
+			if [ $next_idx -lt ${#args[@]} ]; then
+				next="${args[$next_idx]}"
+				if [[ "$next" =~ ^[0-9]+$ ]]; then
+					stable_runs=$next
+					i=$next_idx
+				fi
+			fi
+			;;
 		--raw) mode="raw" ;;
 		--micro) mode="micro" ;;
 		-h|--help)
@@ -37,6 +58,7 @@ for arg in "$@"; do
 			exit 64
 			;;
 	esac
+	i=$((i + 1))
 done
 
 # Build the bench package. Nix gives us a deterministic, ReleaseFast build
@@ -91,6 +113,189 @@ case "$mode" in
 			--command-name 'blip_mp_bench' "$B/blip_mp_bench" \
 			--command-name 'gmp_bench'     "$B/gmp_bench" \
 			--command-name 'gmp_noasm'     "$B/gmp_noasm_bench"
+		;;
+
+	stable)
+		# Run each bench N times. Collect every "RESULT impl=X bucket=Y ns_per_op=Z"
+		# line and group by (impl, bucket). Compute median, min, max — robust to
+		# the 17-60% run-to-run variance seen on M-series under thermal load.
+		tmp=$(mktemp -d "${TMPDIR:-/tmp}/blip_stable.XXXXXX")
+		trap 'rm -rf "$tmp"' EXIT
+		printf '== stable bench: %d runs each, per-bucket median + range ==\n\n' "$stable_runs" >&2
+
+		# Warmup run (discarded) — primes filesystem cache, branch predictors,
+		# thread-local scratch caches inside each bench process. Note: blip_mp_bench
+		# uses std.debug.print which writes to STDERR, so we capture 2>&1.
+		"$B/blip_mp_bench" >/dev/null 2>&1
+		"$B/gmp_bench" >/dev/null 2>&1
+		"$B/gmp_noasm_bench" >/dev/null 2>&1
+
+		# N timed runs per binary, raw RESULT lines appended. blip writes to
+		# stderr (std.debug.print); GMP writes to stdout (printf). Both
+		# captured via 2>&1.
+		for run in $(seq 1 "$stable_runs"); do
+			printf 'run %d/%d...\n' "$run" "$stable_runs" >&2
+			"$B/blip_mp_bench"      2>&1 | grep '^RESULT ' >> "$tmp/blip.raw"
+			"$B/gmp_bench"          2>&1 | grep '^RESULT ' >> "$tmp/gmp.raw"
+			"$B/gmp_noasm_bench"    2>&1 | grep '^RESULT ' >> "$tmp/gmp_noasm.raw"
+		done
+
+		# Aggregate each source: bucket -> sorted list of ns_per_op values.
+		# Then print median + (min..max) per bucket. Output one line per bucket,
+		# grouped by impl, in the order the bench prints them.
+		aggregate_one() {
+			local src=$1 label=$2
+			# Parse: lines look like
+			#   RESULT impl=Mp.add bucket=L=0 (immediate, 0..127) ns_per_op=2.23
+			#   RESULT mpz_mul bucket=128-bit ns_per_op=10.08
+			# The "impl=" prefix is missing on GMP lines (their RESULT format).
+			# Key by everything between RESULT and ns_per_op (covers both formats).
+			awk '
+				BEGIN { run_idx = 0 }
+				/^RESULT/ {
+					# Extract trailing "ns_per_op=NUMBER"
+					n = match($0, /ns_per_op=([0-9.]+)/, arr)
+					if (n == 0) next
+					val = arr[1] + 0
+					# Key = everything from "RESULT " through the last token before ns_per_op
+					key = $0
+					sub(/ ns_per_op=.*/, "", key)
+					sub(/^RESULT /, "", key)
+					vals[key] = vals[key] " " val
+					if (!(key in order)) {
+						order[key] = ++next_idx
+					}
+				}
+				END {
+					# Stable order: by first-seen key index.
+					for (k in vals) seq[order[k]] = k
+					for (i = 1; i <= next_idx; i++) {
+						k = seq[i]
+						n_split = split(vals[k], arr, " ")
+						# Filter empty leading element.
+						cnt = 0
+						for (j = 1; j <= n_split; j++) if (arr[j] != "") nums[++cnt] = arr[j] + 0
+						# Sort ascending (selection sort on tiny array).
+						for (a = 1; a <= cnt; a++)
+							for (b = a + 1; b <= cnt; b++)
+								if (nums[b] < nums[a]) { t = nums[a]; nums[a] = nums[b]; nums[b] = t }
+						mid = int((cnt + 1) / 2)
+						median = nums[mid]
+						minv = nums[1]
+						maxv = nums[cnt]
+						pct = (maxv > 0) ? (100.0 * (maxv - minv) / median) : 0
+						printf "%-58s  median=%12.2f  range=%.2f..%.2f  (±%.0f%%)\n", k, median, minv, maxv, pct
+						delete nums
+					}
+				}
+			' "$src"
+		}
+
+		printf '\n## blip_mp (medians over %d runs)\n' "$stable_runs"
+		aggregate_one "$tmp/blip.raw" "blip"
+		printf '\n## GMP-asm (medians over %d runs)\n' "$stable_runs"
+		aggregate_one "$tmp/gmp.raw" "gmp"
+		printf '\n## GMP-noasm (medians over %d runs)\n' "$stable_runs"
+		aggregate_one "$tmp/gmp_noasm.raw" "gmp_noasm"
+
+		# Side-by-side comparison: blip vs GMP-asm where bucket names match.
+		# Match keys by trailing `bucket=...` (impls differ between blip and GMP).
+		printf '\n## side-by-side (blip vs GMP-asm, by matching bucket)\n'
+		printf '%-44s  %12s  %12s  %12s  %8s\n' "op + bucket" "blip" "GMP-asm" "GMP-noasm" "blip/gmp"
+		printf '%-44s  %12s  %12s  %12s  %8s\n' "----------" "----" "-------" "---------" "--------"
+		extract_medians() {
+			# Output: <op_label>\t<bucket>\t<median>  (tab-separated)
+			# Normalizes bucket to first non-paren token (so blip's
+			# "L=0 (immediate, 0..127)" maps to "L=0" matching GMP's bucket name).
+			awk '
+				/^RESULT/ {
+					n = match($0, /ns_per_op=([0-9.]+)/, arr)
+					if (n == 0) next
+					val = arr[1] + 0
+					# Bucket: text after "bucket=" up to first whitespace (drops parens).
+					b_n = match($0, /bucket=([^ ]+)/, barr)
+					bkey = (b_n > 0) ? barr[1] : ""
+					# Find op label (before " bucket=")
+					op = $0
+					sub(/^RESULT /, "", op)
+					sub(/ bucket=.*/, "", op)
+					vals[op "\t" bkey] = vals[op "\t" bkey] " " val
+					if (!(op "\t" bkey in order)) order[op "\t" bkey] = ++next_idx
+				}
+				END {
+					for (k in vals) seq[order[k]] = k
+					for (i = 1; i <= next_idx; i++) {
+						k = seq[i]
+						n_split = split(vals[k], arr, " ")
+						cnt = 0
+						for (j = 1; j <= n_split; j++) if (arr[j] != "") nums[++cnt] = arr[j] + 0
+						for (a = 1; a <= cnt; a++)
+							for (b = a + 1; b <= cnt; b++)
+								if (nums[b] < nums[a]) { t = nums[a]; nums[a] = nums[b]; nums[b] = t }
+						mid = int((cnt + 1) / 2)
+						printf "%s\t%.4f\n", k, nums[mid]
+						delete nums
+					}
+				}
+			' "$1"
+		}
+		extract_medians "$tmp/blip.raw"      > "$tmp/blip.med"
+		extract_medians "$tmp/gmp.raw"       > "$tmp/gmp.med"
+		extract_medians "$tmp/gmp_noasm.raw" > "$tmp/gmp_noasm.med"
+
+		# Map blip-op -> gmp-op (canonical "operation kind" extracted from impl/op name).
+		map_op() {
+			case "$1" in
+				"impl=Mp.add"|"impl=raw")       echo "add" ;;
+				"impl=Mp.sub")                  echo "sub" ;;
+				"impl=Mp.mul")                  echo "mul" ;;
+				"impl=Mp.divMod")               echo "divmod" ;;
+				"impl=Mp.powm")                 echo "powm" ;;
+				"impl=Mp.invMod")               echo "invmod" ;;
+				"mpz_add")                      echo "add" ;;
+				"mpz_sub")                      echo "sub" ;;
+				"mpz_mul")                      echo "mul" ;;
+				"mpz_tdiv_qr")                  echo "divmod" ;;
+				"mpz_powm")                     echo "powm" ;;
+				"mpz_invert")                   echo "invmod" ;;
+				*) echo "_unknown_:$1" ;;
+			esac
+		}
+
+		# Build canonical (kind, bucket) -> median maps for each source.
+		make_canonical() {
+			while IFS=$'\t' read -r op bkey median; do
+				kind=$(map_op "$op")
+				[ "$kind" = "_unknown_:$op" ] && continue
+				printf '%s\t%s\t%s\n' "$kind" "$bkey" "$median"
+			done < "$1"
+		}
+		make_canonical "$tmp/blip.med"      > "$tmp/blip.canon"
+		make_canonical "$tmp/gmp.med"       > "$tmp/gmp.canon"
+		make_canonical "$tmp/gmp_noasm.med" > "$tmp/gmp_noasm.canon"
+
+		# Final side-by-side: walk blip.canon, join with gmp and gmp_noasm by (kind,bucket).
+		awk -F$'\t' '
+			NR == FNR { gmp[$1 SUBSEP $2] = $3; next }
+			{ if (FILENAME ~ /noasm/) { noasm[$1 SUBSEP $2] = $3; next } }
+		' "$tmp/gmp.canon" "$tmp/gmp_noasm.canon" /dev/null  # populate via two-pass awk... actually simpler:
+
+		# Simpler: do the join with awk in one pass.
+		awk -F$'\t' '
+			ARGIND == 1 { gmp[$1 SUBSEP $2] = $3; next }
+			ARGIND == 2 { noasm[$1 SUBSEP $2] = $3; next }
+			ARGIND == 3 {
+				k = $1 SUBSEP $2
+				blip = $3 + 0
+				g = (k in gmp) ? gmp[k] + 0 : 0
+				na = (k in noasm) ? noasm[k] + 0 : 0
+				ratio = (g > 0) ? blip / g : 0
+				marker = ""
+				if (g > 0 && blip < g) marker = " ✓"  # blip wins
+				if (g > 0 && blip > 1.5 * g) marker = " ✗"  # blip loses big
+				printf "%-44s  %12.2f  %12.2f  %12.2f  %7.2fx%s\n", $1 " " $2, blip, g, na, ratio, marker
+			}
+		' "$tmp/gmp.canon" "$tmp/gmp_noasm.canon" "$tmp/blip.canon"
 		;;
 
 	full)

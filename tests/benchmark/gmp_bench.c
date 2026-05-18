@@ -393,12 +393,12 @@ int main(void) {
 	size_t n = sizeof(BUCKETS) / sizeof(BUCKETS[0]);
 	for (size_t i = 0; i < n; i++) {
 		double ns_per_op = benchmark_bucket(&BUCKETS[i]);
-		printf("RESULT bucket=%s ns_per_op=%.2f\n", BUCKETS[i].name, ns_per_op);
+		printf("RESULT mpz_add bucket=%s ns_per_op=%.2f\n", BUCKETS[i].name, ns_per_op);
 	}
 	size_t m = sizeof(LARGE_BUCKETS) / sizeof(LARGE_BUCKETS[0]);
 	for (size_t i = 0; i < m; i++) {
 		double ns_per_op = benchmark_large_bucket(&LARGE_BUCKETS[i]);
-		printf("RESULT bucket=%s ns_per_op=%.2f\n", LARGE_BUCKETS[i].name, ns_per_op);
+		printf("RESULT mpz_add bucket=%s ns_per_op=%.2f\n", LARGE_BUCKETS[i].name, ns_per_op);
 	}
 
 	printf("\n--- subtraction ---\n");
