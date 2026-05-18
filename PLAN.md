@@ -400,6 +400,49 @@ Going forward, **"limb"** is used ONLY for genuinely stored fixed-width `[]u64` 
 
 The `bp` tool serves the architectural mandate (CLI dogfoods the C FFI, not direct Zig import). It's a Forth-style stack calculator that lets users do exact arbitrary-precision arithmetic from the shell.
 
+## GMP-parity striving (2026-05-18 session results)
+
+Statistical bench harness shipped (`./bm --stable N`) — N-run aggregation with
+per-bucket median + min..max range. Variance now 1-5% per bucket (was 17-60%
+last session under thermal load), making 5-10% perf decisions reliably
+measurable.
+
+**Shipped wins (vs GMP-asm, M4 aarch64, ./bm --stable 7):**
+
+| Op + size | Before | After | Closed |
+|-----------|--------|-------|--------|
+| invMod 128-bit | 4.65× behind | **1.23×** | 73% |
+| invMod 192-bit | 3.91× behind | **2.18×** | 44% |
+| invMod 256-bit | 3.69× behind | **2.18×** | 41% |
+
+Approach: `Mp.invModStein` with inline `u128` / `u256` register-resident
+binary extended GCD. The Mp-boxed Stein was slower than Lehmer (Mp.div per
+halving); pushing math to native register widths eliminates the per-step
+overhead. Dispatch in `Mp.invMod`: `m_bits ≤ 256 AND odd → invModStein`.
+Bezout coefficients tracked modulo m (always in [0, m)) — avoids signed
+overflow when m's top bit is set.
+
+**Identified blockers documented (deferred — require hand-asm):**
+
+- **FFT activation** (work item #3): would close the 1.65-2.55× divMod gap
+  at 16K-64K-bit via B-Z dispatch. Current FFT loses to Toom-3 by 1.08-1.43×
+  across all supported sizes. Closing this requires M6-4-E.3 (hand-asm
+  NEON butterflies). User deferred hand-asm; FFT stays gated off.
+- **2-limb divisor specialization** (work item #4): 256-bit divMod gap is
+  2.16× (was 2.13× — unchanged this session). Gap is wrapper overhead, not
+  the kernel. Would need bypassing tier3DivModOp → divModSigned →
+  divModSignedLarge chain with an inlined small-operand fast path. Not
+  attempted this session (substantial restructuring for moderate gain).
+
+**Current full comparison vs GMP-asm:**
+
+| Op | Sweet spot | Worst gap |
+|----|------------|-----------|
+| mul | 0.60-0.94× FASTER (128-bit through 8K-bit) | 1.73× behind at 32K-bit (FFT) |
+| powm | 0.89-0.98× FASTER (RSA-1024/2048/3072) | tied at 512-bit |
+| divMod | 1.30-1.43× behind (512-4K) | 2.52× behind at 64K-bit (no B-Z+FFT) |
+| invMod | **1.23× behind at 128-bit (NEW)** | 2.79× behind at 2048-bit (HGCD) |
+
 ## GMP-parity striving (2026-05-17 session findings)
 
 User goal: match or beat GMP at all sizes. Honest current state on M4 aarch64
