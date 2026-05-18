@@ -14,3 +14,7 @@ zig-out/
 
 # macOS noise
 .DS_Store
+
+# Stray binaries / repro artifacts from debugging sessions
+repro-*
+*.crash
