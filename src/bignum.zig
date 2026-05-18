@@ -963,6 +963,19 @@ pub const Mp = struct {
 		// practical optimum.
 		const m_bits = m.bitLen();
 		if (m_bits < 96) return invModClassical(r, a, m);
+		// Stein's binary GCD wins at 128-bit (2.5× over Lehmer in internal
+		// bench; closes the external 4.65× gap to GMP at this size).
+		// Above ~192 bits Lehmer's matrix batching takes over.
+		// Note: must check the PAYLOAD's low byte (the magnitude's parity),
+		// NOT bytes()[0] which is the BLIP header byte.
+		// Stein's inline u128/u256 paths win at sizes ≤ 256-bit magnitude
+		// (u128: 128-bit gap 4.65× → 1.22×; u256: 256-bit gap 3.65× → 2.16×).
+		// u512 was tested and basically ties Lehmer (no benefit), so we cap
+		// the dispatch at 256-bit.
+		const m_pay = m.payload();
+		if (m_bits <= 256 and m_pay.len > 0 and (m_pay[0] & 1) == 1) {
+			return invModStein(r, a, m);
+		}
 		if (m_bits >= 1024) return invModHGCD(r, a, m);
 		return invModLehmer(r, a, m);
 	}
@@ -974,6 +987,485 @@ pub const Mp = struct {
 	/// Each step: q = r0/r1; (r0,r1)=(r1,r0-q*r1); (s0,s1)=(s1,s0-q*s1).
 	/// Terminates when r1 == 0; if r0 == 1 the inverse is s0 mod m. We
 	/// don't track the t coefficient (on m) since we don't need it.
+	/// Inline u128 Stein's binary extended GCD. For operands that fit in
+	/// u128 (≤ 128 bits magnitude), this avoids Mp boxing entirely — all
+	/// the halvings, subtractions, comparisons run on register-resident
+	/// u128 values. The Bezout coefficient tracking uses i128 (signed) so
+	/// the algorithm handles negative coefficients naturally; at the end
+	/// the result is reduced mod m back to [0, m).
+	///
+	/// Caller must guarantee both a and m fit in u128 (|a| < 2^128 and
+	/// |m| < 2^128) and m is odd.
+	fn invModSteinU128(a_val: u128, m_val: u128) struct { ok: bool, r: u128 } {
+		std.debug.assert((m_val & 1) == 1);
+		// Reduce a mod m.
+		var u: u128 = a_val % m_val;
+		if (u == 0) return .{ .ok = false, .r = 0 };
+		var v: u128 = m_val;
+		// Bezout coefficients tracked MODULO m, always in [0, m). No signed
+		// arithmetic — keeps everything in u128 so m_val's top bit doesn't
+		// flip a sign interpretation.
+		var x1: u128 = 1; // coefficient on a tracking u
+		var x2: u128 = 0; // coefficient on a tracking v
+
+		// Helper: halve x given m is odd. If x even, just shift. If x odd,
+		// (x + m) is even (odd + odd) so shift after add. The (x + m) may
+		// exceed u128 — we handle the carry via the >> 1 picking up the
+		// carry bit in the high position.
+		const halve = struct {
+			fn f(x: u128, m: u128) u128 {
+				if ((x & 1) == 0) return x >> 1;
+				// x is odd, m is odd ⇒ x + m is even; (x + m) / 2 is integer.
+				// Compute via u128 add with explicit carry tracking.
+				const sum = x +% m;
+				const carry: u128 = if (sum < x) (@as(u128, 1) << 127) else 0;
+				return (sum >> 1) | carry;
+			}
+		}.f;
+
+		while (u != 0) {
+			while ((u & 1) == 0) {
+				u >>= 1;
+				x1 = halve(x1, m_val);
+				if (u == 0) break;
+			}
+			if (u == 0) break;
+
+			while ((v & 1) == 0) {
+				v >>= 1;
+				x2 = halve(x2, m_val);
+			}
+
+			// Both odd: subtract smaller from larger. Bezout coefficients
+			// stay in [0, m) via "x = (x + m - y) mod m" pattern.
+			if (u >= v) {
+				u -%= v;
+				// x1 = (x1 - x2) mod m, kept positive.
+				if (x1 >= x2) {
+					x1 -%= x2;
+				} else {
+					x1 = (x1 +% m_val) -% x2;
+				}
+			} else {
+				v -%= u;
+				if (x2 >= x1) {
+					x2 -%= x1;
+				} else {
+					x2 = (x2 +% m_val) -% x1;
+				}
+			}
+		}
+
+		// gcd is v.
+		if (v != 1) return .{ .ok = false, .r = 0 };
+		// x2 is already in [0, m) by invariant.
+		return .{ .ok = true, .r = x2 };
+	}
+
+	/// Inline u256 Stein's binary extended GCD. Same algorithm as the u128
+	/// variant but on 256-bit registers. Zig supports `u256` as a builtin
+	/// arbitrary-width int type, but it compiles to multi-instruction
+	/// sequences (no native 256-bit instructions on aarch64). Still much
+	/// faster than the Mp-boxed loop because the operations are inlined
+	/// straight-line code with no per-step allocation.
+	fn invModSteinU256(a_val: u256, m_val: u256) struct { ok: bool, r: u256 } {
+		std.debug.assert((m_val & 1) == 1);
+		var u: u256 = a_val % m_val;
+		if (u == 0) return .{ .ok = false, .r = 0 };
+		var v: u256 = m_val;
+		var x1: u256 = 1;
+		var x2: u256 = 0;
+
+		const halve = struct {
+			fn f(x: u256, m: u256) u256 {
+				if ((x & 1) == 0) return x >> 1;
+				const sum = x +% m;
+				const carry: u256 = if (sum < x) (@as(u256, 1) << 255) else 0;
+				return (sum >> 1) | carry;
+			}
+		}.f;
+
+		while (u != 0) {
+			while ((u & 1) == 0) {
+				u >>= 1;
+				x1 = halve(x1, m_val);
+				if (u == 0) break;
+			}
+			if (u == 0) break;
+			while ((v & 1) == 0) {
+				v >>= 1;
+				x2 = halve(x2, m_val);
+			}
+			if (u >= v) {
+				u -%= v;
+				if (x1 >= x2) {
+					x1 -%= x2;
+				} else {
+					x1 = (x1 +% m_val) -% x2;
+				}
+			} else {
+				v -%= u;
+				if (x2 >= x1) {
+					x2 -%= x1;
+				} else {
+					x2 = (x2 +% m_val) -% x1;
+				}
+			}
+		}
+		if (v != 1) return .{ .ok = false, .r = 0 };
+		return .{ .ok = true, .r = x2 };
+	}
+
+	fn invModSteinU512(a_val: u512, m_val: u512) struct { ok: bool, r: u512 } {
+		std.debug.assert((m_val & 1) == 1);
+		var u: u512 = a_val % m_val;
+		if (u == 0) return .{ .ok = false, .r = 0 };
+		var v: u512 = m_val;
+		var x1: u512 = 1;
+		var x2: u512 = 0;
+		const halve = struct {
+			fn f(x: u512, m: u512) u512 {
+				if ((x & 1) == 0) return x >> 1;
+				const sum = x +% m;
+				const carry: u512 = if (sum < x) (@as(u512, 1) << 511) else 0;
+				return (sum >> 1) | carry;
+			}
+		}.f;
+		while (u != 0) {
+			while ((u & 1) == 0) {
+				u >>= 1;
+				x1 = halve(x1, m_val);
+				if (u == 0) break;
+			}
+			if (u == 0) break;
+			while ((v & 1) == 0) {
+				v >>= 1;
+				x2 = halve(x2, m_val);
+			}
+			if (u >= v) {
+				u -%= v;
+				if (x1 >= x2) {
+					x1 -%= x2;
+				} else {
+					x1 = (x1 +% m_val) -% x2;
+				}
+			} else {
+				v -%= u;
+				if (x2 >= x1) {
+					x2 -%= x1;
+				} else {
+					x2 = (x2 +% m_val) -% x1;
+				}
+			}
+		}
+		if (v != 1) return .{ .ok = false, .r = 0 };
+		return .{ .ok = true, .r = x2 };
+	}
+
+	fn mpToU512Magnitude(self: *const Mp) ?u512 {
+		const pay = self.payload();
+		if (tier3.signExtByte(pay) == 0xFF) return null;
+		var canon_len: usize = pay.len;
+		while (canon_len > 0 and pay[canon_len - 1] == 0) canon_len -= 1;
+		if (canon_len > 64) return null;
+		var val: u512 = 0;
+		var i: usize = canon_len;
+		while (i > 0) {
+			i -= 1;
+			val = (val << 8) | @as(u512, pay[i]);
+		}
+		return val;
+	}
+
+	fn mpSetFromU512(self: *Mp, val: u512) ArithError!void {
+		if (val == 0) {
+			try self.setI64(0);
+			return;
+		}
+		var len: usize = 64;
+		while (len > 0 and ((val >> @intCast((len - 1) * 8)) & 0xFF) == 0) len -= 1;
+		var buf: [66]u8 = undefined;
+		var i: usize = 0;
+		while (i < len) : (i += 1) {
+			buf[i] = @truncate(val >> @intCast(i * 8));
+		}
+		if ((buf[len - 1] & 0x80) != 0) {
+			buf[len] = 0x00;
+			len += 1;
+		}
+		var enc: [72]u8 = undefined;
+		const hdr_len = try tier3.writeHeader(&enc, len);
+		@memcpy(enc[hdr_len .. hdr_len + len], buf[0..len]);
+		try self.setBytes(enc[0 .. hdr_len + len]);
+	}
+
+	fn mpToU256Magnitude(self: *const Mp) ?u256 {
+		const pay = self.payload();
+		if (tier3.signExtByte(pay) == 0xFF) return null;
+		var canon_len: usize = pay.len;
+		while (canon_len > 0 and pay[canon_len - 1] == 0) canon_len -= 1;
+		if (canon_len > 32) return null;
+		var val: u256 = 0;
+		var i: usize = canon_len;
+		while (i > 0) {
+			i -= 1;
+			val = (val << 8) | @as(u256, pay[i]);
+		}
+		return val;
+	}
+
+	fn mpSetFromU256(self: *Mp, val: u256) ArithError!void {
+		if (val == 0) {
+			try self.setI64(0);
+			return;
+		}
+		var len: usize = 32;
+		while (len > 0 and ((val >> @intCast((len - 1) * 8)) & 0xFF) == 0) len -= 1;
+		var buf: [34]u8 = undefined;
+		var i: usize = 0;
+		while (i < len) : (i += 1) {
+			buf[i] = @truncate(val >> @intCast(i * 8));
+		}
+		if ((buf[len - 1] & 0x80) != 0) {
+			buf[len] = 0x00;
+			len += 1;
+		}
+		var enc: [38]u8 = undefined;
+		const hdr_len = try tier3.writeHeader(&enc, len);
+		@memcpy(enc[hdr_len .. hdr_len + len], buf[0..len]);
+		try self.setBytes(enc[0 .. hdr_len + len]);
+	}
+
+	/// Try to extract a u128 magnitude from a positive Mp. Returns null if
+	/// the value exceeds u128 (would lose data) or if the Mp is negative.
+	fn mpToU128Magnitude(self: *const Mp) ?u128 {
+		const pay = self.payload();
+		if (tier3.signExtByte(pay) == 0xFF) return null; // negative
+		var canon_len: usize = pay.len;
+		while (canon_len > 0 and pay[canon_len - 1] == 0) canon_len -= 1;
+		if (canon_len > 16) return null; // too big for u128
+		var val: u128 = 0;
+		var i: usize = canon_len;
+		while (i > 0) {
+			i -= 1;
+			val = (val << 8) | @as(u128, pay[i]);
+		}
+		return val;
+	}
+
+	/// Set Mp from a u128 (non-negative).
+	fn mpSetFromU128(self: *Mp, val: u128) ArithError!void {
+		if (val == 0) {
+			try self.setI64(0);
+			return;
+		}
+		// Find canonical byte length.
+		var len: usize = 16;
+		while (len > 0 and ((val >> @intCast((len - 1) * 8)) & 0xFF) == 0) len -= 1;
+		// Build the canonical 2's-comp payload (positive: prepend 0x00 if MSB set).
+		var buf: [18]u8 = undefined;
+		var i: usize = 0;
+		while (i < len) : (i += 1) {
+			buf[i] = @truncate(val >> @intCast(i * 8));
+		}
+		if ((buf[len - 1] & 0x80) != 0) {
+			buf[len] = 0x00;
+			len += 1;
+		}
+		// Encode as BLIP: header + payload.
+		var enc: [22]u8 = undefined;
+		const hdr_len = try tier3.writeHeader(&enc, len);
+		@memcpy(enc[hdr_len .. hdr_len + len], buf[0..len]);
+		try self.setBytes(enc[0 .. hdr_len + len]);
+	}
+
+	/// Stein's binary extended GCD for modular inverse. Replaces classical
+	/// EEA's quotient division with bit-shifts (halving) and subtractions.
+	/// For odd modulus (the crypto-relevant case), the trick (x+m)/2 when
+	/// x is odd keeps the Bezout coefficient an integer at every step.
+	///
+	/// Requires m to be odd. For even m, falls through to invModClassical.
+	/// Returns true if gcd(a, m) == 1 (inverse exists); the inverse is
+	/// written into r as a value in [0, |m|). On no-inverse, sets r = 0
+	/// and returns false (matches GMP's mpz_invert semantics).
+	pub fn invModStein(r: *Mp, a: *const Mp, m: *const Mp) ArithError!bool {
+		if (m.cached_sign == 0) return error.DivisionByZero;
+		const allocator = r.allocator;
+
+		// |m|.
+		var m_abs = Mp.init(allocator);
+		defer m_abs.deinit();
+		if (m.cached_sign < 0) {
+			var zero = Mp.init(allocator);
+			defer zero.deinit();
+			try zero.setI64(0);
+			try m_abs.sub(&zero, m);
+		} else {
+			try m_abs.setBytes(m.bytes());
+		}
+
+		// Special cases.
+		const m_abs_pay = m_abs.payload();
+		if (m_abs.cached_pay_len == 1 and m_abs_pay[0] == 1) {
+			try r.setI64(0);
+			return true;
+		}
+
+		// Stein's requires m odd. If m is even, defer to classical EEA.
+		if ((m_abs_pay[0] & 1) == 0) {
+			return invModClassical(r, a, m);
+		}
+
+		// u128 inline fast path: when both |a| and |m| fit in u128 (≤ 128
+		// bits magnitude), skip all Mp boxing — the entire algorithm runs
+		// on register-resident u128 values.
+		if (mpToU128Magnitude(&m_abs)) |m_val| {
+			var a_reduced = Mp.init(allocator);
+			defer a_reduced.deinit();
+			try euclideanReduce(&a_reduced, a, &m_abs);
+			if (a_reduced.cached_sign == 0) {
+				try r.setI64(0);
+				return false;
+			}
+			if (mpToU128Magnitude(&a_reduced)) |a_val| {
+				const out = invModSteinU128(a_val, m_val);
+				if (!out.ok) {
+					try r.setI64(0);
+					return false;
+				}
+				try mpSetFromU128(r, out.r);
+				return true;
+			}
+		}
+
+		// u256 inline path: for 129..256-bit magnitudes. Compiles to multi-
+		// instruction sequences on aarch64 but no allocations / no Mp boxing.
+		if (mpToU256Magnitude(&m_abs)) |m_val| {
+			var a_reduced = Mp.init(allocator);
+			defer a_reduced.deinit();
+			try euclideanReduce(&a_reduced, a, &m_abs);
+			if (a_reduced.cached_sign == 0) {
+				try r.setI64(0);
+				return false;
+			}
+			if (mpToU256Magnitude(&a_reduced)) |a_val| {
+				const out = invModSteinU256(a_val, m_val);
+				if (!out.ok) {
+					try r.setI64(0);
+					return false;
+				}
+				try mpSetFromU256(r, out.r);
+				return true;
+			}
+		}
+
+		// u512 path was prototyped but doesn't beat Lehmer at 384/512-bit
+		// (within 1-3% of Lehmer's measured time). Dropped to keep code
+		// minimal; the helpers (mpToU512Magnitude etc.) remain for the
+		// future case where u512 + a faster reduction primitive might win.
+
+		// u = a mod |m| (positive, in [0, |m|)).
+		var u = Mp.init(allocator);
+		defer u.deinit();
+		try euclideanReduce(&u, a, &m_abs);
+		if (u.cached_sign == 0) {
+			try r.setI64(0);
+			return false; // gcd = m, no inverse
+		}
+
+		// v = |m|.
+		var v = Mp.init(allocator);
+		defer v.deinit();
+		try v.setBytes(m_abs.bytes());
+
+		// Bezout coefficients tracking u and v. We want a coefficient x
+		// such that at termination, a*x ≡ gcd mod m. Initially x1 = 1
+		// (coefficient of u), x2 = 0 (coefficient of v).
+		var x1 = Mp.init(allocator);
+		defer x1.deinit();
+		try x1.setI64(1);
+		var x2 = Mp.init(allocator);
+		defer x2.deinit();
+		try x2.setI64(0);
+
+		// Halving via shr (arithmetic right shift). Note: x1 / x2 can go
+		// negative; shr on a negative Mp does floor-division which is wrong
+		// for our "x = x / 2 when even" tracking. We need TRUNCATED div by 2
+		// for Stein's. Workaround: compare to 0, negate if needed, shr, re-negate.
+		// Simpler: use a manual byte-level halving via tier3 op set, OR do
+		// (x + m) / 2 vs x / 2 cases via Mp ops carefully. Implement via div
+		// by 2 with sign-aware logic.
+		var tmp = Mp.init(allocator);
+		defer tmp.deinit();
+		var tmp2 = Mp.init(allocator);
+		defer tmp2.deinit();
+		var two = Mp.init(allocator);
+		defer two.deinit();
+		try two.setI64(2);
+
+		// Main loop: while u != 0 do binary steps until u becomes 0; then
+		// gcd = v and the inverse-of-a is in x2 (mod m).
+		while (u.cached_sign != 0) {
+			// While u is even: u = u/2; halve x1 (with +m if odd).
+			while ((u.payload()[0] & 1) == 0) {
+				try tmp.setBytes(u.bytes());
+				try Mp.div(&u, &tmp, &two);
+				if (x1.cached_sign != 0 and (x1.payload()[0] & 1) != 0) {
+					// x1 is odd → (x1 + m_abs) / 2.
+					try tmp.add(&x1, &m_abs);
+					try Mp.div(&x1, &tmp, &two);
+				} else {
+					// x1 is even (or zero) → x1 / 2.
+					try tmp.setBytes(x1.bytes());
+					try Mp.div(&x1, &tmp, &two);
+				}
+				if (u.cached_sign == 0) break;
+			}
+			if (u.cached_sign == 0) break;
+
+			// While v is even: v = v/2; halve x2 (with +m if odd).
+			while ((v.payload()[0] & 1) == 0) {
+				try tmp.setBytes(v.bytes());
+				try Mp.div(&v, &tmp, &two);
+				if (x2.cached_sign != 0 and (x2.payload()[0] & 1) != 0) {
+					try tmp.add(&x2, &m_abs);
+					try Mp.div(&x2, &tmp, &two);
+				} else {
+					try tmp.setBytes(x2.bytes());
+					try Mp.div(&x2, &tmp, &two);
+				}
+			}
+
+			// Both u and v are now odd. Compare; subtract smaller from larger;
+			// the larger's Bezout coefficient gets the difference of coefficients.
+			if (Mp.cmp(&u, &v) != .lt) {
+				// u >= v: u = u - v; x1 = x1 - x2.
+				try tmp.sub(&u, &v);
+				try u.setBytes(tmp.bytes());
+				try tmp.sub(&x1, &x2);
+				try x1.setBytes(tmp.bytes());
+			} else {
+				// v > u: v = v - u; x2 = x2 - x1.
+				try tmp.sub(&v, &u);
+				try v.setBytes(tmp.bytes());
+				try tmp.sub(&x2, &x1);
+				try x2.setBytes(tmp.bytes());
+			}
+		}
+
+		// At termination, gcd(a, m) = v. If v != 1, no inverse.
+		if (!(v.cached_pay_len == 1 and v.bytes()[0] == 1)) {
+			try r.setI64(0);
+			return false;
+		}
+
+		// x2 is the inverse (possibly negative). Reduce mod |m| to canonical [0, |m|).
+		// Use a simple reduce: while x2 < 0: x2 += m; while x2 >= m: x2 -= m.
+		// For large negative x2, this could be slow; use euclideanReduce instead.
+		try euclideanReduce(r, &x2, &m_abs);
+		return true;
+	}
+
 	pub fn invModClassical(r: *Mp, a: *const Mp, m: *const Mp) ArithError!bool {
 		if (m.cached_sign == 0) return error.DivisionByZero;
 		const allocator = r.allocator;
@@ -5144,6 +5636,65 @@ test "invMod: result satisfies (a * r) mod m == 1 for 200 random small pairs" {
 	try testing.expect(verified > 100);
 }
 
+test "invModStein matches invModLehmer: 500+ random pairs across bit-widths" {
+	// Stein's binary GCD with Bezout (M-stein) must agree bit-for-bit with the
+	// GMP-validated Lehmer impl. Same test shape as the Lehmer-vs-classical
+	// oracle test, with m forced odd (Stein's requires odd modulus for the
+	// (x+m)/2 trick that keeps the Bezout coefficient an integer).
+	defer tier3.releaseBzArena();
+	defer tier3.releaseMulScratch();
+	defer tier3.releaseDivScratch();
+	defer tier3.releaseVnScratch();
+	const SIZES = [_]usize{ 64, 128, 192, 256, 384, 512, 768, 1024, 2048 };
+	const ITERS_PER_SIZE: usize = 60;
+	var prng = std.Random.DefaultPrng.init(0xC0FF_57E1_F00D_BEEF);
+	const rand = prng.random();
+
+	var a = Mp.init(testing.allocator);
+	defer a.deinit();
+	var m = Mp.init(testing.allocator);
+	defer m.deinit();
+	var r_stein = Mp.init(testing.allocator);
+	defer r_stein.deinit();
+	var r_lehmer = Mp.init(testing.allocator);
+	defer r_lehmer.deinit();
+
+	var raw_buf: [512]u8 = undefined;
+	var enc_buf: [600]u8 = undefined;
+
+	var total: usize = 0;
+	var compared: usize = 0;
+	for (SIZES) |bits| {
+		const byte_len = (bits + 7) / 8;
+		var i: usize = 0;
+		while (i < ITERS_PER_SIZE) : (i += 1) {
+			rand.bytes(raw_buf[0..byte_len]);
+			raw_buf[byte_len - 1] &= 0x7F;
+			const hdr_a = try tier3.writeHeader(&enc_buf, byte_len);
+			@memcpy(enc_buf[hdr_a..][0..byte_len], raw_buf[0..byte_len]);
+			try a.setBytes(enc_buf[0 .. hdr_a + byte_len]);
+
+			rand.bytes(raw_buf[0..byte_len]);
+			raw_buf[byte_len - 1] = (raw_buf[byte_len - 1] & 0x7F) | 0x40;
+			raw_buf[0] |= 1; // m must be odd for Stein's
+			const hdr_m = try tier3.writeHeader(&enc_buf, byte_len);
+			@memcpy(enc_buf[hdr_m..][0..byte_len], raw_buf[0..byte_len]);
+			try m.setBytes(enc_buf[0 .. hdr_m + byte_len]);
+
+			const ok_l = try Mp.invModLehmer(&r_lehmer, &a, &m);
+			const ok_s = try Mp.invModStein(&r_stein, &a, &m);
+			try testing.expectEqual(ok_l, ok_s);
+			if (ok_l) {
+				try testing.expect(Mp.cmp(&r_stein, &r_lehmer) == .eq);
+				compared += 1;
+			}
+			total += 1;
+		}
+	}
+	try testing.expect(total >= 500);
+	try testing.expect(compared >= 400);
+}
+
 test "invModLehmer matches invModClassical: 1000 random pairs across bit-widths" {
 	// Strict TDD oracle: classical EEA is GMP-validated; Lehmer must agree
 	// bit-for-bit. Picks random a, m with m odd >= 3 to maximise gcd==1
@@ -5475,8 +6026,8 @@ test "bench: invModLehmer vs invModHGCD across bit-widths" {
 	defer tier3.releaseMulScratch();
 	defer tier3.releaseDivScratch();
 	defer tier3.releaseVnScratch();
-	const SIZES = [_]usize{ 1024, 2048, 4096, 8192 };
-	const ITERS_BY_SIZE = [_]usize{ 200, 100, 25, 8 };
+	const SIZES = [_]usize{ 64, 96, 128, 192, 256, 384, 512, 768, 1024, 2048, 4096, 8192 };
+	const ITERS_BY_SIZE = [_]usize{ 2000, 1500, 1000, 700, 500, 400, 300, 250, 200, 100, 25, 8 };
 	var prng = std.Random.DefaultPrng.init(0xBABE_CAFE_F00D);
 	const rand = prng.random();
 
@@ -5557,15 +6108,31 @@ test "bench: invModLehmer vs invModHGCD across bit-widths" {
 		try testing.expect(Mp.cmp(&r_l, &r_h) == .eq);
 
 		const speedup_h = @as(f64, @floatFromInt(ns_lehmer)) / @as(f64, @floatFromInt(ns_hgcd));
+
+		// Stein's binary GCD (new — M-Stein).
+		var r_s = Mp.init(testing.allocator);
+		defer r_s.deinit();
+		_ = try Mp.invModStein(&r_s, &a, &m); // warm-up
+		const ts0 = invModBenchNanos();
+		i = 0;
+		while (i < iters) : (i += 1) {
+			_ = try Mp.invModStein(&r_s, &a, &m);
+			std.mem.doNotOptimizeAway(&r_s);
+		}
+		const ts1 = invModBenchNanos();
+		const ns_stein = (ts1 - ts0) / iters;
+		const speedup_s = @as(f64, @floatFromInt(ns_lehmer)) / @as(f64, @floatFromInt(ns_stein));
+		try testing.expect(Mp.cmp(&r_l, &r_s) == .eq);
+
 		if (bits <= 4096) {
 			std.debug.print(
-				"\n[bench] invMod {d}-bit  Lehmer={d} ns/op  HGCD={d} ns/op (x{d:.2})  HGCDRec={d} ns/op (x{d:.2})\n",
-				.{ bits, ns_lehmer, ns_hgcd, speedup_h, ns_rec, speedup_r },
+				"\n[bench] invMod {d}-bit  Lehmer={d} ns/op  HGCD={d} (x{d:.2})  HGCDRec={d} (x{d:.2})  Stein={d} (x{d:.2})\n",
+				.{ bits, ns_lehmer, ns_hgcd, speedup_h, ns_rec, speedup_r, ns_stein, speedup_s },
 			);
 		} else {
 			std.debug.print(
-				"\n[bench] invMod {d}-bit  Lehmer={d} ns/op  HGCD={d} ns/op  speedup={d:.2}x  (HGCDRec skipped: O(M(n) log n) requires FFT mul)\n",
-				.{ bits, ns_lehmer, ns_hgcd, speedup_h },
+				"\n[bench] invMod {d}-bit  Lehmer={d} ns/op  HGCD={d} (x{d:.2})  Stein={d} (x{d:.2})  (HGCDRec skipped)\n",
+				.{ bits, ns_lehmer, ns_hgcd, speedup_h, ns_stein, speedup_s },
 			);
 		}
 	}

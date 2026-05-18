@@ -76,9 +76,14 @@ static const LargeBucket POWM_BUCKETS[] = {
 	{"3072-bit", 3072},
 };
 static const LargeBucket INVMOD_BUCKETS[] = {
+	{"128-bit",  128},
+	{"192-bit",  192},
 	{"256-bit",  256},
+	{"384-bit",  384},
 	{"512-bit",  512},
+	{"768-bit",  768},
 	{"1024-bit", 1024},
+	{"1536-bit", 1536},
 	{"2048-bit", 2048},
 };
 
