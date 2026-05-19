@@ -2562,3 +2562,417 @@ test "nttRadix4Vec convolution theorem: invR4(R4(a) * R4(b)) = a ⊛ b" {
 	}
 	for (0..M) |i| try testing.expectEqual(ref[i], c[i]);
 }
+
+// ────────────────────────────────────────────────────────────────────────────
+// Phase 1 (2026-05-18): Goldilocks-prime modular arithmetic for the larger-
+// prime NTT experiment. The bandwidth-bound finding from M6-4-E.3 suggests
+// reducing N (via larger digit packing under a bigger prime) attacks the
+// real bottleneck — total LSU traffic = bytes/iter × N. Goldilocks lets us
+// pack 16-bit digits (vs current 8-bit) → halves N, halves bandwidth.
+//
+// Prime: p = 2^64 - 2^32 + 1 = 0xFFFFFFFF00000001.
+// p-1 = 2^32 · (2^32 - 1), so 2^32 | (p-1) — NTT lengths up to 2^32 supported.
+// Special form enables Solinas reduction (subs/adds, no division).
+// Used by plonky2 etc. for SNARK arithmetic.
+// ────────────────────────────────────────────────────────────────────────────
+
+pub const GOLDILOCKS_P: u64 = 0xFFFFFFFF00000001;
+const GOLDILOCKS_EPSILON: u64 = 0xFFFFFFFF; // 2^32 - 1 = -p mod 2^64
+
+/// (a + b) mod GOLDILOCKS_P. Inputs in [0, p).
+pub inline fn goldAddMod(a: u64, b: u64) u64 {
+	const s = @addWithOverflow(a, b);
+	var r: u64 = s[0];
+	if (s[1] != 0 or r >= GOLDILOCKS_P) r +%= GOLDILOCKS_EPSILON;
+	return r;
+}
+
+/// (a - b) mod GOLDILOCKS_P.
+pub inline fn goldSubMod(a: u64, b: u64) u64 {
+	const d = @subWithOverflow(a, b);
+	var r: u64 = d[0];
+	if (d[1] != 0) r -%= GOLDILOCKS_EPSILON;
+	return r;
+}
+
+/// 128-bit → mod-p reduction via Solinas form.
+///   p = 2^64 - 2^32 + 1  →  2^64 ≡ 2^32 - 1 ≡ EPSILON (mod p)
+///   x = x_hi · 2^64 + x_lo ≡ x_hi · EPSILON + x_lo (mod p)
+pub inline fn goldReduce128(x: u128) u64 {
+	const x_lo: u64 = @truncate(x);
+	const x_hi: u64 = @truncate(x >> 64);
+	const x_hi_hi: u64 = x_hi >> 32;
+	const x_hi_lo: u64 = x_hi & 0xFFFFFFFF;
+	const t0_sub = @subWithOverflow(x_lo, x_hi_hi);
+	var t0: u64 = t0_sub[0];
+	if (t0_sub[1] != 0) t0 -%= GOLDILOCKS_EPSILON;
+	const t1: u64 = x_hi_lo *% GOLDILOCKS_EPSILON;
+	const t2_add = @addWithOverflow(t0, t1);
+	var r: u64 = t2_add[0];
+	if (t2_add[1] != 0) r +%= GOLDILOCKS_EPSILON;
+	if (r >= GOLDILOCKS_P) r -= GOLDILOCKS_P;
+	return r;
+}
+
+/// (a * b) mod GOLDILOCKS_P.
+pub inline fn goldMulMod(a: u64, b: u64) u64 {
+	const prod: u128 = @as(u128, a) *% @as(u128, b);
+	return goldReduce128(prod);
+}
+
+pub inline fn goldAddMod_x2(a: @Vector(2, u64), b: @Vector(2, u64)) @Vector(2, u64) {
+	return .{ goldAddMod(a[0], b[0]), goldAddMod(a[1], b[1]) };
+}
+
+pub inline fn goldSubMod_x2(a: @Vector(2, u64), b: @Vector(2, u64)) @Vector(2, u64) {
+	return .{ goldSubMod(a[0], b[0]), goldSubMod(a[1], b[1]) };
+}
+
+pub inline fn goldMulMod_x2(a: @Vector(2, u64), b: @Vector(2, u64)) @Vector(2, u64) {
+	return .{ goldMulMod(a[0], b[0]), goldMulMod(a[1], b[1]) };
+}
+
+// ── Goldilocks correctness tests ────────────────────────────────────────────
+
+test "goldilocks: addMod identity laws" {
+	try testing.expectEqual(@as(u64, 0), goldAddMod(0, 0));
+	try testing.expectEqual(@as(u64, 5), goldAddMod(5, 0));
+	try testing.expectEqual(@as(u64, 5), goldAddMod(0, 5));
+	try testing.expectEqual(@as(u64, 0), goldAddMod(GOLDILOCKS_P - 1, 1));
+	try testing.expectEqual(GOLDILOCKS_P - 2, goldAddMod(GOLDILOCKS_P - 1, GOLDILOCKS_P - 1));
+}
+
+test "goldilocks: subMod identity laws" {
+	try testing.expectEqual(@as(u64, 0), goldSubMod(0, 0));
+	try testing.expectEqual(@as(u64, 5), goldSubMod(5, 0));
+	try testing.expectEqual(GOLDILOCKS_P - 1, goldSubMod(0, 1));
+	try testing.expectEqual(@as(u64, 3), goldSubMod(8, 5));
+}
+
+test "goldilocks: mulMod matches naive % p across 100K random inputs" {
+	var prng = std.Random.DefaultPrng.init(0xD01D_10C5_DEAD_BEEF);
+	const r = prng.random();
+	var i: usize = 0;
+	while (i < 100_000) : (i += 1) {
+		const a = r.uintLessThan(u64, GOLDILOCKS_P);
+		const b = r.uintLessThan(u64, GOLDILOCKS_P);
+		const expected: u64 = @intCast((@as(u128, a) *% @as(u128, b)) % @as(u128, GOLDILOCKS_P));
+		const got = goldMulMod(a, b);
+		try testing.expectEqual(expected, got);
+	}
+}
+
+test "goldilocks: mulMod edge cases" {
+	// (p-1) * (p-1) = 1 mod p  (since p-1 ≡ -1)
+	try testing.expectEqual(@as(u64, 1), goldMulMod(GOLDILOCKS_P - 1, GOLDILOCKS_P - 1));
+	try testing.expectEqual(@as(u64, 0), goldMulMod(0, 0xDEADBEEF));
+	try testing.expectEqual(@as(u64, 0x123456789ABCDEF0), goldMulMod(1, 0x123456789ABCDEF0));
+	// 2^32 * 2^32 = 2^64 ≡ EPSILON = 2^32 - 1 (mod p)
+	try testing.expectEqual(GOLDILOCKS_EPSILON, goldMulMod(0x100000000, 0x100000000));
+}
+
+// ── Goldilocks helper: powMod and primitive roots ──────────────────────────
+
+/// Goldilocks: 7 is a multiplicative generator of (Z/pZ)*.
+pub const GOLDILOCKS_PRIMITIVE_ROOT: u64 = 7;
+
+/// Goldilocks supports NTT lengths up to 2^32 (since p-1 = 2^32 · (2^32-1)).
+pub const GOLDILOCKS_MAX_NTT_LEN: usize = 1 << 32;
+
+/// b^e mod GOLDILOCKS_P via square-and-multiply.
+pub fn goldPowMod(b: u64, e: u64) u64 {
+	var base = b;
+	if (base >= GOLDILOCKS_P) base -= GOLDILOCKS_P;
+	var exp = e;
+	var result: u64 = 1;
+	while (exp > 0) {
+		if (exp & 1 == 1) result = goldMulMod(result, base);
+		base = goldMulMod(base, base);
+		exp >>= 1;
+	}
+	return result;
+}
+
+/// Modular inverse via Fermat's little theorem.
+pub inline fn goldInvMod(x: u64) u64 {
+	return goldPowMod(x, GOLDILOCKS_P - 2);
+}
+
+/// Primitive Nth root of unity in GF(GOLDILOCKS_P).
+pub fn goldNthRootOfUnity(N: usize) u64 {
+	std.debug.assert(N > 0 and N <= GOLDILOCKS_MAX_NTT_LEN);
+	std.debug.assert(N & (N - 1) == 0);
+	const exp: u64 = (GOLDILOCKS_P - 1) / @as(u64, @intCast(N));
+	return goldPowMod(GOLDILOCKS_PRIMITIVE_ROOT, exp);
+}
+
+// ── Goldilocks NTT (Cooley-Tukey radix-2, in-place, bit-reversed input) ────
+
+/// Bit-reverse permutation of a length-N array (N a power of 2).
+fn goldBitReverse(a: []u64) void {
+	const N = a.len;
+	var j: usize = 0;
+	var i: usize = 1;
+	while (i < N) : (i += 1) {
+		var bit: usize = N >> 1;
+		while (j & bit != 0) {
+			j ^= bit;
+			bit >>= 1;
+		}
+		j ^= bit;
+		if (i < j) std.mem.swap(u64, &a[i], &a[j]);
+	}
+}
+
+/// Forward NTT with caller-supplied precomputed twiddles. `twiddles[j]` =
+/// omega_N^j for j in 0..N/2. Output is bit-reversed-naturally-ordered.
+pub fn goldNttWithTwiddles(a: []u64, twiddles: []const u64) void {
+	goldBitReverse(a);
+	const N = a.len;
+	var half: usize = 1;
+	while (half < N) : (half *= 2) {
+		const step = N / (half * 2);
+		var k: usize = 0;
+		while (k < N) : (k += 2 * half) {
+			var j: usize = 0;
+			while (j < half) : (j += 1) {
+				const t = goldMulMod(a[k + j + half], twiddles[j * step]);
+				const u = a[k + j];
+				a[k + j] = goldAddMod(u, t);
+				a[k + j + half] = goldSubMod(u, t);
+			}
+		}
+	}
+}
+
+/// Inverse NTT — same as forward with inverse twiddles, then scale by N^-1.
+pub fn goldInttWithTwiddles(a: []u64, twiddles_inv: []const u64) void {
+	goldNttWithTwiddles(a, twiddles_inv);
+	const n_inv = goldInvMod(@intCast(a.len));
+	for (a) |*x| x.* = goldMulMod(x.*, n_inv);
+}
+
+/// Stockham auto-sort NTT for Goldilocks. Avoids the bit-reverse permutation
+/// by ping-ponging between `a` and `scratch` buffers. Same algorithm as the
+/// 30-bit-prime `nttStockham`, just using `goldMulMod` / `goldAddMod` /
+/// `goldSubMod`. After log2(n) passes, result is in `a`.
+pub fn goldNttStockham(a: []u64, scratch: []u64, twiddles: []const u64) void {
+	const n = a.len;
+	if (n <= 1) return;
+	std.debug.assert(n & (n - 1) == 0);
+	std.debug.assert(scratch.len == n);
+	std.debug.assert(twiddles.len >= n / 2);
+
+	const half_n = n >> 1;
+	var src: []u64 = a;
+	var dst: []u64 = scratch;
+
+	var m: usize = 2;
+	while (m <= n) : (m <<= 1) {
+		const m2 = m >> 1;
+		const stride = n / m;
+		var q: usize = 0;
+		while (q < n) : (q += m) {
+			const q_idx = q / m;
+			const src_base = q_idx * m2;
+			var j: usize = 0;
+			while (j < m2) : (j += 1) {
+				const w = twiddles[j * stride];
+				const x = src[src_base + j];
+				const y = src[src_base + j + half_n];
+				const t = goldMulMod(y, w);
+				dst[q + j] = goldAddMod(x, t);
+				dst[q + j + m2] = goldSubMod(x, t);
+			}
+		}
+		const tmp = src;
+		src = dst;
+		dst = tmp;
+	}
+
+	if (src.ptr != a.ptr) {
+		@memcpy(a, src);
+	}
+}
+
+// ── Goldilocks 16-bit-digit multiplication ─────────────────────────────────
+
+/// Maximum combined byte length (a.len + b.len) supportable by the Goldilocks
+/// 16-bit-digit variant. Constraint: convolution sum at any position is
+///   ≤ min(digit_count_a, digit_count_b) · 65535²
+/// where digit_count = ceil(byte_count / 2). For combined byte count L,
+/// digit_count_each ≈ L/4 (worst case both operands equal size). Max sum
+/// ≤ (L/4) · 65535² < GOLDILOCKS_P ≈ 1.84e19. Solving: L ≤ 4·p/65535²
+/// ≈ 4·1.84e19/4.29e9 ≈ 1.71e10 — astronomical; the practical cap is
+/// instead set by twiddle-table size and N being ≤ GOLDILOCKS_MAX_NTT_LEN.
+/// Conservatively cap at half a megabyte combined.
+pub const GOLD_MAX_FFT_COMBINED_LEN: usize = 524288;
+
+/// Multiply two unsigned magnitudes via Goldilocks-prime NTT with 16-bit
+/// digit packing. Caller supplies preallocated scratch (same convention as
+/// `mulMagnitudesWithScratch`). Returns canonical byte length of result.
+///
+/// Preconditions:
+///   - a.len + b.len ≤ GOLD_MAX_FFT_COMBINED_LEN
+///   - out.len ≥ a.len + b.len
+///   - scratch sizes ≥ N where N = next pow 2 ≥ ceil((a.len + b.len) / 2)
+pub fn goldMulMagnitudesWithScratch(
+	a: []const u8,
+	b: []const u8,
+	out: []u8,
+	pa: []u64,
+	pb: []u64,
+	tw_fwd: []u64,
+	tw_inv: []u64,
+	stockham_scratch: []u64,
+) usize {
+	if (a.len == 0 or b.len == 0) return 0;
+	const need_byte_len = a.len + b.len;
+	std.debug.assert(out.len >= need_byte_len);
+	std.debug.assert(need_byte_len <= GOLD_MAX_FFT_COMBINED_LEN);
+
+	// Combined digit count (each operand packed as 16-bit digits → 2 bytes each).
+	const need_digit_len = (need_byte_len + 1) / 2;
+	var N: usize = 1;
+	while (N < need_digit_len) N <<= 1;
+	std.debug.assert(pa.len >= N);
+	std.debug.assert(pb.len >= N);
+	std.debug.assert(tw_fwd.len >= N / 2);
+	std.debug.assert(tw_inv.len >= N / 2);
+
+	std.debug.assert(stockham_scratch.len >= N);
+
+	const pa_n = pa[0..N];
+	const pb_n = pb[0..N];
+	const tw_fwd_n = tw_fwd[0 .. N / 2];
+	const tw_inv_n = tw_inv[0 .. N / 2];
+	const sc_n = stockham_scratch[0..N];
+
+	// Precompute twiddles.
+	const omega_n = goldNthRootOfUnity(N);
+	const omega_n_inv = goldInvMod(omega_n);
+	tw_fwd_n[0] = 1;
+	tw_inv_n[0] = 1;
+	var j: usize = 1;
+	while (j < N / 2) : (j += 1) {
+		tw_fwd_n[j] = goldMulMod(tw_fwd_n[j - 1], omega_n);
+		tw_inv_n[j] = goldMulMod(tw_inv_n[j - 1], omega_n_inv);
+	}
+
+	// Pack bytes into 16-bit digits (LE within each digit).
+	@memset(pa_n, 0);
+	@memset(pb_n, 0);
+	{
+		var i: usize = 0;
+		while (i * 2 < a.len) : (i += 1) {
+			const lo: u64 = a[i * 2];
+			const hi: u64 = if (i * 2 + 1 < a.len) @as(u64, a[i * 2 + 1]) else 0;
+			pa_n[i] = lo | (hi << 8);
+		}
+	}
+	{
+		var i: usize = 0;
+		while (i * 2 < b.len) : (i += 1) {
+			const lo: u64 = b[i * 2];
+			const hi: u64 = if (i * 2 + 1 < b.len) @as(u64, b[i * 2 + 1]) else 0;
+			pb_n[i] = lo | (hi << 8);
+		}
+	}
+
+	// Forward NTT both; pointwise mul; inverse NTT; scale.
+	// Stockham auto-sort eliminates the explicit bit-reverse permutation.
+	goldNttStockham(pa_n, sc_n, tw_fwd_n);
+	goldNttStockham(pb_n, sc_n, tw_fwd_n);
+	for (0..N) |i| pa_n[i] = goldMulMod(pa_n[i], pb_n[i]);
+	goldNttStockham(pa_n, sc_n, tw_inv_n);
+	const n_inv = goldInvMod(@intCast(N));
+	for (pa_n) |*x| x.* = goldMulMod(x.*, n_inv);
+
+	// Carry propagation: each digit holds a value up to ~2^43; emit 16 bits
+	// per digit, carry the rest. Output bytes are LE.
+	var carry: u64 = 0;
+	var out_pos: usize = 0;
+	for (0..N) |i| {
+		const val = pa_n[i] +% carry; // u64 add (carry adds < 2^48, val fits)
+		// Emit low 16 bits as 2 bytes (LE).
+		if (out_pos < out.len) out[out_pos] = @truncate(val & 0xFF);
+		if (out_pos + 1 < out.len) out[out_pos + 1] = @truncate((val >> 8) & 0xFF);
+		out_pos += 2;
+		carry = val >> 16;
+	}
+	// Any remaining carry → emit bytes until done.
+	while (carry != 0 and out_pos < out.len) {
+		out[out_pos] = @truncate(carry & 0xFF);
+		out_pos += 1;
+		carry >>= 8;
+	}
+	std.debug.assert(carry == 0);
+
+	// Trim trailing zeros to canonical length.
+	var len = need_byte_len;
+	while (len > 0 and out[len - 1] == 0) len -= 1;
+	return len;
+}
+
+// ── Goldilocks NTT correctness tests ───────────────────────────────────────
+
+test "goldMulMagnitudes: cross-check vs schoolbook (small)" {
+	const allocator = testing.allocator;
+	var prng = std.Random.DefaultPrng.init(0x60_1D_C5_F00D);
+	const r = prng.random();
+	const sizes = [_]usize{ 4, 8, 16, 32, 64, 128, 256, 512 };
+	for (sizes) |n_bytes| {
+		const a = try allocator.alloc(u8, n_bytes);
+		defer allocator.free(a);
+		const b = try allocator.alloc(u8, n_bytes);
+		defer allocator.free(b);
+		for (a) |*x| x.* = r.int(u8);
+		for (b) |*x| x.* = r.int(u8);
+
+		const out = try allocator.alloc(u8, a.len + b.len);
+		defer allocator.free(out);
+		const ref = try allocator.alloc(u8, a.len + b.len);
+		defer allocator.free(ref);
+
+		// Schoolbook reference (byte-by-byte O(n²)).
+		@memset(ref, 0);
+		for (a, 0..) |av, i| {
+			var carry: u32 = 0;
+			for (b, 0..) |bv, k| {
+				const p: u32 = @as(u32, av) * @as(u32, bv) + ref[i + k] + carry;
+				ref[i + k] = @truncate(p & 0xFF);
+				carry = p >> 8;
+			}
+			var pos = i + b.len;
+			while (carry != 0) : (pos += 1) {
+				const sum: u32 = ref[pos] + carry;
+				ref[pos] = @truncate(sum & 0xFF);
+				carry = sum >> 8;
+			}
+		}
+
+		// Goldilocks-NTT path.
+		const need_digit_len = (a.len + b.len + 1) / 2;
+		var N: usize = 1;
+		while (N < need_digit_len) N <<= 1;
+		const pa = try allocator.alloc(u64, N);
+		defer allocator.free(pa);
+		const pb = try allocator.alloc(u64, N);
+		defer allocator.free(pb);
+		const tw_fwd = try allocator.alloc(u64, N / 2);
+		defer allocator.free(tw_fwd);
+		const tw_inv = try allocator.alloc(u64, N / 2);
+		defer allocator.free(tw_inv);
+		const sc = try allocator.alloc(u64, N);
+		defer allocator.free(sc);
+
+		const got = goldMulMagnitudesWithScratch(a, b, out, pa, pb, tw_fwd, tw_inv, sc);
+
+		// Trim ref to canonical length.
+		var ref_len: usize = ref.len;
+		while (ref_len > 0 and ref[ref_len - 1] == 0) ref_len -= 1;
+
+		try testing.expectEqual(ref_len, got);
+		try testing.expectEqualSlices(u8, ref[0..ref_len], out[0..got]);
+	}
+}

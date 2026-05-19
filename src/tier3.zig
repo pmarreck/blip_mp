@@ -120,6 +120,81 @@ pub fn releaseFftScratch() void {
 	fft_scratch.releaseUnsafe();
 }
 
+// ── Per-thread Goldilocks-NTT scratch cache (Phase 2) ─────────────────────────
+// Mirrors FftScratch but for the 4 buffers Goldilocks needs (no Stockham
+// scratch — we use simple Cooley-Tukey in-place).
+const GoldFftScratch = struct {
+	cached_N: usize = 0,
+	pa: []u64 = &.{},
+	pb: []u64 = &.{},
+	tw_fwd: []u64 = &.{},
+	tw_inv: []u64 = &.{},
+	stockham: []u64 = &.{},
+	owner_alloc: ?std.mem.Allocator = null,
+
+	fn ensureCapacity(self: *GoldFftScratch, allocator: std.mem.Allocator, N: usize) !void {
+		if (self.cached_N >= N and self.owner_alloc != null) {
+			if (allocatorEq(self.owner_alloc.?, allocator)) return;
+			self.releaseUnsafe();
+		}
+		if (self.owner_alloc) |old_alloc| {
+			old_alloc.free(self.pa);
+			old_alloc.free(self.pb);
+			old_alloc.free(self.tw_fwd);
+			old_alloc.free(self.tw_inv);
+			old_alloc.free(self.stockham);
+		}
+		self.pa = try allocator.alloc(u64, N);
+		errdefer allocator.free(self.pa);
+		self.pb = try allocator.alloc(u64, N);
+		errdefer allocator.free(self.pb);
+		self.tw_fwd = try allocator.alloc(u64, N / 2);
+		errdefer allocator.free(self.tw_fwd);
+		self.tw_inv = try allocator.alloc(u64, N / 2);
+		errdefer allocator.free(self.tw_inv);
+		self.stockham = try allocator.alloc(u64, N);
+		self.cached_N = N;
+		self.owner_alloc = allocator;
+	}
+
+	fn releaseUnsafe(self: *GoldFftScratch) void {
+		if (self.owner_alloc) |a| {
+			a.free(self.pa);
+			a.free(self.pb);
+			a.free(self.tw_fwd);
+			a.free(self.tw_inv);
+			a.free(self.stockham);
+		}
+		self.* = .{};
+	}
+};
+
+threadlocal var gold_fft_scratch: GoldFftScratch = .{};
+
+/// Release per-thread Goldilocks-NTT scratch. Idempotent.
+pub fn releaseGoldFftScratch() void {
+	gold_fft_scratch.releaseUnsafe();
+}
+
+/// Goldilocks-NTT dispatch threshold. Below this operand byte length, the
+/// 30-bit single-prime NTT path or Toom-3 wins. Above this, Goldilocks's
+/// halved N + halved bandwidth pays off. Bench-tuned in Phase 2.
+pub const GOLD_FFT_THRESHOLD: usize = 99999; // gated off: see comment below
+// 2026-05-18 Phase 2 result: empirically loses to Toom-3 across all bench sizes
+// on aarch64. The bandwidth-escape model (Phase 1 projected 1.50× speedup) is
+// blocked by an architectural ceiling: Goldilocks's mulMod needs a u64×u64=u128
+// product (UMULH+MUL pair), and aarch64 NEON has no vector instruction for
+// 64×64→128 multiplication. The 30-bit prime fits in 60-bit results so its
+// mulMod is a single u64×u64=u64 — NEON vectorizes that at 2 lanes/cycle.
+// Numbers (./bm --stable 5, scalar Goldilocks Stockham vs production Toom-3):
+//   8K-bit mul:  Toom-3   7.5K ns  vs Goldilocks  33.5K ns  (4.26× SLOWER)
+//   16K-bit mul: Toom-3  23.7K ns  vs Goldilocks  72.0K ns  (3.04× SLOWER)
+//   32K-bit mul: Toom-3  96.5K ns  vs Goldilocks 155K ns    (1.60× SLOWER)
+// Trend says Goldilocks could win at larger sizes (the gap shrinks), but it
+// never crosses on the bench. Code retained: it cross-checks vs schoolbook for
+// all sizes (correctness validated); when x86_64 with AVX2 mulx becomes a
+// target where vectorized 64×64→128 IS available, this path can win there.
+
 // ── Per-thread tier-3 mul scratch cache ──────────────────────────────────────
 //
 // Eliminates the per-call alloc/free of tier3MulOp's scratch buffers
@@ -3680,11 +3755,28 @@ pub fn mulRawBlip(
 	} else b_pay;
 
 	const r_len = a_pay.len + b_pay.len;
-	// Algorithm selection: CRT-FFT (extended range) → single-prime FFT →
-	// Toom-3 (≥ 2K bytes) → Karatsuba (≥ 256) → chunked u64 schoolbook.
+	// Algorithm selection: Goldilocks-NTT (Phase 2 new!) → CRT-FFT → single-
+	// prime FFT → Toom-3 → Karatsuba → chunked u64 schoolbook.
+	const can_gold_fft = fft_alloc != null and a_pay.len == b_pay.len and a_pay.len >= GOLD_FFT_THRESHOLD and a_pay.len + b_pay.len <= fft.GOLD_MAX_FFT_COMBINED_LEN;
 	const can_fft_crt = fft_alloc != null and a_pay.len == b_pay.len and a_pay.len >= FFT_CRT_THRESHOLD and a_pay.len + b_pay.len <= fft.MAX_FFT_CRT_COMBINED_LEN;
 	const can_fft = fft_alloc != null and a_pay.len == b_pay.len and a_pay.len >= FFT_THRESHOLD and a_pay.len + b_pay.len <= fft.MAX_FFT_COMBINED_LEN;
-	if (can_fft_crt) {
+	if (can_gold_fft) {
+		const need_digit_len = (a_pay.len + b_pay.len + 1) / 2;
+		var N_gold: usize = 1;
+		while (N_gold < need_digit_len) N_gold <<= 1;
+		try gold_fft_scratch.ensureCapacity(fft_alloc.?, N_gold);
+		@memset(scratch_r[0..r_len], 0);
+		_ = fft.goldMulMagnitudesWithScratch(
+			a_mag,
+			b_mag,
+			scratch_r[0..r_len],
+			gold_fft_scratch.pa,
+			gold_fft_scratch.pb,
+			gold_fft_scratch.tw_fwd,
+			gold_fft_scratch.tw_inv,
+			gold_fft_scratch.stockham,
+		);
+	} else if (can_fft_crt) {
 		_ = try fft.mulMagnitudesCRT(fft_alloc.?, a_mag, b_mag, scratch_r[0..r_len]);
 	} else if (can_fft) {
 		// E.1 + E.2 — use cached caller-supplied scratch. First call per

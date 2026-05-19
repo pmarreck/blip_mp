@@ -150,6 +150,58 @@ fn benchMulModP_x2(pool_a: *const [POOL_SIZE]@Vector(2, u64), pool_b: *const [PO
 	return @as(f64, @floatFromInt(elapsed)) / @as(f64, @floatFromInt(ITERS));
 }
 
+// ── Goldilocks-prime benches (Phase 1: bandwidth-escape experiment) ─────────
+
+fn buildPoolGold(seed: u64) [POOL_SIZE]u64 {
+	var pool: [POOL_SIZE]u64 = undefined;
+	var prng = std.Random.DefaultPrng.init(seed);
+	const r = prng.random();
+	for (&pool) |*x| x.* = r.uintLessThan(u64, fft.GOLDILOCKS_P);
+	return pool;
+}
+
+fn benchGoldAddMod(pool_a: *const [POOL_SIZE]u64, pool_b: *const [POOL_SIZE]u64) f64 {
+	var acc: u64 = 0;
+	const start = nowNs();
+	var i: usize = 0;
+	while (i < ITERS) : (i += 1) {
+		const a = pool_a[i & (POOL_SIZE - 1)];
+		const b = pool_b[(i *% 2654435761) & (POOL_SIZE - 1)];
+		acc ^= fft.goldAddMod(a, b);
+	}
+	const elapsed = nowNs() - start;
+	std.mem.doNotOptimizeAway(&acc);
+	return @as(f64, @floatFromInt(elapsed)) / @as(f64, @floatFromInt(ITERS));
+}
+
+fn benchGoldSubMod(pool_a: *const [POOL_SIZE]u64, pool_b: *const [POOL_SIZE]u64) f64 {
+	var acc: u64 = 0;
+	const start = nowNs();
+	var i: usize = 0;
+	while (i < ITERS) : (i += 1) {
+		const a = pool_a[i & (POOL_SIZE - 1)];
+		const b = pool_b[(i *% 2654435761) & (POOL_SIZE - 1)];
+		acc ^= fft.goldSubMod(a, b);
+	}
+	const elapsed = nowNs() - start;
+	std.mem.doNotOptimizeAway(&acc);
+	return @as(f64, @floatFromInt(elapsed)) / @as(f64, @floatFromInt(ITERS));
+}
+
+fn benchGoldMulMod(pool_a: *const [POOL_SIZE]u64, pool_b: *const [POOL_SIZE]u64) f64 {
+	var acc: u64 = 0;
+	const start = nowNs();
+	var i: usize = 0;
+	while (i < ITERS) : (i += 1) {
+		const a = pool_a[i & (POOL_SIZE - 1)];
+		const b = pool_b[(i *% 2654435761) & (POOL_SIZE - 1)];
+		acc ^= fft.goldMulMod(a, b);
+	}
+	const elapsed = nowNs() - start;
+	std.mem.doNotOptimizeAway(&acc);
+	return @as(f64, @floatFromInt(elapsed)) / @as(f64, @floatFromInt(ITERS));
+}
+
 // Scalar Montgomery (mont form inputs/outputs).
 fn benchMontMul(pool_a: *const [POOL_SIZE]u64, pool_b: *const [POOL_SIZE]u64) f64 {
 	var acc: u64 = 0;
@@ -352,6 +404,55 @@ pub fn main() !void {
 
 	const ns_mont_x2 = benchMontMul_x2(&vpool_a, &vpool_b);
 	std.debug.print("RESULT impl=montMul_x2 ns_per_op={d:.3} ns_per_scalar_equiv={d:.3}\n", .{ ns_mont_x2, ns_mont_x2 / 2.0 });
+
+	// ── Goldilocks-prime benches (Phase 1: bandwidth-escape experiment) ──
+	std.debug.print("\n--- Goldilocks-prime (p = 2^64 - 2^32 + 1) scalar ops ---\n", .{});
+	const gpool_a = buildPoolGold(0xC0FE_F00D);
+	const gpool_b = buildPoolGold(0xBABE_FACE);
+	_ = benchGoldAddMod(&gpool_a, &gpool_b); // warmup
+	const ns_gold_add = benchGoldAddMod(&gpool_a, &gpool_b);
+	std.debug.print("RESULT impl=goldAddMod_scalar ns_per_op={d:.3}\n", .{ns_gold_add});
+	const ns_gold_sub = benchGoldSubMod(&gpool_a, &gpool_b);
+	std.debug.print("RESULT impl=goldSubMod_scalar ns_per_op={d:.3}\n", .{ns_gold_sub});
+	const ns_gold_mul = benchGoldMulMod(&gpool_a, &gpool_b);
+	std.debug.print("RESULT impl=goldMulMod_scalar ns_per_op={d:.3}\n", .{ns_gold_mul});
+
+	// Butterfly cost = 1 mul + 1 add + 1 sub. Project per-NTT-pass cost.
+	const butterfly_30 = ns_mul + ns_add + ns_sub;
+	const butterfly_gold = ns_gold_mul + ns_gold_add + ns_gold_sub;
+	std.debug.print("\n--- butterfly cost: 30-bit p vs Goldilocks p ---\n", .{});
+	std.debug.print("butterfly@30-bit-p:   {d:.2} ns  (mul {d:.2} + add {d:.2} + sub {d:.2})\n", .{ butterfly_30, ns_mul, ns_add, ns_sub });
+	std.debug.print("butterfly@Goldilocks: {d:.2} ns  (mul {d:.2} + add {d:.2} + sub {d:.2})\n", .{ butterfly_gold, ns_gold_mul, ns_gold_add, ns_gold_sub });
+	std.debug.print("per-butterfly ratio (Goldilocks / 30-bit): {d:.2}x\n", .{butterfly_gold / butterfly_30});
+
+	// Project total NTT cost for a fixed operand size (e.g., 32K-bit operands).
+	// 30-bit prime: 8-bit digits → operand bytes = digits. 32K-bit operand =
+	//   4096 bytes = 4096 digits. Two operands combined = 8192 → N = 8192.
+	// Goldilocks: 16-bit digits → 32K-bit operand = 2048 digits. Combined
+	//   = 4096 → N = 4096. So N halves (NOT quartered as initially estimated
+	//   — combined-digit-count, not per-operand-digit-count, drives N).
+	// Cooley-Tukey FFT does (N/2)·log₂(N) butterflies; full multiply needs
+	// forward FFT × 2 + pointwise × 1 + inverse FFT × 1 ≈ 3·(N/2)·log₂(N)
+	// butterflies-equivalent (pointwise is just mul, no add/sub, so ~1/3
+	// of a butterfly each but let's use the conservative estimate).
+	const N_30: usize = 8192;
+	const N_gold: usize = 4096;
+	const log2_N_30: f64 = 13;
+	const log2_N_gold: f64 = 12;
+	const total_30: f64 = butterfly_30 * 3.0 * (@as(f64, @floatFromInt(N_30)) / 2.0) * log2_N_30;
+	const total_gold: f64 = butterfly_gold * 3.0 * (@as(f64, @floatFromInt(N_gold)) / 2.0) * log2_N_gold;
+	std.debug.print("\nprojected NTT-mul ns @ 32K-bit operands (3·(N/2)·log₂N butterflies, scalar):\n", .{});
+	std.debug.print("  30-bit p (N={d}, log2N={d:.0}):    {d:.0} ns\n", .{ N_30, log2_N_30, total_30 });
+	std.debug.print("  Goldilocks (N={d}, log2N={d:.0}): {d:.0} ns\n", .{ N_gold, log2_N_gold, total_gold });
+	const ratio = total_30 / total_gold;
+	std.debug.print("  PROJECTED SPEEDUP (Goldilocks vs 30-bit): {d:.2}x\n", .{ratio});
+	if (ratio > 1.3) {
+		std.debug.print("  → GREEN LIGHT Phase 2: build full Goldilocks-NTT mul path\n", .{});
+	} else if (ratio > 1.0) {
+		std.debug.print("  → MARGINAL: Goldilocks projects to {d:.0}% gain — consider whether worth the implementation cost\n", .{(ratio - 1.0) * 100});
+	} else {
+		std.debug.print("  → ABANDON: Goldilocks projects to {d:.0}% slowdown — bandwidth-escape doesn't materialize at scalar level\n", .{(1.0 - ratio) * 100});
+	}
 
 	std.debug.print("\n--- speedup vs scalar (>1.0 = SIMD wins) ---\n", .{});
 	std.debug.print("addModP: {d:.2}x\n", .{ns_add / (ns_add_x2 / 2.0)});
