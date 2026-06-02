@@ -19,14 +19,8 @@ const fft = @import("blip_mp").fft;
 
 // Monotonic timing — std.time.Timer was removed in Zig 0.16. Use libc
 // clock_gettime directly (we already link libc for c_allocator parity).
-const TimeSpec = extern struct { tv_sec: c_long, tv_nsec: c_long };
-extern "c" fn clock_gettime(clk_id: c_int, tp: *TimeSpec) c_int;
-
-fn nowNs() u64 {
-	var ts: TimeSpec = undefined;
-	_ = clock_gettime(@intFromEnum(std.posix.CLOCK.MONOTONIC), &ts);
-	return @as(u64, @intCast(ts.tv_sec)) * 1_000_000_000 + @as(u64, @intCast(ts.tv_nsec));
-}
+const time_util = @import("time_util");
+const nowNs = time_util.nowNs;
 
 const POOL_SIZE: usize = 256;
 const ITERS: usize = 10_000_000;

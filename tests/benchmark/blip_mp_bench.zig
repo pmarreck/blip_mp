@@ -19,14 +19,8 @@ const Mp = blip_mp.Mp;
 // replacement (std.Io.Clock.now) requires an Io instance we'd otherwise
 // not need. We're already linking libc for std.heap.c_allocator, so we
 // just call clock_gettime directly.
-const TimeSpec = extern struct { tv_sec: c_long, tv_nsec: c_long };
-extern "c" fn clock_gettime(clk_id: c_int, tp: *TimeSpec) c_int;
-
-fn nowNs() u64 {
-	var ts: TimeSpec = undefined;
-	_ = clock_gettime(@intFromEnum(std.posix.CLOCK.MONOTONIC), &ts);
-	return @as(u64, @intCast(ts.tv_sec)) * 1_000_000_000 + @as(u64, @intCast(ts.tv_nsec));
-}
+const time_util = @import("time_util");
+const nowNs = time_util.nowNs;
 
 const POOL_SIZE: usize = 256;
 const ITERATIONS_SMALL: usize = 5_000_000;

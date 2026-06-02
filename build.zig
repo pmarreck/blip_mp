@@ -118,6 +118,14 @@ pub fn build(b: *std.Build) void {
 	const test_step = b.step("test", "Run unit tests");
 	test_step.dependOn(&run_unit_tests.step);
 
+	// Shared monotonic-clock helper module for the benchmark + cross-check exes.
+	const time_util_module = b.createModule(.{
+		.root_source_file = b.path("tests/time_util.zig"),
+		.target = target,
+		.optimize = optimize,
+		.link_libc = true,
+	});
+
 	// blip_mp benchmark exe — links libc for c_allocator (apples-to-apples
 	// allocator with GMP comparison). No GMP linkage on the blip_mp side.
 	const blip_mp_bench_module = b.createModule(.{
@@ -127,6 +135,7 @@ pub fn build(b: *std.Build) void {
 		.link_libc = true,
 		.imports = &.{
 			.{ .name = "blip_mp", .module = core_module },
+			.{ .name = "time_util", .module = time_util_module },
 		},
 	});
 	const blip_mp_bench = b.addExecutable(.{
@@ -147,6 +156,7 @@ pub fn build(b: *std.Build) void {
 		.link_libc = true,
 		.imports = &.{
 			.{ .name = "blip_mp", .module = core_module },
+			.{ .name = "time_util", .module = time_util_module },
 		},
 	});
 	const fft_microbench = b.addExecutable(.{
@@ -167,6 +177,7 @@ pub fn build(b: *std.Build) void {
 			.link_libc = true,
 			.imports = &.{
 				.{ .name = "blip_mp", .module = core_module },
+				.{ .name = "time_util", .module = time_util_module },
 			},
 		});
 		cc_module.addLibraryPath(.{ .cwd_relative = gmp_lib_path.? });
