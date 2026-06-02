@@ -14,6 +14,7 @@
 
 const std = @import("std");
 const bignum = @import("bignum.zig");
+const th = @import("test_helpers.zig");
 const sign_mod = @import("sign.zig");
 
 const Mp = bignum.Mp;
@@ -86,10 +87,6 @@ pub fn lcm(out: *Mp, a: *const Mp, b: *const Mp) ArithError!void {
 
 const testing = std.testing;
 
-fn expectI64(want: i64, got: *const Mp) !void {
-	try testing.expectEqual(want, try got.getI64());
-}
-
 test "gcd: small known pairs" {
 	const a = std.testing.allocator;
 	const cases = [_]struct { a: i64, b: i64, g: i64 }{
@@ -111,7 +108,7 @@ test "gcd: small known pairs" {
 		var r = Mp.init(a);
 		defer r.deinit();
 		try gcd(&r, &x, &y);
-		try expectI64(c.g, &r);
+		try th.expectI64(c.g, &r);
 	}
 }
 
@@ -132,7 +129,7 @@ test "gcd: negative inputs always yield non-negative result" {
 		defer r.deinit();
 		try gcd(&r, &x, &y);
 		try testing.expect(r.cachedSign() >= 0);
-		try expectI64(c.g, &r);
+		try th.expectI64(c.g, &r);
 	}
 }
 
@@ -183,7 +180,7 @@ test "lcm: small known pairs" {
 		var r = Mp.init(a);
 		defer r.deinit();
 		try lcm(&r, &x, &y);
-		try expectI64(c.l, &r);
+		try th.expectI64(c.l, &r);
 	}
 }
 
@@ -202,7 +199,7 @@ test "lcm: zero input yields zero" {
 		var r = Mp.init(a);
 		defer r.deinit();
 		try lcm(&r, &x, &y);
-		try expectI64(0, &r);
+		try th.expectI64(0, &r);
 	}
 }
 
@@ -222,7 +219,7 @@ test "lcm: negative inputs always yield non-negative result" {
 		defer r.deinit();
 		try lcm(&r, &x, &y);
 		try testing.expect(r.cachedSign() >= 0);
-		try expectI64(c.l, &r);
+		try th.expectI64(c.l, &r);
 	}
 }
 
@@ -279,7 +276,7 @@ test "gcd: tier-3 sized GCDs (256-bit) — Fibonacci-pair stress" {
 	var g = Mp.init(a);
 	defer g.deinit();
 	try gcd(&g, &prev, &curr);
-	try expectI64(1, &g);
+	try th.expectI64(1, &g);
 }
 
 test "gcd: tier-3 sized GCDs — both = 2^200, gcd = 2^200" {

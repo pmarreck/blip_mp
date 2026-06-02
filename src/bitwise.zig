@@ -7,6 +7,7 @@
 
 const std = @import("std");
 const bignum = @import("bignum.zig");
+const th = @import("test_helpers.zig");
 const tier3 = @import("tier3.zig");
 const encoding = @import("encoding.zig");
 
@@ -240,10 +241,6 @@ pub fn shr(out: *Mp, a: *const Mp, n: usize) ArithError!void {
 
 const testing = std.testing;
 
-fn expectI64(want: i64, got: *const Mp) !void {
-	try testing.expectEqual(want, try got.getI64());
-}
-
 test "bitwiseAnd: small positives" {
 	const a = std.testing.allocator;
 	var x = try Mp.fromI64(a, 12);
@@ -253,7 +250,7 @@ test "bitwiseAnd: small positives" {
 	var r = Mp.init(a);
 	defer r.deinit();
 	try bitwiseAnd(&r, &x, &y);
-	try expectI64(8, &r);
+	try th.expectI64(8, &r);
 }
 
 test "bitwiseOr: small positives" {
@@ -265,7 +262,7 @@ test "bitwiseOr: small positives" {
 	var r = Mp.init(a);
 	defer r.deinit();
 	try bitwiseOr(&r, &x, &y);
-	try expectI64(14, &r);
+	try th.expectI64(14, &r);
 }
 
 test "bitwiseXor: x ^ x == 0" {
@@ -275,7 +272,7 @@ test "bitwiseXor: x ^ x == 0" {
 	var r = Mp.init(a);
 	defer r.deinit();
 	try bitwiseXor(&r, &x, &x);
-	try expectI64(0, &r);
+	try th.expectI64(0, &r);
 }
 
 test "bitwiseAnd: with zero" {
@@ -287,7 +284,7 @@ test "bitwiseAnd: with zero" {
 	var r = Mp.init(a);
 	defer r.deinit();
 	try bitwiseAnd(&r, &x, &z);
-	try expectI64(0, &r);
+	try th.expectI64(0, &r);
 }
 
 test "bitwiseAnd / Or / Xor: i64 spot checks across sign combinations" {
@@ -308,11 +305,11 @@ test "bitwiseAnd / Or / Xor: i64 spot checks across sign combinations" {
 		var r = Mp.init(a);
 		defer r.deinit();
 		try bitwiseAnd(&r, &x, &y);
-		try expectI64(c.x & c.y, &r);
+		try th.expectI64(c.x & c.y, &r);
 		try bitwiseOr(&r, &x, &y);
-		try expectI64(c.x | c.y, &r);
+		try th.expectI64(c.x | c.y, &r);
 		try bitwiseXor(&r, &x, &y);
-		try expectI64(c.x ^ c.y, &r);
+		try th.expectI64(c.x ^ c.y, &r);
 	}
 }
 
@@ -325,7 +322,7 @@ test "bitwiseNot: ~x == -(x+1) per GMP semantics" {
 		var r = Mp.init(a);
 		defer r.deinit();
 		try bitwiseNot(&r, &x);
-		try expectI64(~v, &r);
+		try th.expectI64(~v, &r);
 	}
 }
 
@@ -337,7 +334,7 @@ test "shl: x << 0 == x; 1 << 4 == 16; 1 << 63 round-trips through shr" {
 		var r = Mp.init(a);
 		defer r.deinit();
 		try shl(&r, &x, 0);
-		try expectI64(42, &r);
+		try th.expectI64(42, &r);
 	}
 	{
 		var x = try Mp.fromI64(a, 1);
@@ -345,9 +342,9 @@ test "shl: x << 0 == x; 1 << 4 == 16; 1 << 63 round-trips through shr" {
 		var r = Mp.init(a);
 		defer r.deinit();
 		try shl(&r, &x, 4);
-		try expectI64(16, &r);
+		try th.expectI64(16, &r);
 		try shl(&r, &x, 10);
-		try expectI64(1024, &r);
+		try th.expectI64(1024, &r);
 	}
 }
 
@@ -369,7 +366,7 @@ test "shl: i64 spot checks (positives that don't overflow i64)" {
 		defer r.deinit();
 		try shl(&r, &x, c.n);
 		const want: i64 = c.x << c.n;
-		try expectI64(want, &r);
+		try th.expectI64(want, &r);
 	}
 }
 
@@ -387,7 +384,7 @@ test "shr: x >> 0 == x; positives use truncating div" {
 		var r = Mp.init(a);
 		defer r.deinit();
 		try shr(&r, &x, c.n);
-		try expectI64(c.x >> c.n, &r);
+		try th.expectI64(c.x >> c.n, &r);
 	}
 }
 
@@ -400,9 +397,9 @@ test "shr: negative arithmetic shift (floor division per GMP)" {
 		var r = Mp.init(a);
 		defer r.deinit();
 		try shr(&r, &x, 1);
-		try expectI64(-1, &r);
+		try th.expectI64(-1, &r);
 		try shr(&r, &x, 100);
-		try expectI64(-1, &r);
+		try th.expectI64(-1, &r);
 	}
 	// -8 >> 1 == -4 (exact)
 	{
@@ -411,7 +408,7 @@ test "shr: negative arithmetic shift (floor division per GMP)" {
 		var r = Mp.init(a);
 		defer r.deinit();
 		try shr(&r, &x, 1);
-		try expectI64(-4, &r);
+		try th.expectI64(-4, &r);
 	}
 	// -7 >> 1 → floor(-3.5) == -4
 	{
@@ -420,7 +417,7 @@ test "shr: negative arithmetic shift (floor division per GMP)" {
 		var r = Mp.init(a);
 		defer r.deinit();
 		try shr(&r, &x, 1);
-		try expectI64(-4, &r);
+		try th.expectI64(-4, &r);
 	}
 	// -1024 >> 5 == -32 (exact); -1023 >> 5 == -32 (floor)
 	{
@@ -429,7 +426,7 @@ test "shr: negative arithmetic shift (floor division per GMP)" {
 		var r = Mp.init(a);
 		defer r.deinit();
 		try shr(&r, &x, 5);
-		try expectI64(-32, &r);
+		try th.expectI64(-32, &r);
 	}
 	{
 		var x = try Mp.fromI64(a, -1023);
@@ -437,7 +434,7 @@ test "shr: negative arithmetic shift (floor division per GMP)" {
 		var r = Mp.init(a);
 		defer r.deinit();
 		try shr(&r, &x, 5);
-		try expectI64(-32, &r);
+		try th.expectI64(-32, &r);
 	}
 }
 
@@ -448,7 +445,7 @@ test "shr: positive shifted past total bit length → 0" {
 	var r = Mp.init(a);
 	defer r.deinit();
 	try shr(&r, &x, 1000);
-	try expectI64(0, &r);
+	try th.expectI64(0, &r);
 }
 
 test "shl then shr round-trips for positives" {
@@ -463,6 +460,6 @@ test "shl then shr round-trips for positives" {
 		defer r.deinit();
 		try shl(&s, &x, 17);
 		try shr(&r, &s, 17);
-		try expectI64(v, &r);
+		try th.expectI64(v, &r);
 	}
 }
