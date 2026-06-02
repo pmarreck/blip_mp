@@ -218,6 +218,12 @@ C executable benchmarking GMP at the same buckets/iterations. Built with `-O3 -W
 ### `tests/benchmark/fft_microbench.zig`
 Isolated microbench for FFT primitives (M6-4-A.1 work). Times scalar vs vec `mulModP` / `addModP` / `subModP` lane ops, and full-NTT-pass (N=8192) for nttWithTwiddles / nttWithTwiddlesVec / nttStockhamVec / nttRadix4Vec / nttWithTwiddlesMontVec.
 
+### `tests/time_util.zig`
+Shared monotonic-clock helper (`TimeSpec`, `clock_gettime` extern, `nowNs`) for the benchmark + cross-check exes. Consolidated from three byte-identical copies. Registered as the named `time_util` module in `build.zig` (relative `../` imports cannot escape a Zig 0.16 module root) and imported by `blip_mp_bench`, `fft_microbench`, and `cross_check`.
+
+### `src/test_helpers.zig`
+Test-only assertion helpers `expectI64` / `expectU64` (assert an `Mp` decodes to an expected scalar). Consolidated from 5+2 byte-identical copies across sign/combinatorial/gcd/roots/bitwise. Not referenced by any production path. (The former per-module `mpFromI64` helpers were instead promoted to a real `Mp.fromI64` constructor in `bignum.zig`.)
+
 ### `tests/cli/c_smoke.c` (~350 lines)
 End-to-end FFI smoke test (M8 + iters 24/25 expansions). Exercises lifecycle (incl. NULL-safety), i64 + u64 set/get roundtrip + error cases, bit access (bit_at/bit_len with 0/1/0xFF/0x100/-0x100 sweeps including out-of-range and sign-ignore semantics), arithmetic (add/sub/mul/div/mod/divMod), powm + invMod (with no-inverse case), set_bytes → arith → bytes() round-trip, sign / cmp / is_zero predicates, error returns. Built as `c-smoke` binary; runs via `c-smoke-run` step. Wired into `./test` as the third group alongside Zig units and 12029 GMP cross-checks.
 

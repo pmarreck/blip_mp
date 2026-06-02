@@ -38,13 +38,8 @@ extern "c" fn __gmpz_invert(rop: *mpz_t, op1: *const mpz_t, op2: *const mpz_t) c
 
 // Monotonic timing — std.time.Timer was removed in Zig 0.16; we already link
 // libc for c_allocator and GMP, so call clock_gettime directly.
-const TimeSpec = extern struct { tv_sec: c_long, tv_nsec: c_long };
-extern "c" fn clock_gettime(clk_id: c_int, tp: *TimeSpec) c_int;
-fn nowNs() u64 {
-	var ts: TimeSpec = undefined;
-	_ = clock_gettime(@intFromEnum(std.posix.CLOCK.MONOTONIC), &ts);
-	return @as(u64, @intCast(ts.tv_sec)) * 1_000_000_000 + @as(u64, @intCast(ts.tv_nsec));
-}
+const time_util = @import("time_util");
+const nowNs = time_util.nowNs;
 extern "c" fn __gmpz_cmp_ui(op: *const mpz_t, op2: c_ulong) c_int;
 extern "c" fn __gmpz_import(
 	rop: *mpz_t,
