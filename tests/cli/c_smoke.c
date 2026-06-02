@@ -494,6 +494,401 @@ static void test_fp_get_f64_with_mode(void) {
 	blip_mp_fp_destroy(x);
 }
 
+// ======================================================================
+// Expanded FFI coverage (fleet code-review 2026-06-01, WARN: inadequate
+// FFI test coverage). The 47 exports below previously had ZERO smoke
+// coverage. These are characterization tests over known-correct values
+// plus an integer overflow / boundary matrix across the C ABI.
+// ======================================================================
+
+// Small constructors so each test reads as the math it checks.
+static blip_mp_t *mk_i64(int64_t v) {
+	blip_mp_t *m = blip_mp_create();
+	if (m) blip_mp_set_i64(m, v);
+	return m;
+}
+static int64_t as_i64(const blip_mp_t *m) {
+	int64_t v = 0;
+	blip_mp_get_i64(m, &v);
+	return v;
+}
+
+static void test_gcd_lcm(void) {
+	blip_mp_t *a = mk_i64(48), *b = mk_i64(18), *r = blip_mp_create();
+	CHECK(a && b && r, "gcd/lcm: create");
+	if (!a || !b || !r) goto done;
+	CHECK_OK(blip_mp_gcd(r, a, b));
+	CHECK(as_i64(r) == 6, "gcd(48,18) == 6");
+	blip_mp_set_i64(a, 4);
+	blip_mp_set_i64(b, 6);
+	CHECK_OK(blip_mp_lcm(r, a, b));
+	CHECK(as_i64(r) == 12, "lcm(4,6) == 12");
+done:
+	blip_mp_destroy(a);
+	blip_mp_destroy(b);
+	blip_mp_destroy(r);
+}
+
+static void test_symbols(void) {
+	// jacobi(9,5): 9 = 3^2 is a QR mod 5 -> +1
+	// legendre(6,7): 6 == -1 (mod 7), 7 == 3 (mod 4) -> -1
+	// kronecker(5,2): (5/2) = (-1)^((25-1)/8) = -1  (jacobi requires odd n)
+	blip_mp_t *a = blip_mp_create(), *n = blip_mp_create();
+	CHECK(a && n, "symbols: create");
+	if (!a || !n) goto done;
+	int s = 99;
+	blip_mp_set_i64(a, 9);
+	blip_mp_set_i64(n, 5);
+	CHECK_OK(blip_mp_jacobi(a, n, &s));
+	CHECK(s == 1, "jacobi(9,5) == 1");
+	blip_mp_set_i64(a, 6);
+	blip_mp_set_i64(n, 7);
+	CHECK_OK(blip_mp_legendre(a, n, &s));
+	CHECK(s == -1, "legendre(6,7) == -1");
+	blip_mp_set_i64(a, 5);
+	blip_mp_set_i64(n, 2);
+	CHECK_OK(blip_mp_kronecker(a, n, &s));
+	CHECK(s == -1, "kronecker(5,2) == -1");
+done:
+	blip_mp_destroy(a);
+	blip_mp_destroy(n);
+}
+
+static void test_roots(void) {
+	blip_mp_t *n = mk_i64(100), *out = blip_mp_create(), *rem = blip_mp_create();
+	CHECK(n && out && rem, "roots: create");
+	if (!n || !out || !rem) goto done;
+	CHECK_OK(blip_mp_isqrt(out, n));
+	CHECK(as_i64(out) == 10, "isqrt(100) == 10");
+	blip_mp_set_i64(n, 99);
+	CHECK_OK(blip_mp_isqrt(out, n));
+	CHECK(as_i64(out) == 9, "isqrt(99) == 9");
+	blip_mp_set_i64(n, 102);
+	CHECK_OK(blip_mp_isqrt_rem(out, rem, n));
+	CHECK(as_i64(out) == 10 && as_i64(rem) == 2, "isqrt_rem(102) == 10 r2");
+	blip_mp_set_i64(n, 27);
+	CHECK_OK(blip_mp_iroot(out, n, 3));
+	CHECK(as_i64(out) == 3, "iroot(27,3) == 3");
+	blip_mp_set_i64(n, 28);
+	CHECK_OK(blip_mp_iroot(out, n, 3));
+	CHECK(as_i64(out) == 3, "iroot(28,3) == 3 (floor)");
+	blip_mp_set_i64(n, 100);
+	CHECK(blip_mp_is_perfect_square(n) == 1, "100 is a perfect square");
+	blip_mp_set_i64(n, 101);
+	CHECK(blip_mp_is_perfect_square(n) == 0, "101 is not a perfect square");
+done:
+	blip_mp_destroy(n);
+	blip_mp_destroy(out);
+	blip_mp_destroy(rem);
+}
+
+static void test_combinatorics(void) {
+	blip_mp_t *out = blip_mp_create();
+	CHECK(out != NULL, "combi: create");
+	if (!out) return;
+	CHECK_OK(blip_mp_factorial(out, 0));
+	CHECK(as_i64(out) == 1, "0! == 1");
+	CHECK_OK(blip_mp_factorial(out, 10));
+	CHECK(as_i64(out) == 3628800, "10! == 3628800");
+	CHECK_OK(blip_mp_binomial(out, 6, 3));
+	CHECK(as_i64(out) == 20, "C(6,3) == 20");
+	CHECK_OK(blip_mp_binomial(out, 5, 0));
+	CHECK(as_i64(out) == 1, "C(5,0) == 1");
+	CHECK_OK(blip_mp_fibonacci(out, 0));
+	CHECK(as_i64(out) == 0, "fib(0) == 0");
+	CHECK_OK(blip_mp_fibonacci(out, 1));
+	CHECK(as_i64(out) == 1, "fib(1) == 1");
+	CHECK_OK(blip_mp_fibonacci(out, 10));
+	CHECK(as_i64(out) == 55, "fib(10) == 55");
+	blip_mp_destroy(out);
+}
+
+static void test_primality(void) {
+	blip_mp_rng_t *rng = blip_mp_rng_create(12345);
+	CHECK(rng != NULL, "primality: rng create");
+	if (!rng) return;
+	blip_mp_t *p = mk_i64(97), *out = blip_mp_create();
+	CHECK(p && out, "primality: create");
+	if (!p || !out) {
+		blip_mp_rng_destroy(rng);
+		return;
+	}
+	int isp = 99;
+	CHECK_OK(blip_mp_is_probably_prime(p, rng, 20, &isp));
+	CHECK(isp == 1, "97 is probably prime");
+	blip_mp_set_i64(p, 91); // 7 * 13
+	CHECK_OK(blip_mp_is_probably_prime(p, rng, 20, &isp));
+	CHECK(isp == 0, "91 is composite");
+	blip_mp_set_i64(p, 89);
+	CHECK_OK(blip_mp_next_prime(out, p, rng));
+	CHECK(as_i64(out) == 97, "next_prime(89) == 97");
+	blip_mp_destroy(p);
+	blip_mp_destroy(out);
+	blip_mp_rng_destroy(rng);
+}
+
+static void test_bitwise(void) {
+	blip_mp_t *a = mk_i64(12), *b = mk_i64(10), *r = blip_mp_create();
+	CHECK(a && b && r, "bitwise: create");
+	if (!a || !b || !r) goto done;
+	CHECK_OK(blip_mp_and(r, a, b));
+	CHECK(as_i64(r) == 8, "12 & 10 == 8");
+	CHECK_OK(blip_mp_or(r, a, b));
+	CHECK(as_i64(r) == 14, "12 | 10 == 14");
+	CHECK_OK(blip_mp_xor(r, a, b));
+	CHECK(as_i64(r) == 6, "12 ^ 10 == 6");
+	blip_mp_set_i64(a, 5);
+	CHECK_OK(blip_mp_not(r, a));
+	CHECK(as_i64(r) == -6, "~5 == -6 (-(a+1))");
+	blip_mp_set_i64(a, 3);
+	CHECK_OK(blip_mp_shl(r, a, 2));
+	CHECK(as_i64(r) == 12, "3 << 2 == 12");
+	blip_mp_set_i64(a, 100);
+	CHECK_OK(blip_mp_shr(r, a, 2));
+	CHECK(as_i64(r) == 25, "100 >> 2 == 25");
+done:
+	blip_mp_destroy(a);
+	blip_mp_destroy(b);
+	blip_mp_destroy(r);
+}
+
+static void test_neg_abs(void) {
+	blip_mp_t *a = mk_i64(7), *r = blip_mp_create();
+	CHECK(a && r, "neg/abs: create");
+	if (!a || !r) goto done;
+	CHECK_OK(blip_mp_neg(r, a));
+	CHECK(as_i64(r) == -7, "neg(7) == -7");
+	blip_mp_set_i64(a, -3);
+	CHECK_OK(blip_mp_neg(r, a));
+	CHECK(as_i64(r) == 3, "neg(-3) == 3");
+	blip_mp_set_i64(a, -5);
+	CHECK_OK(blip_mp_abs(r, a));
+	CHECK(as_i64(r) == 5, "abs(-5) == 5");
+	blip_mp_set_i64(a, 5);
+	CHECK_OK(blip_mp_abs(r, a));
+	CHECK(as_i64(r) == 5, "abs(5) == 5");
+done:
+	blip_mp_destroy(a);
+	blip_mp_destroy(r);
+}
+
+static void test_fits_matrix(void) {
+	blip_mp_t *m = mk_i64(100);
+	CHECK(m != NULL, "fits: create");
+	if (!m) return;
+	CHECK(blip_mp_fits_i64(m) == 1 && blip_mp_fits_u64(m) == 1, "100 fits i64/u64");
+	CHECK(blip_mp_fits_i32(m) == 1 && blip_mp_fits_u32(m) == 1, "100 fits i32/u32");
+
+	blip_mp_set_i64(m, INT64_MAX);
+	CHECK(blip_mp_fits_i64(m) == 1, "INT64_MAX fits i64");
+	CHECK(blip_mp_fits_i32(m) == 0, "INT64_MAX does not fit i32");
+
+	blip_mp_set_i64(m, INT64_MIN);
+	CHECK(blip_mp_fits_i64(m) == 1, "INT64_MIN fits i64");
+	CHECK(blip_mp_fits_u64(m) == 0, "INT64_MIN (negative) does not fit u64");
+
+	blip_mp_set_i64(m, -1);
+	CHECK(blip_mp_fits_i64(m) == 1, "-1 fits i64");
+	CHECK(blip_mp_fits_u64(m) == 0 && blip_mp_fits_u32(m) == 0, "-1 does not fit unsigned");
+
+	blip_mp_set_i64(m, (int64_t)INT32_MAX);
+	CHECK(blip_mp_fits_i32(m) == 1, "INT32_MAX fits i32");
+	blip_mp_set_i64(m, (int64_t)INT32_MAX + 1);
+	CHECK(blip_mp_fits_i32(m) == 0, "INT32_MAX+1 does not fit i32");
+	CHECK(blip_mp_fits_i64(m) == 1, "INT32_MAX+1 fits i64");
+
+	// A value above i64 max, built via set_str (set_u64 rejects > i64max).
+	CHECK_OK(blip_mp_set_str(m, "18446744073709551615", 20, 10)); // UINT64_MAX
+	CHECK(blip_mp_fits_u64(m) == 1, "UINT64_MAX fits u64");
+	CHECK(blip_mp_fits_i64(m) == 0, "UINT64_MAX does not fit i64");
+	blip_mp_destroy(m);
+}
+
+static void test_int_boundary_abi(void) {
+	// Round-trip the extremes across the C ABI (sign-extension is a classic bug).
+	blip_mp_t *m = blip_mp_create();
+	CHECK(m != NULL, "boundary: create");
+	if (!m) return;
+	int64_t iv = 0;
+	uint64_t uv = 0;
+
+	CHECK_OK(blip_mp_set_i64(m, INT64_MIN));
+	CHECK_OK(blip_mp_get_i64(m, &iv));
+	CHECK(iv == INT64_MIN, "INT64_MIN round-trips");
+
+	CHECK_OK(blip_mp_set_i64(m, INT64_MAX));
+	CHECK_OK(blip_mp_get_i64(m, &iv));
+	CHECK(iv == INT64_MAX, "INT64_MAX round-trips");
+
+	// Largest u64 storable via set_u64 is i64max (set_u64 rejects above that).
+	CHECK_OK(blip_mp_set_u64(m, (uint64_t)INT64_MAX));
+	CHECK_OK(blip_mp_get_u64(m, &uv));
+	CHECK(uv == (uint64_t)INT64_MAX, "i64max round-trips through u64");
+
+	int rc = blip_mp_set_u64(m, (uint64_t)INT64_MAX + 1);
+	CHECK(rc == BLIP_MP_ERR_OUT_OF_RANGE, "set_u64 above i64max -> OUT_OF_RANGE");
+
+	// Negative -> get_u64 must report OUT_OF_RANGE, not silently wrap.
+	CHECK_OK(blip_mp_set_i64(m, -1));
+	rc = blip_mp_get_u64(m, &uv);
+	CHECK(rc == BLIP_MP_ERR_OUT_OF_RANGE, "get_u64(-1) -> OUT_OF_RANGE");
+
+	// A value > i64max -> get_i64 must report OUT_OF_RANGE.
+	CHECK_OK(blip_mp_set_str(m, "18446744073709551615", 20, 10));
+	rc = blip_mp_get_i64(m, &iv);
+	// UINT64_MAX needs a 9-byte signed BLIP payload (leading 0x00 to stay
+	// positive); the i64 decoder rejects L>8 as OverlongEncoding -> INVALID_INPUT.
+	// Key property: it REFUSES rather than silently truncating. (Arguably this
+	// should be OUT_OF_RANGE since the value is well-formed but too large -
+	// flagged for review; asserting current contract here.)
+	CHECK(rc == BLIP_MP_ERR_INVALID_INPUT, "get_i64(UINT64_MAX) refuses (INVALID_INPUT)");
+	blip_mp_destroy(m);
+}
+
+static void test_bit_introspection(void) {
+	blip_mp_t *m = mk_i64(7); // 0b111
+	CHECK(m != NULL, "bits: create");
+	if (!m) return;
+	CHECK(blip_mp_popcount(m) == 3, "popcount(7) == 3");
+	CHECK(blip_mp_scan1(m, 0) == 0, "scan1(7,0) == 0");
+	CHECK(blip_mp_scan0(m, 0) == 3, "scan0(7,0) == 3");
+	blip_mp_set_i64(m, 255);
+	CHECK(blip_mp_popcount(m) == 8, "popcount(255) == 8");
+	blip_mp_set_i64(m, 0);
+	CHECK(blip_mp_popcount(m) == 0, "popcount(0) == 0");
+	blip_mp_set_i64(m, 12); // 0b1100
+	CHECK(blip_mp_scan1(m, 0) == 2, "scan1(12,0) == 2");
+	CHECK(blip_mp_scan0(m, 0) == 0, "scan0(12,0) == 0");
+	blip_mp_set_i64(m, -1);
+	CHECK(blip_mp_popcount(m) == SIZE_MAX, "popcount(negative) == SIZE_MAX");
+	blip_mp_destroy(m);
+}
+
+static void test_str_roundtrip(void) {
+	blip_mp_t *m = blip_mp_create();
+	CHECK(m != NULL, "str: create");
+	if (!m) return;
+	CHECK_OK(blip_mp_set_str(m, "12345", 5, 10));
+	CHECK(as_i64(m) == 12345, "set_str dec 12345");
+	CHECK_OK(blip_mp_set_str(m, "ff", 2, 16));
+	CHECK(as_i64(m) == 255, "set_str hex ff == 255");
+	CHECK_OK(blip_mp_set_str(m, "-42", 3, 10));
+	CHECK(as_i64(m) == -42, "set_str -42");
+
+	int rc = blip_mp_set_str(m, "xyz", 3, 10);
+	CHECK(rc != BLIP_MP_OK, "set_str invalid digits errors");
+
+	// to_string round-trip + required length + buffer-too-small path.
+	blip_mp_set_i64(m, 255);
+	char buf[16];
+	size_t required = 0;
+	CHECK_OK(blip_mp_to_string(m, 16, buf, sizeof(buf), &required));
+	CHECK(required == 2, "to_string(255, base16) required == 2");
+	CHECK(strcmp(buf, "ff") == 0, "to_string(255, base16) == \"ff\"");
+
+	char tiny[1];
+	required = 0;
+	rc = blip_mp_to_string(m, 16, tiny, sizeof(tiny), &required);
+	CHECK(rc == BLIP_MP_ERR_BUFFER_TOO_SMALL, "to_string tiny buf -> BUFFER_TOO_SMALL");
+	CHECK(required == 2, "to_string still reports required on small buf");
+	blip_mp_destroy(m);
+}
+
+static void test_rng_ops(void) {
+	// Same seed -> identical stream (determinism), and bounds are respected.
+	blip_mp_rng_t *r1 = blip_mp_rng_create(777);
+	blip_mp_rng_t *r2 = blip_mp_rng_create(777);
+	CHECK(r1 && r2, "rng: create pair");
+	if (!r1 || !r2) {
+		blip_mp_rng_destroy(r1);
+		blip_mp_rng_destroy(r2);
+		return;
+	}
+	blip_mp_t *a = blip_mp_create(), *b = blip_mp_create();
+	CHECK(a && b, "rng: create operands");
+	if (!a || !b) goto done;
+	CHECK_OK(blip_mp_set_random_bits(a, r1, 64));
+	CHECK_OK(blip_mp_set_random_bits(b, r2, 64));
+	CHECK(blip_mp_cmp(a, b) == 0, "same seed -> same random_bits");
+	CHECK(blip_mp_bit_len(a) <= 64, "random_bits(64) bit_len <= 64");
+
+	blip_mp_t *bound = mk_i64(1000);
+	CHECK(bound != NULL, "rng: bound");
+	if (bound) {
+		CHECK_OK(blip_mp_set_random_below(a, r1, bound));
+		CHECK(blip_mp_sign(a) >= 0, "random_below result is non-negative");
+		CHECK(blip_mp_cmp(a, bound) < 0, "random_below result < bound");
+		blip_mp_destroy(bound);
+	}
+done:
+	blip_mp_destroy(a);
+	blip_mp_destroy(b);
+	blip_mp_rng_destroy(r1);
+	blip_mp_rng_destroy(r2);
+}
+
+static void test_fp_orphans(void) {
+	blip_mp_fp_t *a = blip_mp_fp_create();
+	blip_mp_fp_t *b = blip_mp_fp_create();
+	blip_mp_fp_t *r = blip_mp_fp_create();
+	CHECK(a && b && r, "fp: create");
+	if (!a || !b || !r) goto done;
+
+	// 1/4 and 1/2 are exact in binary -> get_f64_exact must succeed.
+	CHECK_OK(blip_mp_fp_set_rational_binary(a, 1, 4)); // 0.25
+	CHECK_OK(blip_mp_fp_set_rational_binary(b, 1, 2)); // 0.5
+	CHECK(blip_mp_fp_get_base(a) == BLIP_MP_FP_BASE_BINARY, "rational_binary -> base 2");
+
+	double d = -1.0;
+	CHECK_OK(blip_mp_fp_get_f64_exact(a, &d));
+	CHECK(d == 0.25, "fp 1/4 get_f64_exact == 0.25");
+
+	CHECK(blip_mp_fp_is_zero(a) == 0, "1/4 is not zero");
+	CHECK_OK(blip_mp_fp_set_rational_binary(r, 0, 1));
+	CHECK(blip_mp_fp_is_zero(r) == 1, "0/1 is zero");
+
+	int c = 99;
+	CHECK_OK(blip_mp_fp_cmp(a, b, &c));
+	CHECK(c == -1, "cmp(1/4, 1/2) == -1");
+	int eq = 99;
+	CHECK_OK(blip_mp_fp_eq(a, a, &eq));
+	CHECK(eq == 1, "eq(1/4, 1/4) == 1");
+	CHECK_OK(blip_mp_fp_eq(a, b, &eq));
+	CHECK(eq == 0, "eq(1/4, 1/2) == 0");
+
+	CHECK_OK(blip_mp_fp_sub(r, b, a)); // 1/2 - 1/4 = 1/4
+	CHECK_OK(blip_mp_fp_get_f64_exact(r, &d));
+	CHECK(d == 0.25, "1/2 - 1/4 == 0.25");
+
+	CHECK_OK(blip_mp_fp_mul(r, b, b)); // 1/2 * 1/2 = 1/4
+	CHECK_OK(blip_mp_fp_get_f64_exact(r, &d));
+	CHECK(d == 0.25, "1/2 * 1/2 == 0.25");
+
+	// to_binary on an already-binary value preserves it.
+	CHECK_OK(blip_mp_fp_to_binary(r, a));
+	CHECK_OK(blip_mp_fp_get_f64_exact(r, &d));
+	CHECK(d == 0.25, "to_binary(1/4) == 0.25");
+
+	// get_scale / get_mantissa: smoke (borrowed mantissa, do NOT destroy).
+	(void)blip_mp_fp_get_scale(a);
+	blip_mp_t *mant = blip_mp_fp_get_mantissa(a);
+	CHECK(mant != NULL, "fp_get_mantissa non-NULL");
+
+	// round_to_scale on an integer value at scale 0 is the identity.
+	blip_mp_fp_t *i = blip_mp_fp_create();
+	if (i) {
+		CHECK_OK(blip_mp_fp_set_i64(i, 5, 0, BLIP_MP_FP_BASE_BINARY)); // value 5
+		CHECK_OK(blip_mp_fp_round_to_scale(r, i, 0, BLIP_MP_FP_ROUND_HALF_TO_EVEN));
+		CHECK_OK(blip_mp_fp_get_f64_exact(r, &d));
+		CHECK(d == 5.0, "round_to_scale(5 @ scale0) == 5");
+		blip_mp_fp_destroy(i);
+	}
+done:
+	blip_mp_fp_destroy(a);
+	blip_mp_fp_destroy(b);
+	blip_mp_fp_destroy(r);
+}
+
 int main(void) {
 	test_lifecycle();
 	test_set_get_i64();
@@ -512,6 +907,22 @@ int main(void) {
 	test_fp_to_string_fixed();
 	test_fp_to_string_scientific();
 	test_fp_get_f64_with_mode();
+
+	// Expanded coverage (fleet review 2026-06-01): the 47 exports below
+	// previously had no smoke coverage; plus an int overflow/boundary matrix.
+	test_gcd_lcm();
+	test_symbols();
+	test_roots();
+	test_combinatorics();
+	test_primality();
+	test_bitwise();
+	test_neg_abs();
+	test_fits_matrix();
+	test_int_boundary_abi();
+	test_bit_introspection();
+	test_str_roundtrip();
+	test_rng_ops();
+	test_fp_orphans();
 
 	if (failures == 0) {
 		printf("c_smoke: all checks passed\n");
