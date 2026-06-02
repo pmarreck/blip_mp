@@ -101,17 +101,11 @@ fn scanCommon(self: *const Mp, start: usize, target: u1) usize {
 
 const testing = std.testing;
 
-fn mpFromI64(allocator: std.mem.Allocator, v: i64) !Mp {
-	var m = Mp.init(allocator);
-	try m.setI64(v);
-	return m;
-}
-
 test "scan: popcount on small positives matches @popCount" {
 	const a = std.testing.allocator;
 	const cases = [_]i64{ 0, 1, 2, 3, 7, 0xFF, 0xFFFF, 0xDEADBEEF, std.math.maxInt(i32), std.math.maxInt(i64) };
 	for (cases) |v| {
-		var x = try mpFromI64(a, v);
+		var x = try Mp.fromI64(a, v);
 		defer x.deinit();
 		const expected: usize = @popCount(@as(u64, @intCast(v)));
 		try testing.expectEqual(expected, popcount(&x));
@@ -122,7 +116,7 @@ test "scan: popcount on negatives returns maxInt(usize) (GMP semantics)" {
 	const a = std.testing.allocator;
 	const cases = [_]i64{ -1, -2, -100, std.math.minInt(i32), std.math.minInt(i64) };
 	for (cases) |v| {
-		var x = try mpFromI64(a, v);
+		var x = try Mp.fromI64(a, v);
 		defer x.deinit();
 		try testing.expectEqual(NOT_FOUND, popcount(&x));
 	}
@@ -142,7 +136,7 @@ test "scan: scan1 on small positives matches @ctz" {
 	const a = std.testing.allocator;
 	const cases = [_]i64{ 1, 2, 4, 8, 0x10, 0xFF, 0x100 };
 	for (cases) |v| {
-		var x = try mpFromI64(a, v);
+		var x = try Mp.fromI64(a, v);
 		defer x.deinit();
 		const expected: usize = @ctz(@as(u64, @intCast(v)));
 		try testing.expectEqual(expected, scan1(&x, 0));
@@ -151,7 +145,7 @@ test "scan: scan1 on small positives matches @ctz" {
 
 test "scan: scan1 on zero returns NOT_FOUND" {
 	const a = std.testing.allocator;
-	var x = try mpFromI64(a, 0);
+	var x = try Mp.fromI64(a, 0);
 	defer x.deinit();
 	try testing.expectEqual(NOT_FOUND, scan1(&x, 0));
 	try testing.expectEqual(NOT_FOUND, scan1(&x, 100));
@@ -160,7 +154,7 @@ test "scan: scan1 on zero returns NOT_FOUND" {
 test "scan: scan1 with start advancing past low set bit" {
 	const a = std.testing.allocator;
 	// 0b1010101 — set bits at 0, 2, 4, 6.
-	var x = try mpFromI64(a, 0b1010101);
+	var x = try Mp.fromI64(a, 0b1010101);
 	defer x.deinit();
 	try testing.expectEqual(@as(usize, 0), scan1(&x, 0));
 	try testing.expectEqual(@as(usize, 2), scan1(&x, 1));
@@ -174,7 +168,7 @@ test "scan: scan1 with start advancing past low set bit" {
 test "scan: scan0 on positives finds infinite high-bit-zero run" {
 	const a = std.testing.allocator;
 	// 5 = 0b101 — bits 0 and 2 are 1, bit 1 is 0; bits 3+ are 0 (sign-ext).
-	var x = try mpFromI64(a, 5);
+	var x = try Mp.fromI64(a, 5);
 	defer x.deinit();
 	try testing.expectEqual(@as(usize, 1), scan0(&x, 0));
 	try testing.expectEqual(@as(usize, 1), scan0(&x, 1));
@@ -187,21 +181,21 @@ test "scan: scan0 on negatives finds first explicit 0-bit" {
 	const a = std.testing.allocator;
 	// -1 = all 1s in two's complement → no 0-bit anywhere.
 	{
-		var x = try mpFromI64(a, -1);
+		var x = try Mp.fromI64(a, -1);
 		defer x.deinit();
 		try testing.expectEqual(NOT_FOUND, scan0(&x, 0));
 		try testing.expectEqual(NOT_FOUND, scan0(&x, 100));
 	}
 	// -2 = ...111110 → bit 0 = 0, bits 1+ all 1.
 	{
-		var x = try mpFromI64(a, -2);
+		var x = try Mp.fromI64(a, -2);
 		defer x.deinit();
 		try testing.expectEqual(@as(usize, 0), scan0(&x, 0));
 		try testing.expectEqual(NOT_FOUND, scan0(&x, 1));
 	}
 	// -4 = ...111100 → bits 0, 1 = 0; bits 2+ all 1.
 	{
-		var x = try mpFromI64(a, -4);
+		var x = try Mp.fromI64(a, -4);
 		defer x.deinit();
 		try testing.expectEqual(@as(usize, 0), scan0(&x, 0));
 		try testing.expectEqual(@as(usize, 1), scan0(&x, 1));
@@ -212,7 +206,7 @@ test "scan: scan0 on negatives finds first explicit 0-bit" {
 test "scan: scan1 on negatives finds infinite high-bit-one run" {
 	const a = std.testing.allocator;
 	// -2 = ...11110 → bit 0=0, bits 1+ = 1.
-	var x = try mpFromI64(a, -2);
+	var x = try Mp.fromI64(a, -2);
 	defer x.deinit();
 	try testing.expectEqual(@as(usize, 1), scan1(&x, 0));
 	try testing.expectEqual(@as(usize, 1), scan1(&x, 1));
@@ -222,7 +216,7 @@ test "scan: scan1 on negatives finds infinite high-bit-one run" {
 test "scan: scan crosses byte boundaries" {
 	const a = std.testing.allocator;
 	// 1 << 28 — bit 28 is the sole set bit.
-	var x = try mpFromI64(a, @as(i64, 1) << 28);
+	var x = try Mp.fromI64(a, @as(i64, 1) << 28);
 	defer x.deinit();
 	try testing.expectEqual(@as(usize, 28), scan1(&x, 0));
 	try testing.expectEqual(@as(usize, 28), scan1(&x, 28));
@@ -234,12 +228,12 @@ test "scan: scan crosses byte boundaries" {
 
 test "scan: popcount of 2^63 (tier-3 positive)" {
 	const a = std.testing.allocator;
-	var minInt = try mpFromI64(a, std.math.minInt(i64));
+	var minInt = try Mp.fromI64(a, std.math.minInt(i64));
 	defer minInt.deinit();
 	// 0 - minInt = 2^63 (tier-3). One bit set.
 	var x = Mp.init(a);
 	defer x.deinit();
-	var zero = try mpFromI64(a, 0);
+	var zero = try Mp.fromI64(a, 0);
 	defer zero.deinit();
 	try x.sub(&zero, &minInt);
 	try testing.expectEqual(@as(usize, 1), popcount(&x));

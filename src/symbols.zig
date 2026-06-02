@@ -176,12 +176,6 @@ pub fn kronecker(a: *const Mp, n: *const Mp, allocator: std.mem.Allocator) Symbo
 
 const testing = std.testing;
 
-fn mpFromI64(allocator: std.mem.Allocator, v: i64) !Mp {
-	var m = Mp.init(allocator);
-	try m.setI64(v);
-	return m;
-}
-
 test "jacobi: known small values" {
 	const a = std.testing.allocator;
 	// Reference: standard table values.
@@ -207,9 +201,9 @@ test "jacobi: known small values" {
 		.{ .ai = 3, .n = 13, .want = 1 },
 	};
 	for (cases) |c| {
-		var ai = try mpFromI64(a, c.ai);
+		var ai = try Mp.fromI64(a, c.ai);
 		defer ai.deinit();
-		var n = try mpFromI64(a, c.n);
+		var n = try Mp.fromI64(a, c.n);
 		defer n.deinit();
 		const got = try jacobi(&ai, &n, a);
 		try testing.expectEqual(c.want, got);
@@ -218,15 +212,15 @@ test "jacobi: known small values" {
 
 test "jacobi: rejects even or non-positive n" {
 	const a = std.testing.allocator;
-	var ai = try mpFromI64(a, 5);
+	var ai = try Mp.fromI64(a, 5);
 	defer ai.deinit();
-	var n_even = try mpFromI64(a, 6);
+	var n_even = try Mp.fromI64(a, 6);
 	defer n_even.deinit();
 	try testing.expectError(error.ModulusMustBeOddPositive, jacobi(&ai, &n_even, a));
-	var n_zero = try mpFromI64(a, 0);
+	var n_zero = try Mp.fromI64(a, 0);
 	defer n_zero.deinit();
 	try testing.expectError(error.ModulusMustBeOddPositive, jacobi(&ai, &n_zero, a));
-	var n_neg = try mpFromI64(a, -3);
+	var n_neg = try Mp.fromI64(a, -3);
 	defer n_neg.deinit();
 	try testing.expectError(error.ModulusMustBeOddPositive, jacobi(&ai, &n_neg, a));
 }
@@ -237,15 +231,15 @@ test "jacobi: multiplicativity J(ab/n) == J(a/n) * J(b/n)" {
 	const xs = [_]i64{ 1, 2, 3, 5, 7, 11, 13 };
 	const ys = [_]i64{ 2, 4, 5, 7, 11, 13, 17 };
 	for (ns) |nv| {
-		var n = try mpFromI64(a, nv);
+		var n = try Mp.fromI64(a, nv);
 		defer n.deinit();
 		for (xs) |xv| {
-			var x = try mpFromI64(a, xv);
+			var x = try Mp.fromI64(a, xv);
 			defer x.deinit();
 			for (ys) |yv| {
-				var y = try mpFromI64(a, yv);
+				var y = try Mp.fromI64(a, yv);
 				defer y.deinit();
-				var prod = try mpFromI64(a, xv * yv);
+				var prod = try Mp.fromI64(a, xv * yv);
 				defer prod.deinit();
 				const j_x = try jacobi(&x, &n, a);
 				const j_y = try jacobi(&y, &n, a);
@@ -259,14 +253,14 @@ test "jacobi: multiplicativity J(ab/n) == J(a/n) * J(b/n)" {
 
 test "jacobi: J(0, n) == 0 for n > 1; J(0, 1) == 1" {
 	const a = std.testing.allocator;
-	var zero = try mpFromI64(a, 0);
+	var zero = try Mp.fromI64(a, 0);
 	defer zero.deinit();
-	var one = try mpFromI64(a, 1);
+	var one = try Mp.fromI64(a, 1);
 	defer one.deinit();
 	try testing.expectEqual(@as(i2, 1), try jacobi(&zero, &one, a));
 	const n_vals = [_]i64{ 3, 5, 7, 9, 15, 27, 99 };
 	for (n_vals) |nv| {
-		var n = try mpFromI64(a, nv);
+		var n = try Mp.fromI64(a, nv);
 		defer n.deinit();
 		try testing.expectEqual(@as(i2, 0), try jacobi(&zero, &n, a));
 	}
@@ -282,9 +276,9 @@ test "legendre: alias to jacobi for prime moduli" {
 		.{ .ai = 7, .p = 19 },
 	};
 	for (cases) |c| {
-		var ai = try mpFromI64(a, c.ai);
+		var ai = try Mp.fromI64(a, c.ai);
 		defer ai.deinit();
-		var p = try mpFromI64(a, c.p);
+		var p = try Mp.fromI64(a, c.p);
 		defer p.deinit();
 		try testing.expectEqual(try jacobi(&ai, &p, a), try legendre(&ai, &p, a));
 	}
@@ -292,7 +286,7 @@ test "legendre: alias to jacobi for prime moduli" {
 
 test "kronecker: Kr(a/2)" {
 	const a = std.testing.allocator;
-	var two = try mpFromI64(a, 2);
+	var two = try Mp.fromI64(a, 2);
 	defer two.deinit();
 	const cases = [_]struct { v: i64, want: i2 }{
 		.{ .v = 0, .want = 0 },
@@ -308,7 +302,7 @@ test "kronecker: Kr(a/2)" {
 		.{ .v = 4, .want = 0 },
 	};
 	for (cases) |c| {
-		var ai = try mpFromI64(a, c.v);
+		var ai = try Mp.fromI64(a, c.v);
 		defer ai.deinit();
 		try testing.expectEqual(c.want, try kronecker(&ai, &two, a));
 	}
@@ -319,10 +313,10 @@ test "kronecker: extends jacobi for odd positive n" {
 	const ns = [_]i64{ 3, 5, 7, 9, 15, 21, 27, 35, 99 };
 	const as_v = [_]i64{ 0, 1, 2, 3, 5, 7, 11, 13, 17 };
 	for (ns) |nv| {
-		var n = try mpFromI64(a, nv);
+		var n = try Mp.fromI64(a, nv);
 		defer n.deinit();
 		for (as_v) |av| {
-			var ai = try mpFromI64(a, av);
+			var ai = try Mp.fromI64(a, av);
 			defer ai.deinit();
 			const k = try kronecker(&ai, &n, a);
 			const j = try jacobi(&ai, &n, a);
@@ -333,13 +327,13 @@ test "kronecker: extends jacobi for odd positive n" {
 
 test "kronecker: handles n == 0" {
 	const a = std.testing.allocator;
-	var zero = try mpFromI64(a, 0);
+	var zero = try Mp.fromI64(a, 0);
 	defer zero.deinit();
-	var one = try mpFromI64(a, 1);
+	var one = try Mp.fromI64(a, 1);
 	defer one.deinit();
-	var minus_one = try mpFromI64(a, -1);
+	var minus_one = try Mp.fromI64(a, -1);
 	defer minus_one.deinit();
-	var seven = try mpFromI64(a, 7);
+	var seven = try Mp.fromI64(a, 7);
 	defer seven.deinit();
 	try testing.expectEqual(@as(i2, 1), try kronecker(&one, &zero, a));
 	try testing.expectEqual(@as(i2, 1), try kronecker(&minus_one, &zero, a));
@@ -350,18 +344,18 @@ test "kronecker: handles n == 0" {
 test "kronecker: handles negative n" {
 	const a = std.testing.allocator;
 	// (a / -1) = 1 if a >= 0, -1 if a < 0
-	var neg_one = try mpFromI64(a, -1);
+	var neg_one = try Mp.fromI64(a, -1);
 	defer neg_one.deinit();
-	var pos = try mpFromI64(a, 5);
+	var pos = try Mp.fromI64(a, 5);
 	defer pos.deinit();
-	var neg = try mpFromI64(a, -5);
+	var neg = try Mp.fromI64(a, -5);
 	defer neg.deinit();
 	try testing.expectEqual(@as(i2, 1), try kronecker(&pos, &neg_one, a));
 	try testing.expectEqual(@as(i2, -1), try kronecker(&neg, &neg_one, a));
 	// (3 / -7) = (3 / -1) * (3 / 7) = 1 * (-1) = -1
-	var three = try mpFromI64(a, 3);
+	var three = try Mp.fromI64(a, 3);
 	defer three.deinit();
-	var minus_seven = try mpFromI64(a, -7);
+	var minus_seven = try Mp.fromI64(a, -7);
 	defer minus_seven.deinit();
 	try testing.expectEqual(@as(i2, -1), try kronecker(&three, &minus_seven, a));
 }

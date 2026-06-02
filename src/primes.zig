@@ -318,12 +318,6 @@ pub fn nextPrime(out: *Mp, n: *const Mp, allocator: std.mem.Allocator, rng: std.
 
 const testing = std.testing;
 
-fn mpFromI64(allocator: std.mem.Allocator, v: i64) !Mp {
-	var m = Mp.init(allocator);
-	try m.setI64(v);
-	return m;
-}
-
 fn deterministicRng() std.Random {
 	const seed: u64 = 0xC0FFEE_C0DE_1234;
 	const S = struct {
@@ -338,7 +332,7 @@ test "isProbablyPrime: known small primes" {
 	const primes = [_]i64{ 2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 97, 8191, 524287, 2147483647 };
 	const rng = deterministicRng();
 	for (primes) |p| {
-		var m = try mpFromI64(a, p);
+		var m = try Mp.fromI64(a, p);
 		defer m.deinit();
 		const ok = try isProbablyPrime(&m, a, rng, 10);
 		if (!ok) {
@@ -353,7 +347,7 @@ test "isProbablyPrime: known small composites" {
 	const composites = [_]i64{ 0, 1, 4, 6, 8, 9, 10, 12, 14, 15, 21, 25, 27, 33, 35, 49, 51, 91, 121, 169 };
 	const rng = deterministicRng();
 	for (composites) |c| {
-		var m = try mpFromI64(a, c);
+		var m = try Mp.fromI64(a, c);
 		defer m.deinit();
 		const ok = try isProbablyPrime(&m, a, rng, 10);
 		if (ok) {
@@ -368,7 +362,7 @@ test "isProbablyPrime: Carmichael numbers (Miller-Rabin must catch as composite)
 	const carmichaels = [_]i64{ 561, 1729, 2465, 6601, 10585 };
 	const rng = deterministicRng();
 	for (carmichaels) |c| {
-		var m = try mpFromI64(a, c);
+		var m = try Mp.fromI64(a, c);
 		defer m.deinit();
 		const ok = try isProbablyPrime(&m, a, rng, 10);
 		if (ok) std.debug.print("FAIL: Carmichael {d} claimed prime\n", .{c});
@@ -381,7 +375,7 @@ test "isProbablyPrime: negatives are not prime" {
 	const rng = deterministicRng();
 	const negs = [_]i64{ -1, -2, -3, -7, -11, -10000 };
 	for (negs) |v| {
-		var m = try mpFromI64(a, v);
+		var m = try Mp.fromI64(a, v);
 		defer m.deinit();
 		try testing.expect(!try isProbablyPrime(&m, a, rng, 5));
 	}
@@ -403,7 +397,7 @@ test "nextPrime: small cases" {
 		.{ .n = 7919, .want = 7927 },
 	};
 	for (cases) |c| {
-		var n = try mpFromI64(a, c.n);
+		var n = try Mp.fromI64(a, c.n);
 		defer n.deinit();
 		var r = Mp.init(a);
 		defer r.deinit();

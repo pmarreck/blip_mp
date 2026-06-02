@@ -240,21 +240,15 @@ pub fn shr(out: *Mp, a: *const Mp, n: usize) ArithError!void {
 
 const testing = std.testing;
 
-fn mpFromI64(allocator: std.mem.Allocator, v: i64) !Mp {
-	var m = Mp.init(allocator);
-	try m.setI64(v);
-	return m;
-}
-
 fn expectI64(want: i64, got: *const Mp) !void {
 	try testing.expectEqual(want, try got.getI64());
 }
 
 test "bitwiseAnd: small positives" {
 	const a = std.testing.allocator;
-	var x = try mpFromI64(a, 12);
+	var x = try Mp.fromI64(a, 12);
 	defer x.deinit();
-	var y = try mpFromI64(a, 10);
+	var y = try Mp.fromI64(a, 10);
 	defer y.deinit();
 	var r = Mp.init(a);
 	defer r.deinit();
@@ -264,9 +258,9 @@ test "bitwiseAnd: small positives" {
 
 test "bitwiseOr: small positives" {
 	const a = std.testing.allocator;
-	var x = try mpFromI64(a, 12);
+	var x = try Mp.fromI64(a, 12);
 	defer x.deinit();
-	var y = try mpFromI64(a, 10);
+	var y = try Mp.fromI64(a, 10);
 	defer y.deinit();
 	var r = Mp.init(a);
 	defer r.deinit();
@@ -276,7 +270,7 @@ test "bitwiseOr: small positives" {
 
 test "bitwiseXor: x ^ x == 0" {
 	const a = std.testing.allocator;
-	var x = try mpFromI64(a, 0xDEADBEEF);
+	var x = try Mp.fromI64(a, 0xDEADBEEF);
 	defer x.deinit();
 	var r = Mp.init(a);
 	defer r.deinit();
@@ -286,9 +280,9 @@ test "bitwiseXor: x ^ x == 0" {
 
 test "bitwiseAnd: with zero" {
 	const a = std.testing.allocator;
-	var x = try mpFromI64(a, 0xDEADBEEF);
+	var x = try Mp.fromI64(a, 0xDEADBEEF);
 	defer x.deinit();
-	var z = try mpFromI64(a, 0);
+	var z = try Mp.fromI64(a, 0);
 	defer z.deinit();
 	var r = Mp.init(a);
 	defer r.deinit();
@@ -307,9 +301,9 @@ test "bitwiseAnd / Or / Xor: i64 spot checks across sign combinations" {
 		.{ .x = std.math.minInt(i64), .y = 1 },
 	};
 	for (cases) |c| {
-		var x = try mpFromI64(a, c.x);
+		var x = try Mp.fromI64(a, c.x);
 		defer x.deinit();
-		var y = try mpFromI64(a, c.y);
+		var y = try Mp.fromI64(a, c.y);
 		defer y.deinit();
 		var r = Mp.init(a);
 		defer r.deinit();
@@ -326,7 +320,7 @@ test "bitwiseNot: ~x == -(x+1) per GMP semantics" {
 	const a = std.testing.allocator;
 	const cases = [_]i64{ 0, 1, -1, 5, -5, 0x12345678, -0x12345678, std.math.maxInt(i32), std.math.minInt(i32) };
 	for (cases) |v| {
-		var x = try mpFromI64(a, v);
+		var x = try Mp.fromI64(a, v);
 		defer x.deinit();
 		var r = Mp.init(a);
 		defer r.deinit();
@@ -338,7 +332,7 @@ test "bitwiseNot: ~x == -(x+1) per GMP semantics" {
 test "shl: x << 0 == x; 1 << 4 == 16; 1 << 63 round-trips through shr" {
 	const a = std.testing.allocator;
 	{
-		var x = try mpFromI64(a, 42);
+		var x = try Mp.fromI64(a, 42);
 		defer x.deinit();
 		var r = Mp.init(a);
 		defer r.deinit();
@@ -346,7 +340,7 @@ test "shl: x << 0 == x; 1 << 4 == 16; 1 << 63 round-trips through shr" {
 		try expectI64(42, &r);
 	}
 	{
-		var x = try mpFromI64(a, 1);
+		var x = try Mp.fromI64(a, 1);
 		defer x.deinit();
 		var r = Mp.init(a);
 		defer r.deinit();
@@ -369,7 +363,7 @@ test "shl: i64 spot checks (positives that don't overflow i64)" {
 		.{ .x = 3, .n = 60 }, // 3 << 60 fits in i64
 	};
 	for (cases) |c| {
-		var x = try mpFromI64(a, c.x);
+		var x = try Mp.fromI64(a, c.x);
 		defer x.deinit();
 		var r = Mp.init(a);
 		defer r.deinit();
@@ -388,7 +382,7 @@ test "shr: x >> 0 == x; positives use truncating div" {
 		.{ .x = std.math.maxInt(i32), .n = 1 },
 	};
 	for (cases) |c| {
-		var x = try mpFromI64(a, c.x);
+		var x = try Mp.fromI64(a, c.x);
 		defer x.deinit();
 		var r = Mp.init(a);
 		defer r.deinit();
@@ -401,7 +395,7 @@ test "shr: negative arithmetic shift (floor division per GMP)" {
 	const a = std.testing.allocator;
 	// -1 >> any → -1 (floor: -0.5, -0.25, … all round to -1)
 	{
-		var x = try mpFromI64(a, -1);
+		var x = try Mp.fromI64(a, -1);
 		defer x.deinit();
 		var r = Mp.init(a);
 		defer r.deinit();
@@ -412,7 +406,7 @@ test "shr: negative arithmetic shift (floor division per GMP)" {
 	}
 	// -8 >> 1 == -4 (exact)
 	{
-		var x = try mpFromI64(a, -8);
+		var x = try Mp.fromI64(a, -8);
 		defer x.deinit();
 		var r = Mp.init(a);
 		defer r.deinit();
@@ -421,7 +415,7 @@ test "shr: negative arithmetic shift (floor division per GMP)" {
 	}
 	// -7 >> 1 → floor(-3.5) == -4
 	{
-		var x = try mpFromI64(a, -7);
+		var x = try Mp.fromI64(a, -7);
 		defer x.deinit();
 		var r = Mp.init(a);
 		defer r.deinit();
@@ -430,7 +424,7 @@ test "shr: negative arithmetic shift (floor division per GMP)" {
 	}
 	// -1024 >> 5 == -32 (exact); -1023 >> 5 == -32 (floor)
 	{
-		var x = try mpFromI64(a, -1024);
+		var x = try Mp.fromI64(a, -1024);
 		defer x.deinit();
 		var r = Mp.init(a);
 		defer r.deinit();
@@ -438,7 +432,7 @@ test "shr: negative arithmetic shift (floor division per GMP)" {
 		try expectI64(-32, &r);
 	}
 	{
-		var x = try mpFromI64(a, -1023);
+		var x = try Mp.fromI64(a, -1023);
 		defer x.deinit();
 		var r = Mp.init(a);
 		defer r.deinit();
@@ -449,7 +443,7 @@ test "shr: negative arithmetic shift (floor division per GMP)" {
 
 test "shr: positive shifted past total bit length → 0" {
 	const a = std.testing.allocator;
-	var x = try mpFromI64(a, 0xFF);
+	var x = try Mp.fromI64(a, 0xFF);
 	defer x.deinit();
 	var r = Mp.init(a);
 	defer r.deinit();
@@ -461,7 +455,7 @@ test "shl then shr round-trips for positives" {
 	const a = std.testing.allocator;
 	const cases = [_]i64{ 1, 7, 0x123, 0xABCD, 0xDEADBEEF };
 	for (cases) |v| {
-		var x = try mpFromI64(a, v);
+		var x = try Mp.fromI64(a, v);
 		defer x.deinit();
 		var s = Mp.init(a);
 		defer s.deinit();

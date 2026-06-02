@@ -165,6 +165,14 @@ pub const Mp = struct {
 		self.cached_sign = if (value > 0) 1 else -1; // value != 0 here (handled above)
 	}
 
+	/// Convenience constructor: `init` + `setI64` in one call. Replaces the
+	/// per-module `mpFromI64` test helpers that were byte-identically duplicated.
+	pub fn fromI64(allocator: std.mem.Allocator, value: i64) SetError!Mp {
+		var m = Mp.init(allocator);
+		try m.setI64(value);
+		return m;
+	}
+
 	/// Ensure heap_buf has at least `cap` bytes. If a realloc happens it
 	/// drops the previous contents (caller must re-write). For monotonically
 	/// growing workloads, doubles the existing cap to amortise realloc cost.

@@ -66,12 +66,6 @@ pub fn fitsU32(self: *const Mp) bool {
 
 const testing = std.testing;
 
-fn mpFromI64(allocator: std.mem.Allocator, v: i64) !Mp {
-	var m = Mp.init(allocator);
-	try m.setI64(v);
-	return m;
-}
-
 fn expectI64(want: i64, got: *const Mp) !void {
 	try testing.expectEqual(want, try got.getI64());
 }
@@ -80,7 +74,7 @@ test "sign: neg small positives, negatives, zero" {
 	const a = std.testing.allocator;
 	const cases = [_]i64{ 0, 1, -1, 7, -7, 0x12345678, -0x12345678, std.math.maxInt(i32), std.math.minInt(i32) };
 	for (cases) |v| {
-		var x = try mpFromI64(a, v);
+		var x = try Mp.fromI64(a, v);
 		defer x.deinit();
 		var r = Mp.init(a);
 		defer r.deinit();
@@ -91,7 +85,7 @@ test "sign: neg small positives, negatives, zero" {
 
 test "sign: neg of i64 minInt promotes to tier-3 (since -minInt overflows i64)" {
 	const a = std.testing.allocator;
-	var x = try mpFromI64(a, std.math.minInt(i64));
+	var x = try Mp.fromI64(a, std.math.minInt(i64));
 	defer x.deinit();
 	var r = Mp.init(a);
 	defer r.deinit();
@@ -110,7 +104,7 @@ test "sign: neg of neg = identity" {
 	const a = std.testing.allocator;
 	const cases = [_]i64{ 1, -1, 0xDEAD, -0xDEAD, std.math.maxInt(i32) };
 	for (cases) |v| {
-		var x = try mpFromI64(a, v);
+		var x = try Mp.fromI64(a, v);
 		defer x.deinit();
 		var r1 = Mp.init(a);
 		defer r1.deinit();
@@ -126,7 +120,7 @@ test "sign: abs positives unchanged, negatives flipped, zero == zero" {
 	const a = std.testing.allocator;
 	const cases = [_]i64{ 0, 1, -1, 0x1234, -0x1234, std.math.maxInt(i32), std.math.minInt(i32) };
 	for (cases) |v| {
-		var x = try mpFromI64(a, v);
+		var x = try Mp.fromI64(a, v);
 		defer x.deinit();
 		var r = Mp.init(a);
 		defer r.deinit();
@@ -138,7 +132,7 @@ test "sign: abs positives unchanged, negatives flipped, zero == zero" {
 
 test "sign: abs of i64 minInt → 2^63 (tier-3)" {
 	const a = std.testing.allocator;
-	var x = try mpFromI64(a, std.math.minInt(i64));
+	var x = try Mp.fromI64(a, std.math.minInt(i64));
 	defer x.deinit();
 	var r = Mp.init(a);
 	defer r.deinit();
@@ -151,7 +145,7 @@ test "sign: abs of i64 minInt → 2^63 (tier-3)" {
 
 test "sign: abs aliasing — abs(x, x) works" {
 	const a = std.testing.allocator;
-	var x = try mpFromI64(a, -42);
+	var x = try Mp.fromI64(a, -42);
 	defer x.deinit();
 	try abs(&x, &x);
 	try expectI64(42, &x);
@@ -161,14 +155,14 @@ test "sign: fitsI64 boundary values" {
 	const a = std.testing.allocator;
 	const fits = [_]i64{ 0, 1, -1, std.math.maxInt(i64), std.math.minInt(i64), std.math.maxInt(i32) };
 	for (fits) |v| {
-		var x = try mpFromI64(a, v);
+		var x = try Mp.fromI64(a, v);
 		defer x.deinit();
 		try testing.expect(fitsI64(&x));
 	}
 	// 2^63 (just past i64.maxInt) does NOT fit i64.
 	var big = Mp.init(a);
 	defer big.deinit();
-	var minInt = try mpFromI64(a, std.math.minInt(i64));
+	var minInt = try Mp.fromI64(a, std.math.minInt(i64));
 	defer minInt.deinit();
 	try neg(&big, &minInt); // 2^63
 	try testing.expect(!fitsI64(&big));
@@ -179,19 +173,19 @@ test "sign: fitsU64 boundary values" {
 	// Positive values that fit u64.
 	const fits_pos = [_]i64{ 0, 1, std.math.maxInt(i64) };
 	for (fits_pos) |v| {
-		var x = try mpFromI64(a, v);
+		var x = try Mp.fromI64(a, v);
 		defer x.deinit();
 		try testing.expect(fitsU64(&x));
 	}
 	// Negatives never fit u64.
 	const negs = [_]i64{ -1, std.math.minInt(i64) };
 	for (negs) |v| {
-		var x = try mpFromI64(a, v);
+		var x = try Mp.fromI64(a, v);
 		defer x.deinit();
 		try testing.expect(!fitsU64(&x));
 	}
 	// 2^63 fits u64.
-	var minInt = try mpFromI64(a, std.math.minInt(i64));
+	var minInt = try Mp.fromI64(a, std.math.minInt(i64));
 	defer minInt.deinit();
 	var pow63 = Mp.init(a);
 	defer pow63.deinit();
@@ -218,13 +212,13 @@ test "sign: fitsI32 boundary values" {
 	const a = std.testing.allocator;
 	const fits = [_]i64{ 0, 1, -1, std.math.maxInt(i32), std.math.minInt(i32) };
 	for (fits) |v| {
-		var x = try mpFromI64(a, v);
+		var x = try Mp.fromI64(a, v);
 		defer x.deinit();
 		try testing.expect(fitsI32(&x));
 	}
 	const dont_fit = [_]i64{ std.math.maxInt(i32) + 1, std.math.minInt(i32) - 1, std.math.maxInt(i64) };
 	for (dont_fit) |v| {
-		var x = try mpFromI64(a, v);
+		var x = try Mp.fromI64(a, v);
 		defer x.deinit();
 		try testing.expect(!fitsI32(&x));
 	}
@@ -234,19 +228,19 @@ test "sign: fitsU32 boundary values" {
 	const a = std.testing.allocator;
 	const fits_pos = [_]i64{ 0, 1, std.math.maxInt(u32) };
 	for (fits_pos) |v| {
-		var x = try mpFromI64(a, v);
+		var x = try Mp.fromI64(a, v);
 		defer x.deinit();
 		try testing.expect(fitsU32(&x));
 	}
 	// Negative never fits.
 	{
-		var x = try mpFromI64(a, -1);
+		var x = try Mp.fromI64(a, -1);
 		defer x.deinit();
 		try testing.expect(!fitsU32(&x));
 	}
 	// 2^32 doesn't fit u32.
 	{
-		var x = try mpFromI64(a, @as(i64, 1) << 32);
+		var x = try Mp.fromI64(a, @as(i64, 1) << 32);
 		defer x.deinit();
 		try testing.expect(!fitsU32(&x));
 	}

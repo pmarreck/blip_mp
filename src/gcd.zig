@@ -86,12 +86,6 @@ pub fn lcm(out: *Mp, a: *const Mp, b: *const Mp) ArithError!void {
 
 const testing = std.testing;
 
-fn mpFromI64(allocator: std.mem.Allocator, v: i64) !Mp {
-	var m = Mp.init(allocator);
-	try m.setI64(v);
-	return m;
-}
-
 fn expectI64(want: i64, got: *const Mp) !void {
 	try testing.expectEqual(want, try got.getI64());
 }
@@ -110,9 +104,9 @@ test "gcd: small known pairs" {
 		.{ .a = 1, .b = 1, .g = 1 },
 	};
 	for (cases) |c| {
-		var x = try mpFromI64(a, c.a);
+		var x = try Mp.fromI64(a, c.a);
 		defer x.deinit();
-		var y = try mpFromI64(a, c.b);
+		var y = try Mp.fromI64(a, c.b);
 		defer y.deinit();
 		var r = Mp.init(a);
 		defer r.deinit();
@@ -130,9 +124,9 @@ test "gcd: negative inputs always yield non-negative result" {
 		.{ .a = -1, .b = 17, .g = 1 },
 	};
 	for (cases) |c| {
-		var x = try mpFromI64(a, c.a);
+		var x = try Mp.fromI64(a, c.a);
 		defer x.deinit();
-		var y = try mpFromI64(a, c.b);
+		var y = try Mp.fromI64(a, c.b);
 		defer y.deinit();
 		var r = Mp.init(a);
 		defer r.deinit();
@@ -149,9 +143,9 @@ test "gcd: random pairs satisfy a == q1*g, b == q2*g, gcd(q1, q2) == 1" {
 	for (0..50) |_| {
 		const av: i64 = rng.intRangeAtMost(i64, -1_000_000, 1_000_000);
 		const bv: i64 = rng.intRangeAtMost(i64, -1_000_000, 1_000_000);
-		var x = try mpFromI64(a, av);
+		var x = try Mp.fromI64(a, av);
 		defer x.deinit();
-		var y = try mpFromI64(a, bv);
+		var y = try Mp.fromI64(a, bv);
 		defer y.deinit();
 		var g = Mp.init(a);
 		defer g.deinit();
@@ -182,9 +176,9 @@ test "lcm: small known pairs" {
 		.{ .a = 100, .b = 75, .l = 300 },
 	};
 	for (cases) |c| {
-		var x = try mpFromI64(a, c.a);
+		var x = try Mp.fromI64(a, c.a);
 		defer x.deinit();
-		var y = try mpFromI64(a, c.b);
+		var y = try Mp.fromI64(a, c.b);
 		defer y.deinit();
 		var r = Mp.init(a);
 		defer r.deinit();
@@ -201,9 +195,9 @@ test "lcm: zero input yields zero" {
 		.{ .a = 7, .b = 0 },
 	};
 	for (pairs) |p| {
-		var x = try mpFromI64(a, p.a);
+		var x = try Mp.fromI64(a, p.a);
 		defer x.deinit();
-		var y = try mpFromI64(a, p.b);
+		var y = try Mp.fromI64(a, p.b);
 		defer y.deinit();
 		var r = Mp.init(a);
 		defer r.deinit();
@@ -220,9 +214,9 @@ test "lcm: negative inputs always yield non-negative result" {
 		.{ .a = -4, .b = -6, .l = 12 },
 	};
 	for (cases) |c| {
-		var x = try mpFromI64(a, c.a);
+		var x = try Mp.fromI64(a, c.a);
 		defer x.deinit();
-		var y = try mpFromI64(a, c.b);
+		var y = try Mp.fromI64(a, c.b);
 		defer y.deinit();
 		var r = Mp.init(a);
 		defer r.deinit();
@@ -241,9 +235,9 @@ test "gcd/lcm: identity gcd*lcm == |a*b| for small pairs" {
 		.{ .a = -42, .b = 56 },
 	};
 	for (cases) |c| {
-		var x = try mpFromI64(a, c.a);
+		var x = try Mp.fromI64(a, c.a);
 		defer x.deinit();
-		var y = try mpFromI64(a, c.b);
+		var y = try Mp.fromI64(a, c.b);
 		defer y.deinit();
 		var g = Mp.init(a);
 		defer g.deinit();

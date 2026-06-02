@@ -126,12 +126,6 @@ pub fn fibonacci(out: *Mp, n: u32) ArithError!void {
 
 const testing = std.testing;
 
-fn mpFromI64(allocator: std.mem.Allocator, v: i64) !Mp {
-	var m = Mp.init(allocator);
-	try m.setI64(v);
-	return m;
-}
-
 fn expectI64(want: i64, got: *const Mp) !void {
 	try testing.expectEqual(want, try got.getI64());
 }
