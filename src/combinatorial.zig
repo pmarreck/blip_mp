@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const bignum = @import("bignum.zig");
+const th = @import("test_helpers.zig");
 
 const Mp = bignum.Mp;
 const ArithError = bignum.ArithError;
@@ -126,28 +127,20 @@ pub fn fibonacci(out: *Mp, n: u32) ArithError!void {
 
 const testing = std.testing;
 
-fn expectI64(want: i64, got: *const Mp) !void {
-	try testing.expectEqual(want, try got.getI64());
-}
-
-fn expectU64(want: u64, got: *const Mp) !void {
-	try testing.expectEqual(want, try got.getU64());
-}
-
 test "factorial: small known values" {
 	const a = std.testing.allocator;
 	var r = Mp.init(a);
 	defer r.deinit();
 	try factorial(&r, 0);
-	try expectI64(1, &r);
+	try th.expectI64(1, &r);
 	try factorial(&r, 1);
-	try expectI64(1, &r);
+	try th.expectI64(1, &r);
 	try factorial(&r, 5);
-	try expectI64(120, &r);
+	try th.expectI64(120, &r);
 	try factorial(&r, 10);
-	try expectI64(3628800, &r);
+	try th.expectI64(3628800, &r);
 	try factorial(&r, 20);
-	try expectU64(2432902008176640000, &r);
+	try th.expectU64(2432902008176640000, &r);
 }
 
 test "factorial: 25! exceeds u64; check via decimal residues" {
@@ -168,15 +161,15 @@ test "factorial: 25! exceeds u64; check via decimal residues" {
 	var rem = Mp.init(a);
 	defer rem.deinit();
 	try Mp.divMod(&r, &rem, &r, &divisor);
-	try expectI64(0, &rem);
+	try th.expectI64(0, &rem);
 	try Mp.divMod(&r, &rem, &r, &divisor);
-	try expectI64(985984, &rem);
+	try th.expectI64(985984, &rem);
 	try Mp.divMod(&r, &rem, &r, &divisor);
-	try expectI64(43330, &rem);
+	try th.expectI64(43330, &rem);
 	try Mp.divMod(&r, &rem, &r, &divisor);
-	try expectI64(511210, &rem);
+	try th.expectI64(511210, &rem);
 	try Mp.divMod(&r, &rem, &r, &divisor);
-	try expectI64(15, &rem);
+	try th.expectI64(15, &rem);
 }
 
 test "binomial: edge cases" {
@@ -185,16 +178,16 @@ test "binomial: edge cases" {
 	defer r.deinit();
 	// k > n → 0
 	try binomial(&r, 5, 6);
-	try expectI64(0, &r);
+	try th.expectI64(0, &r);
 	// k == 0 → 1
 	try binomial(&r, 100, 0);
-	try expectI64(1, &r);
+	try th.expectI64(1, &r);
 	// k == n → 1
 	try binomial(&r, 100, 100);
-	try expectI64(1, &r);
+	try th.expectI64(1, &r);
 	// n == 0 → 1 only when k == 0
 	try binomial(&r, 0, 0);
-	try expectI64(1, &r);
+	try th.expectI64(1, &r);
 }
 
 test "binomial: small known values" {
@@ -202,15 +195,15 @@ test "binomial: small known values" {
 	var r = Mp.init(a);
 	defer r.deinit();
 	try binomial(&r, 5, 2);
-	try expectI64(10, &r);
+	try th.expectI64(10, &r);
 	try binomial(&r, 6, 3);
-	try expectI64(20, &r);
+	try th.expectI64(20, &r);
 	try binomial(&r, 10, 4);
-	try expectI64(210, &r);
+	try th.expectI64(210, &r);
 	try binomial(&r, 20, 10);
-	try expectI64(184756, &r);
+	try th.expectI64(184756, &r);
 	try binomial(&r, 50, 25);
-	try expectI64(126410606437752, &r);
+	try th.expectI64(126410606437752, &r);
 }
 
 test "binomial: symmetry C(n, k) == C(n, n-k)" {
@@ -236,7 +229,7 @@ test "fibonacci: small known values" {
 	const expect = [_]i64{ 0, 1, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377, 610 };
 	for (expect, 0..) |want, i| {
 		try fibonacci(&r, @intCast(i));
-		try expectI64(want, &r);
+		try th.expectI64(want, &r);
 	}
 }
 
@@ -245,9 +238,9 @@ test "fibonacci: F(50) and F(80)" {
 	var r = Mp.init(a);
 	defer r.deinit();
 	try fibonacci(&r, 50);
-	try expectU64(12586269025, &r);
+	try th.expectU64(12586269025, &r);
 	try fibonacci(&r, 80);
-	try expectU64(23416728348467685, &r);
+	try th.expectU64(23416728348467685, &r);
 }
 
 test "fibonacci: F(100) (35-digit number — check via decimal residues)" {
@@ -266,11 +259,11 @@ test "fibonacci: F(100) (35-digit number — check via decimal residues)" {
 	var rem = Mp.init(a);
 	defer rem.deinit();
 	try Mp.divMod(&r, &rem, &r, &divisor);
-	try expectI64(9261915075, &rem);
+	try th.expectI64(9261915075, &rem);
 	try Mp.divMod(&r, &rem, &r, &divisor);
-	try expectI64(5422484817, &rem);
+	try th.expectI64(5422484817, &rem);
 	try Mp.divMod(&r, &rem, &r, &divisor);
-	try expectI64(3, &rem);
+	try th.expectI64(3, &rem);
 }
 
 test "fibonacci: identity F(n+1) = F(n) + F(n-1) over a sweep" {

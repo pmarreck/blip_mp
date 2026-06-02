@@ -8,6 +8,7 @@
 
 const std = @import("std");
 const bignum = @import("bignum.zig");
+const th = @import("test_helpers.zig");
 
 const Mp = bignum.Mp;
 const ArithError = bignum.ArithError;
@@ -250,14 +251,6 @@ fn setMpFromCanonicalLEPayload(out: *Mp, pay: []const u8) ArithError!void {
 
 const testing = std.testing;
 
-fn expectI64(want: i64, got: *const Mp) !void {
-	try testing.expectEqual(want, try got.getI64());
-}
-
-fn expectU64(want: u64, got: *const Mp) !void {
-	try testing.expectEqual(want, try got.getU64());
-}
-
 test "isqrt: small known values" {
 	const a = std.testing.allocator;
 	var r = Mp.init(a);
@@ -282,7 +275,7 @@ test "isqrt: small known values" {
 		var n = try Mp.fromI64(a, c.n);
 		defer n.deinit();
 		try isqrt(&r, &n);
-		try expectI64(c.want, &r);
+		try th.expectI64(c.want, &r);
 	}
 }
 
@@ -296,11 +289,11 @@ test "isqrt: n^2 - 1 and n^2 + 1 boundary" {
 		var minus = try Mp.fromI64(a, sq - 1);
 		defer minus.deinit();
 		try isqrt(&r, &minus);
-		try expectI64(nv - 1, &r);
+		try th.expectI64(nv - 1, &r);
 		var plus = try Mp.fromI64(a, sq + 1);
 		defer plus.deinit();
 		try isqrt(&r, &plus);
-		try expectI64(nv, &r);
+		try th.expectI64(nv, &r);
 	}
 }
 
@@ -330,7 +323,7 @@ test "isqrtRem: identity n == root^2 + rem" {
 		try isqrtRem(&r, &rem, &n);
 		try sq.mul(&r, &r);
 		try sum.add(&sq, &rem);
-		try expectI64(nv, &sum);
+		try th.expectI64(nv, &sum);
 		// Also: rem in [0, 2*root]
 		try testing.expect(rem.cached_sign >= 0);
 	}
@@ -377,7 +370,7 @@ test "iroot: cube root small known values" {
 		var n = try Mp.fromI64(a, c.n);
 		defer n.deinit();
 		try iroot(&r, &n, c.k);
-		try expectI64(c.want, &r);
+		try th.expectI64(c.want, &r);
 	}
 }
 
@@ -388,11 +381,11 @@ test "iroot: negative n with odd k yields negative root" {
 	var n = try Mp.fromI64(a, -8);
 	defer n.deinit();
 	try iroot(&r, &n, 3);
-	try expectI64(-2, &r);
+	try th.expectI64(-2, &r);
 	var n2 = try Mp.fromI64(a, -27);
 	defer n2.deinit();
 	try iroot(&r, &n2, 3);
-	try expectI64(-3, &r);
+	try th.expectI64(-3, &r);
 }
 
 test "iroot: negative n with even k errors" {
@@ -413,11 +406,11 @@ test "iroot: k=0 errors; k=1 returns n unchanged" {
 	defer n.deinit();
 	try testing.expectError(error.ZeroExponent, iroot(&r, &n, 0));
 	try iroot(&r, &n, 1);
-	try expectI64(42, &r);
+	try th.expectI64(42, &r);
 	var negn = try Mp.fromI64(a, -42);
 	defer negn.deinit();
 	try iroot(&r, &negn, 1);
-	try expectI64(-42, &r);
+	try th.expectI64(-42, &r);
 }
 
 test "isqrt: large 256-bit value (well into tier-3)" {

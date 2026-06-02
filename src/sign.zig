@@ -7,6 +7,7 @@
 
 const std = @import("std");
 const bignum = @import("bignum.zig");
+const th = @import("test_helpers.zig");
 
 const Mp = bignum.Mp;
 const ArithError = bignum.ArithError;
@@ -66,10 +67,6 @@ pub fn fitsU32(self: *const Mp) bool {
 
 const testing = std.testing;
 
-fn expectI64(want: i64, got: *const Mp) !void {
-	try testing.expectEqual(want, try got.getI64());
-}
-
 test "sign: neg small positives, negatives, zero" {
 	const a = std.testing.allocator;
 	const cases = [_]i64{ 0, 1, -1, 7, -7, 0x12345678, -0x12345678, std.math.maxInt(i32), std.math.minInt(i32) };
@@ -79,7 +76,7 @@ test "sign: neg small positives, negatives, zero" {
 		var r = Mp.init(a);
 		defer r.deinit();
 		try neg(&r, &x);
-		try expectI64(-v, &r);
+		try th.expectI64(-v, &r);
 	}
 }
 
@@ -112,7 +109,7 @@ test "sign: neg of neg = identity" {
 		defer r2.deinit();
 		try neg(&r1, &x);
 		try neg(&r2, &r1);
-		try expectI64(v, &r2);
+		try th.expectI64(v, &r2);
 	}
 }
 
@@ -126,7 +123,7 @@ test "sign: abs positives unchanged, negatives flipped, zero == zero" {
 		defer r.deinit();
 		try abs(&r, &x);
 		const want: i64 = if (v < 0) -v else v;
-		try expectI64(want, &r);
+		try th.expectI64(want, &r);
 	}
 }
 
@@ -148,7 +145,7 @@ test "sign: abs aliasing — abs(x, x) works" {
 	var x = try Mp.fromI64(a, -42);
 	defer x.deinit();
 	try abs(&x, &x);
-	try expectI64(42, &x);
+	try th.expectI64(42, &x);
 }
 
 test "sign: fitsI64 boundary values" {
