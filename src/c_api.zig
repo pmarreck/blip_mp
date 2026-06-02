@@ -36,7 +36,7 @@ fn mapError(err: anyerror) c_int {
 	return switch (err) {
 		error.DivisionByZero => BLIP_MP_ERR_DIVISION_BY_ZERO,
 		error.OutOfMemory => BLIP_MP_ERR_OUT_OF_MEMORY,
-		error.NotImplementedTier3, error.NegativeExponentNotSupported => BLIP_MP_ERR_NOT_IMPLEMENTED,
+		error.NegativeExponentNotSupported => BLIP_MP_ERR_NOT_IMPLEMENTED,
 		error.UnsignedTooLarge, error.OutputBufferTooSmall, error.TierOverflow => BLIP_MP_ERR_OUT_OF_RANGE,
 		error.SentinelValue, error.ValueIsNegative => BLIP_MP_ERR_OUT_OF_RANGE,
 		error.NegativeOperand => BLIP_MP_ERR_NEGATIVE_OPERAND,

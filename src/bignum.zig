@@ -59,7 +59,6 @@ pub const ArithError = SetError || GetError || error{
 	TierOverflow, // currently unused — tier 3 promotion handles all in-range cases
 	OutputBufferTooSmall, // tier-3 result wouldn't fit in target Mp's heap or inline buffer
 	DivisionByZero, // div / mod / divMod / powm with zero divisor or modulus
-	NotImplementedTier3, // div / mod / powm tier-3 path not yet shipped (M7-2 / M7-3 / M7-4)
 	NegativeExponentNotSupported, // powm with exp < 0 (would require modular inverse — M7-5)
 };
 
