@@ -250,12 +250,6 @@ fn setMpFromCanonicalLEPayload(out: *Mp, pay: []const u8) ArithError!void {
 
 const testing = std.testing;
 
-fn mpFromI64(allocator: std.mem.Allocator, v: i64) !Mp {
-	var m = Mp.init(allocator);
-	try m.setI64(v);
-	return m;
-}
-
 fn expectI64(want: i64, got: *const Mp) !void {
 	try testing.expectEqual(want, try got.getI64());
 }
@@ -285,7 +279,7 @@ test "isqrt: small known values" {
 		.{ .n = 99999999, .want = 9999 },
 	};
 	for (cases) |c| {
-		var n = try mpFromI64(a, c.n);
+		var n = try Mp.fromI64(a, c.n);
 		defer n.deinit();
 		try isqrt(&r, &n);
 		try expectI64(c.want, &r);
@@ -299,11 +293,11 @@ test "isqrt: n^2 - 1 and n^2 + 1 boundary" {
 	const ns = [_]i64{ 5, 17, 100, 1000, 12345 };
 	for (ns) |nv| {
 		const sq = nv * nv;
-		var minus = try mpFromI64(a, sq - 1);
+		var minus = try Mp.fromI64(a, sq - 1);
 		defer minus.deinit();
 		try isqrt(&r, &minus);
 		try expectI64(nv - 1, &r);
-		var plus = try mpFromI64(a, sq + 1);
+		var plus = try Mp.fromI64(a, sq + 1);
 		defer plus.deinit();
 		try isqrt(&r, &plus);
 		try expectI64(nv, &r);
@@ -312,7 +306,7 @@ test "isqrt: n^2 - 1 and n^2 + 1 boundary" {
 
 test "isqrt: rejects negative" {
 	const a = std.testing.allocator;
-	var n = try mpFromI64(a, -5);
+	var n = try Mp.fromI64(a, -5);
 	defer n.deinit();
 	var r = Mp.init(a);
 	defer r.deinit();
@@ -331,7 +325,7 @@ test "isqrtRem: identity n == root^2 + rem" {
 	defer sum.deinit();
 	const ns = [_]i64{ 0, 1, 2, 25, 26, 100, 99, 1023, 1024, 1025, 1_000_000 };
 	for (ns) |nv| {
-		var n = try mpFromI64(a, nv);
+		var n = try Mp.fromI64(a, nv);
 		defer n.deinit();
 		try isqrtRem(&r, &rem, &n);
 		try sq.mul(&r, &r);
@@ -346,18 +340,18 @@ test "isPerfectSquare: small known values" {
 	const a = std.testing.allocator;
 	const sqs = [_]i64{ 0, 1, 4, 9, 16, 25, 36, 100, 144, 10000 };
 	for (sqs) |v| {
-		var m = try mpFromI64(a, v);
+		var m = try Mp.fromI64(a, v);
 		defer m.deinit();
 		try testing.expect(isPerfectSquare(&m));
 	}
 	const non_sqs = [_]i64{ 2, 3, 5, 7, 8, 10, 99, 101, 9999 };
 	for (non_sqs) |v| {
-		var m = try mpFromI64(a, v);
+		var m = try Mp.fromI64(a, v);
 		defer m.deinit();
 		try testing.expect(!isPerfectSquare(&m));
 	}
 	// Negatives are not perfect squares.
-	var neg = try mpFromI64(a, -4);
+	var neg = try Mp.fromI64(a, -4);
 	defer neg.deinit();
 	try testing.expect(!isPerfectSquare(&neg));
 }
@@ -380,7 +374,7 @@ test "iroot: cube root small known values" {
 		.{ .n = 0, .k = 4, .want = 0 },
 	};
 	for (cases) |c| {
-		var n = try mpFromI64(a, c.n);
+		var n = try Mp.fromI64(a, c.n);
 		defer n.deinit();
 		try iroot(&r, &n, c.k);
 		try expectI64(c.want, &r);
@@ -391,11 +385,11 @@ test "iroot: negative n with odd k yields negative root" {
 	const a = std.testing.allocator;
 	var r = Mp.init(a);
 	defer r.deinit();
-	var n = try mpFromI64(a, -8);
+	var n = try Mp.fromI64(a, -8);
 	defer n.deinit();
 	try iroot(&r, &n, 3);
 	try expectI64(-2, &r);
-	var n2 = try mpFromI64(a, -27);
+	var n2 = try Mp.fromI64(a, -27);
 	defer n2.deinit();
 	try iroot(&r, &n2, 3);
 	try expectI64(-3, &r);
@@ -405,7 +399,7 @@ test "iroot: negative n with even k errors" {
 	const a = std.testing.allocator;
 	var r = Mp.init(a);
 	defer r.deinit();
-	var n = try mpFromI64(a, -16);
+	var n = try Mp.fromI64(a, -16);
 	defer n.deinit();
 	try testing.expectError(error.NegativeOperand, iroot(&r, &n, 2));
 	try testing.expectError(error.NegativeOperand, iroot(&r, &n, 4));
@@ -415,12 +409,12 @@ test "iroot: k=0 errors; k=1 returns n unchanged" {
 	const a = std.testing.allocator;
 	var r = Mp.init(a);
 	defer r.deinit();
-	var n = try mpFromI64(a, 42);
+	var n = try Mp.fromI64(a, 42);
 	defer n.deinit();
 	try testing.expectError(error.ZeroExponent, iroot(&r, &n, 0));
 	try iroot(&r, &n, 1);
 	try expectI64(42, &r);
-	var negn = try mpFromI64(a, -42);
+	var negn = try Mp.fromI64(a, -42);
 	defer negn.deinit();
 	try iroot(&r, &negn, 1);
 	try expectI64(-42, &r);
