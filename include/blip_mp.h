@@ -350,6 +350,21 @@ int blip_mp_fp_to_string_scientific(const blip_mp_fp_t *fp,
 //                       mode == EXACT_OR_ERROR with >53-bit mantissa
 int blip_mp_fp_get_f64(const blip_mp_fp_t *fp, int mode, double *out);
 
+// --- NULL-argument safety ----------------------------------------------
+// Every exported function is NULL-safe: passing NULL for a required handle
+// returns a defined value instead of dereferencing it. Functions that
+// return a status code (int, BLIP_MP_OK on success) return
+// BLIP_MP_ERR_NULL_HANDLE. Value-returning queries have no status channel,
+// so they return a documented out-of-band sentinel on NULL:
+//   blip_mp_cmp / blip_mp_sign ............... -2   (valid results are -1/0/1)
+//   0/1 predicates (is_zero, fits_*, bit_at,
+//     is_perfect_square, fp_is_zero, fp_get_base) -1
+//   size_t queries (bit_len, byte_len,
+//     popcount, scan0, scan1) ................ SIZE_MAX
+//   blip_mp_fp_get_scale ..................... INT32_MIN
+//   blip_mp_fp_get_mantissa / blip_mp_bytes .. NULL
+// _destroy functions treat NULL as a no-op (mirroring free()).
+
 // --- Error codes -------------------------------------------------------
 
 #define BLIP_MP_OK                       0
@@ -364,6 +379,7 @@ int blip_mp_fp_get_f64(const blip_mp_fp_t *fp, int mode, double *out);
 #define BLIP_MP_ERR_MIXED_BASES          9
 #define BLIP_MP_ERR_NON_TERMINATING     10
 #define BLIP_MP_ERR_NOT_REPRESENTABLE   11
+#define BLIP_MP_ERR_NULL_HANDLE         12
 
 #ifdef __cplusplus
 }
