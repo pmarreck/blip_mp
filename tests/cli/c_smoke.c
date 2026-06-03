@@ -791,6 +791,13 @@ static void test_str_roundtrip(void) {
 	rc = blip_mp_to_string(m, 16, tiny, sizeof(tiny), &required);
 	CHECK(rc == BLIP_MP_ERR_BUFFER_TOO_SMALL, "to_string tiny buf -> BUFFER_TOO_SMALL");
 	CHECK(required == 2, "to_string still reports required on small buf");
+
+	// Size-probe pattern: buf=NULL, buf_len=0 must report required, NOT crash
+	// or return NULL_HANDLE (regression guard for the defensive redesign).
+	required = 0;
+	rc = blip_mp_to_string(m, 16, NULL, 0, &required);
+	CHECK(rc == BLIP_MP_ERR_BUFFER_TOO_SMALL, "to_string(NULL buf, 0) -> BUFFER_TOO_SMALL (size probe)");
+	CHECK(required == 2, "to_string size-probe reports required == 2");
 	blip_mp_destroy(m);
 }
 
@@ -889,6 +896,121 @@ done:
 	blip_mp_fp_destroy(r);
 }
 
+// ======================================================================
+// NULL-argument matrix (fleet review 2026-06-01 + Peter's "full defensive"
+// directive). Every export is now NULL-safe: a NULL required handle returns
+// a defined value, never a segfault. Status funcs -> BLIP_MP_ERR_NULL_HANDLE;
+// value-returning queries -> documented out-of-band sentinels (see header).
+// ======================================================================
+static void test_null_matrix(void) {
+	const int NH = BLIP_MP_ERR_NULL_HANDLE;
+
+	// _destroy on NULL is a no-op (mirrors free()); must not crash.
+	blip_mp_destroy(NULL);
+	blip_mp_rng_destroy(NULL);
+	blip_mp_fp_destroy(NULL);
+
+	// --- Status functions: NULL handle -> BLIP_MP_ERR_NULL_HANDLE ---------
+	CHECK(blip_mp_set_i64(NULL, 0) == NH, "set_i64(NULL)");
+	CHECK(blip_mp_get_i64(NULL, NULL) == NH, "get_i64(NULL)");
+	CHECK(blip_mp_set_u64(NULL, 0) == NH, "set_u64(NULL)");
+	CHECK(blip_mp_get_u64(NULL, NULL) == NH, "get_u64(NULL)");
+	CHECK(blip_mp_set_bytes(NULL, NULL, 0) == NH, "set_bytes(NULL)");
+	CHECK(blip_mp_add(NULL, NULL, NULL) == NH, "add(NULL)");
+	CHECK(blip_mp_sub(NULL, NULL, NULL) == NH, "sub(NULL)");
+	CHECK(blip_mp_mul(NULL, NULL, NULL) == NH, "mul(NULL)");
+	CHECK(blip_mp_div(NULL, NULL, NULL) == NH, "div(NULL)");
+	CHECK(blip_mp_mod(NULL, NULL, NULL) == NH, "mod(NULL)");
+	CHECK(blip_mp_div_mod(NULL, NULL, NULL, NULL) == NH, "div_mod(NULL)");
+	CHECK(blip_mp_powm(NULL, NULL, NULL, NULL) == NH, "powm(NULL)");
+	CHECK(blip_mp_inv_mod(NULL, NULL, NULL) == NH, "inv_mod(NULL)");
+	CHECK(blip_mp_and(NULL, NULL, NULL) == NH, "and(NULL)");
+	CHECK(blip_mp_or(NULL, NULL, NULL) == NH, "or(NULL)");
+	CHECK(blip_mp_xor(NULL, NULL, NULL) == NH, "xor(NULL)");
+	CHECK(blip_mp_not(NULL, NULL) == NH, "not(NULL)");
+	CHECK(blip_mp_shl(NULL, NULL, 0) == NH, "shl(NULL)");
+	CHECK(blip_mp_shr(NULL, NULL, 0) == NH, "shr(NULL)");
+	CHECK(blip_mp_neg(NULL, NULL) == NH, "neg(NULL)");
+	CHECK(blip_mp_abs(NULL, NULL) == NH, "abs(NULL)");
+	CHECK(blip_mp_gcd(NULL, NULL, NULL) == NH, "gcd(NULL)");
+	CHECK(blip_mp_lcm(NULL, NULL, NULL) == NH, "lcm(NULL)");
+	CHECK(blip_mp_set_random_bits(NULL, NULL, 0) == NH, "set_random_bits(NULL)");
+	CHECK(blip_mp_set_random_below(NULL, NULL, NULL) == NH, "set_random_below(NULL)");
+	CHECK(blip_mp_set_str(NULL, NULL, 0, 10) == NH, "set_str(NULL)");
+	CHECK(blip_mp_to_string(NULL, 10, NULL, 0, NULL) == NH, "to_string(NULL)");
+	CHECK(blip_mp_is_probably_prime(NULL, NULL, 0, NULL) == NH, "is_probably_prime(NULL)");
+	CHECK(blip_mp_next_prime(NULL, NULL, NULL) == NH, "next_prime(NULL)");
+	CHECK(blip_mp_isqrt(NULL, NULL) == NH, "isqrt(NULL)");
+	CHECK(blip_mp_isqrt_rem(NULL, NULL, NULL) == NH, "isqrt_rem(NULL)");
+	CHECK(blip_mp_iroot(NULL, NULL, 2) == NH, "iroot(NULL)");
+	CHECK(blip_mp_jacobi(NULL, NULL, NULL) == NH, "jacobi(NULL)");
+	CHECK(blip_mp_legendre(NULL, NULL, NULL) == NH, "legendre(NULL)");
+	CHECK(blip_mp_kronecker(NULL, NULL, NULL) == NH, "kronecker(NULL)");
+	CHECK(blip_mp_factorial(NULL, 0) == NH, "factorial(NULL)");
+	CHECK(blip_mp_binomial(NULL, 0, 0) == NH, "binomial(NULL)");
+	CHECK(blip_mp_fibonacci(NULL, 0) == NH, "fibonacci(NULL)");
+	CHECK(blip_mp_fp_set_i64(NULL, 0, 0, BLIP_MP_FP_BASE_BINARY) == NH, "fp_set_i64(NULL)");
+	CHECK(blip_mp_fp_set_rational_decimal(NULL, 0, 1) == NH, "fp_set_rational_decimal(NULL)");
+	CHECK(blip_mp_fp_set_rational_binary(NULL, 0, 1) == NH, "fp_set_rational_binary(NULL)");
+	CHECK(blip_mp_fp_set_str(NULL, NULL, 0, BLIP_MP_FP_BASE_DECIMAL) == NH, "fp_set_str(NULL)");
+	CHECK(blip_mp_fp_set_f64(NULL, 0.0) == NH, "fp_set_f64(NULL)");
+	CHECK(blip_mp_fp_get_f64_exact(NULL, NULL) == NH, "fp_get_f64_exact(NULL)");
+	CHECK(blip_mp_fp_canonicalize(NULL) == NH, "fp_canonicalize(NULL)");
+	CHECK(blip_mp_fp_cmp(NULL, NULL, NULL) == NH, "fp_cmp(NULL)");
+	CHECK(blip_mp_fp_eq(NULL, NULL, NULL) == NH, "fp_eq(NULL)");
+	CHECK(blip_mp_fp_add(NULL, NULL, NULL) == NH, "fp_add(NULL)");
+	CHECK(blip_mp_fp_sub(NULL, NULL, NULL) == NH, "fp_sub(NULL)");
+	CHECK(blip_mp_fp_mul(NULL, NULL, NULL) == NH, "fp_mul(NULL)");
+	CHECK(blip_mp_fp_div_exact(NULL, NULL, NULL) == NH, "fp_div_exact(NULL)");
+	CHECK(blip_mp_fp_div_precision(NULL, NULL, NULL, 0, NULL) == NH, "fp_div_precision(NULL)");
+	CHECK(blip_mp_fp_to_decimal(NULL, NULL) == NH, "fp_to_decimal(NULL)");
+	CHECK(blip_mp_fp_to_binary(NULL, NULL) == NH, "fp_to_binary(NULL)");
+	CHECK(blip_mp_fp_round_to_scale(NULL, NULL, 0, BLIP_MP_FP_ROUND_HALF_TO_EVEN) == NH, "fp_round_to_scale(NULL)");
+	CHECK(blip_mp_fp_round_to_mp(NULL, NULL, BLIP_MP_FP_ROUND_HALF_TO_EVEN) == NH, "fp_round_to_mp(NULL)");
+	CHECK(blip_mp_fp_to_string_canonical(NULL, NULL, 0, NULL) == NH, "fp_to_string_canonical(NULL)");
+	CHECK(blip_mp_fp_to_string_fixed(NULL, 0, NULL, 0, NULL) == NH, "fp_to_string_fixed(NULL)");
+	CHECK(blip_mp_fp_to_string_scientific(NULL, NULL, 0, NULL) == NH, "fp_to_string_scientific(NULL)");
+	CHECK(blip_mp_fp_get_f64(NULL, BLIP_MP_FP_ROUND_HALF_TO_EVEN, NULL) == NH, "fp_get_f64(NULL)");
+
+	// --- Value-returning queries: documented out-of-band sentinels --------
+	CHECK(blip_mp_bytes(NULL) == NULL, "bytes(NULL) == NULL");
+	CHECK(blip_mp_bit_at(NULL, 0) == -1, "bit_at(NULL) == -1");
+	CHECK(blip_mp_bit_len(NULL) == SIZE_MAX, "bit_len(NULL) == SIZE_MAX");
+	CHECK(blip_mp_byte_len(NULL) == SIZE_MAX, "byte_len(NULL) == SIZE_MAX");
+	CHECK(blip_mp_cmp(NULL, NULL) == -2, "cmp(NULL) == -2");
+	CHECK(blip_mp_sign(NULL) == -2, "sign(NULL) == -2");
+	CHECK(blip_mp_is_zero(NULL) == -1, "is_zero(NULL) == -1");
+	CHECK(blip_mp_fits_i64(NULL) == -1, "fits_i64(NULL) == -1");
+	CHECK(blip_mp_fits_u64(NULL) == -1, "fits_u64(NULL) == -1");
+	CHECK(blip_mp_fits_i32(NULL) == -1, "fits_i32(NULL) == -1");
+	CHECK(blip_mp_fits_u32(NULL) == -1, "fits_u32(NULL) == -1");
+	CHECK(blip_mp_popcount(NULL) == SIZE_MAX, "popcount(NULL) == SIZE_MAX");
+	CHECK(blip_mp_scan0(NULL, 0) == SIZE_MAX, "scan0(NULL) == SIZE_MAX");
+	CHECK(blip_mp_scan1(NULL, 0) == SIZE_MAX, "scan1(NULL) == SIZE_MAX");
+	CHECK(blip_mp_is_perfect_square(NULL) == -1, "is_perfect_square(NULL) == -1");
+	CHECK(blip_mp_fp_is_zero(NULL) == -1, "fp_is_zero(NULL) == -1");
+	CHECK(blip_mp_fp_get_base(NULL) == -1, "fp_get_base(NULL) == -1");
+	CHECK(blip_mp_fp_get_scale(NULL) == INT32_MIN, "fp_get_scale(NULL) == INT32_MIN");
+	CHECK(blip_mp_fp_get_mantissa(NULL) == NULL, "fp_get_mantissa(NULL) == NULL");
+
+	// --- Non-first NULL positions are guarded too (sampling) --------------
+	blip_mp_t *m = blip_mp_create();
+	if (m) {
+		blip_mp_set_i64(m, 7);
+		CHECK(blip_mp_add(m, NULL, m) == NH, "add(_, NULL, _) guarded");
+		CHECK(blip_mp_add(m, m, NULL) == NH, "add(_, _, NULL) guarded");
+		CHECK(blip_mp_powm(m, m, NULL, m) == NH, "powm 3rd-arg NULL guarded");
+		int64_t iv = 0;
+		(void)iv;
+		CHECK(blip_mp_get_i64(m, NULL) == NH, "get_i64(_, NULL out) guarded");
+		char buf[8];
+		size_t req = 0;
+		CHECK(blip_mp_to_string(m, 10, buf, sizeof(buf), NULL) == NH, "to_string NULL required guarded");
+		CHECK(blip_mp_to_string(m, 10, NULL, 8, &req) == NH, "to_string NULL buf guarded");
+		blip_mp_destroy(m);
+	}
+}
+
 int main(void) {
 	test_lifecycle();
 	test_set_get_i64();
@@ -923,6 +1045,7 @@ int main(void) {
 	test_str_roundtrip();
 	test_rng_ops();
 	test_fp_orphans();
+	test_null_matrix();
 
 	if (failures == 0) {
 		printf("c_smoke: all checks passed\n");

@@ -29,6 +29,7 @@ pub const BLIP_MP_ERR_BUFFER_TOO_SMALL: c_int = 8;
 pub const BLIP_MP_ERR_MIXED_BASES: c_int = 9;
 pub const BLIP_MP_ERR_NON_TERMINATING: c_int = 10;
 pub const BLIP_MP_ERR_NOT_REPRESENTABLE: c_int = 11;
+pub const BLIP_MP_ERR_NULL_HANDLE: c_int = 12; // a required pointer argument was NULL
 
 /// Translate a Zig error from any of `Mp`'s error sets into the C code
 /// surface. Centralised so every export uses the same mapping rules.
@@ -67,23 +68,29 @@ export fn blip_mp_destroy(mp: ?*Mp) void {
 
 // --- Setters / getters -------------------------------------------------
 
-export fn blip_mp_set_i64(mp: *Mp, value: i64) c_int {
+export fn blip_mp_set_i64(mp_arg: ?*Mp, value: i64) c_int {
+	const mp = mp_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
 	mp.setI64(value) catch |e| return mapError(e);
 	return BLIP_MP_OK;
 }
 
-export fn blip_mp_get_i64(mp: *const Mp, out: *i64) c_int {
+export fn blip_mp_get_i64(mp_arg: ?*const Mp, out_arg: ?*i64) c_int {
+	const mp = mp_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
+	const out = out_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
 	const v = mp.getI64() catch |e| return mapError(e);
 	out.* = v;
 	return BLIP_MP_OK;
 }
 
-export fn blip_mp_set_u64(mp: *Mp, value: u64) c_int {
+export fn blip_mp_set_u64(mp_arg: ?*Mp, value: u64) c_int {
+	const mp = mp_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
 	mp.setU64(value) catch |e| return mapError(e);
 	return BLIP_MP_OK;
 }
 
-export fn blip_mp_get_u64(mp: *const Mp, out: *u64) c_int {
+export fn blip_mp_get_u64(mp_arg: ?*const Mp, out_arg: ?*u64) c_int {
+	const mp = mp_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
+	const out = out_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
 	const v = mp.getU64() catch |e| return mapError(e);
 	out.* = v;
 	return BLIP_MP_OK;
@@ -96,23 +103,28 @@ export fn blip_mp_get_u64(mp: *const Mp, out: *u64) c_int {
 // leading zeros). Sign is ignored (operates on the absolute magnitude).
 // Used by downstream consumers implementing custom scalar-mul / sliding-window
 // algorithms over the BLIP-encoded value.
-export fn blip_mp_bit_at(mp: *const Mp, i: usize) c_int {
+export fn blip_mp_bit_at(mp_arg: ?*const Mp, i: usize) c_int {
+	const mp = mp_arg orelse return -1;
 	return @intCast(mp.bitAt(i));
 }
 
 // Returns the bit length of the magnitude (1 + position of the highest set
 // bit). Returns 0 for value 0. Sign is ignored.
-export fn blip_mp_bit_len(mp: *const Mp) usize {
+export fn blip_mp_bit_len(mp_arg: ?*const Mp) usize {
+	const mp = mp_arg orelse return std.math.maxInt(usize);
 	return mp.bitLen();
 }
 
-export fn blip_mp_set_bytes(mp: *Mp, bytes: [*]const u8, len: usize) c_int {
+export fn blip_mp_set_bytes(mp_arg: ?*Mp, bytes_arg: ?[*]const u8, len: usize) c_int {
+	const mp = mp_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
+	const bytes = bytes_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
 	const slice = bytes[0..len];
 	mp.setBytes(slice) catch |e| return mapError(e);
 	return BLIP_MP_OK;
 }
 
-export fn blip_mp_byte_len(mp: *const Mp) usize {
+export fn blip_mp_byte_len(mp_arg: ?*const Mp) usize {
+	const mp = mp_arg orelse return std.math.maxInt(usize);
 	return mp.bytes().len;
 }
 
@@ -127,7 +139,9 @@ export fn blip_mp_bytes(mp: ?*const Mp) ?[*]const u8 {
 
 // --- Comparison / sign --------------------------------------------------
 
-export fn blip_mp_cmp(a: *const Mp, b: *const Mp) c_int {
+export fn blip_mp_cmp(a_arg: ?*const Mp, b_arg: ?*const Mp) c_int {
+	const a = a_arg orelse return -2;
+	const b = b_arg orelse return -2;
 	// Mp.cmp is now error-free and tier-3-aware (sign-first dispatch +
 	// byte-level magnitude comparison; no i64 overflow risk).
 	return switch (a.cmp(b)) {
@@ -137,138 +151,198 @@ export fn blip_mp_cmp(a: *const Mp, b: *const Mp) c_int {
 	};
 }
 
-export fn blip_mp_sign(mp: *const Mp) c_int {
+export fn blip_mp_sign(mp_arg: ?*const Mp) c_int {
+	const mp = mp_arg orelse return -2;
 	return @intCast(mp.cachedSign());
 }
 
-export fn blip_mp_is_zero(mp: *const Mp) c_int {
+export fn blip_mp_is_zero(mp_arg: ?*const Mp) c_int {
+	const mp = mp_arg orelse return -1;
 	return if (mp.cachedSign() == 0) 1 else 0;
 }
 
 // --- Arithmetic --------------------------------------------------------
 
-export fn blip_mp_add(r: *Mp, a: *const Mp, b: *const Mp) c_int {
+export fn blip_mp_add(r_arg: ?*Mp, a_arg: ?*const Mp, b_arg: ?*const Mp) c_int {
+	const r = r_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
+	const a = a_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
+	const b = b_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
 	r.add(a, b) catch |e| return mapError(e);
 	return BLIP_MP_OK;
 }
 
-export fn blip_mp_sub(r: *Mp, a: *const Mp, b: *const Mp) c_int {
+export fn blip_mp_sub(r_arg: ?*Mp, a_arg: ?*const Mp, b_arg: ?*const Mp) c_int {
+	const r = r_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
+	const a = a_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
+	const b = b_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
 	r.sub(a, b) catch |e| return mapError(e);
 	return BLIP_MP_OK;
 }
 
-export fn blip_mp_mul(r: *Mp, a: *const Mp, b: *const Mp) c_int {
+export fn blip_mp_mul(r_arg: ?*Mp, a_arg: ?*const Mp, b_arg: ?*const Mp) c_int {
+	const r = r_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
+	const a = a_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
+	const b = b_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
 	r.mul(a, b) catch |e| return mapError(e);
 	return BLIP_MP_OK;
 }
 
-export fn blip_mp_div(q: *Mp, a: *const Mp, b: *const Mp) c_int {
+export fn blip_mp_div(q_arg: ?*Mp, a_arg: ?*const Mp, b_arg: ?*const Mp) c_int {
+	const q = q_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
+	const a = a_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
+	const b = b_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
 	q.div(a, b) catch |e| return mapError(e);
 	return BLIP_MP_OK;
 }
 
-export fn blip_mp_mod(rem: *Mp, a: *const Mp, b: *const Mp) c_int {
+export fn blip_mp_mod(rem_arg: ?*Mp, a_arg: ?*const Mp, b_arg: ?*const Mp) c_int {
+	const rem = rem_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
+	const a = a_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
+	const b = b_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
 	rem.mod(a, b) catch |e| return mapError(e);
 	return BLIP_MP_OK;
 }
 
-export fn blip_mp_div_mod(q: *Mp, rem: *Mp, a: *const Mp, b: *const Mp) c_int {
+export fn blip_mp_div_mod(q_arg: ?*Mp, rem_arg: ?*Mp, a_arg: ?*const Mp, b_arg: ?*const Mp) c_int {
+	const q = q_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
+	const rem = rem_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
+	const a = a_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
+	const b = b_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
 	Mp.divMod(q, rem, a, b) catch |e| return mapError(e);
 	return BLIP_MP_OK;
 }
 
-export fn blip_mp_powm(r: *Mp, base: *const Mp, exp: *const Mp, m: *const Mp) c_int {
+export fn blip_mp_powm(r_arg: ?*Mp, base_arg: ?*const Mp, exp_arg: ?*const Mp, m_arg: ?*const Mp) c_int {
+	const r = r_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
+	const base = base_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
+	const exp = exp_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
+	const m = m_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
 	r.powm(base, exp, m) catch |e| return mapError(e);
 	return BLIP_MP_OK;
 }
 
-export fn blip_mp_inv_mod(r: *Mp, a: *const Mp, m: *const Mp) c_int {
+export fn blip_mp_inv_mod(r_arg: ?*Mp, a_arg: ?*const Mp, m_arg: ?*const Mp) c_int {
+	const r = r_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
+	const a = a_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
+	const m = m_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
 	const ok = r.invMod(a, m) catch |e| return mapError(e);
 	return if (ok) BLIP_MP_OK else BLIP_MP_ERR_NO_INVERSE;
 }
 
 // --- Bitwise (M12-A1) ---------------------------------------------------
 
-export fn blip_mp_and(r: *Mp, a: *const Mp, b: *const Mp) c_int {
+export fn blip_mp_and(r_arg: ?*Mp, a_arg: ?*const Mp, b_arg: ?*const Mp) c_int {
+	const r = r_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
+	const a = a_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
+	const b = b_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
 	blip_mp.bitwise.bitwiseAnd(r, a, b) catch |e| return mapError(e);
 	return BLIP_MP_OK;
 }
 
-export fn blip_mp_or(r: *Mp, a: *const Mp, b: *const Mp) c_int {
+export fn blip_mp_or(r_arg: ?*Mp, a_arg: ?*const Mp, b_arg: ?*const Mp) c_int {
+	const r = r_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
+	const a = a_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
+	const b = b_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
 	blip_mp.bitwise.bitwiseOr(r, a, b) catch |e| return mapError(e);
 	return BLIP_MP_OK;
 }
 
-export fn blip_mp_xor(r: *Mp, a: *const Mp, b: *const Mp) c_int {
+export fn blip_mp_xor(r_arg: ?*Mp, a_arg: ?*const Mp, b_arg: ?*const Mp) c_int {
+	const r = r_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
+	const a = a_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
+	const b = b_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
 	blip_mp.bitwise.bitwiseXor(r, a, b) catch |e| return mapError(e);
 	return BLIP_MP_OK;
 }
 
-export fn blip_mp_not(r: *Mp, a: *const Mp) c_int {
+export fn blip_mp_not(r_arg: ?*Mp, a_arg: ?*const Mp) c_int {
+	const r = r_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
+	const a = a_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
 	blip_mp.bitwise.bitwiseNot(r, a) catch |e| return mapError(e);
 	return BLIP_MP_OK;
 }
 
-export fn blip_mp_shl(r: *Mp, a: *const Mp, n: usize) c_int {
+export fn blip_mp_shl(r_arg: ?*Mp, a_arg: ?*const Mp, n: usize) c_int {
+	const r = r_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
+	const a = a_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
 	blip_mp.bitwise.shl(r, a, n) catch |e| return mapError(e);
 	return BLIP_MP_OK;
 }
 
-export fn blip_mp_shr(r: *Mp, a: *const Mp, n: usize) c_int {
+export fn blip_mp_shr(r_arg: ?*Mp, a_arg: ?*const Mp, n: usize) c_int {
+	const r = r_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
+	const a = a_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
 	blip_mp.bitwise.shr(r, a, n) catch |e| return mapError(e);
 	return BLIP_MP_OK;
 }
 
 // --- Sign / abs / fits (M12-A2) -----------------------------------------
 
-export fn blip_mp_neg(r: *Mp, a: *const Mp) c_int {
+export fn blip_mp_neg(r_arg: ?*Mp, a_arg: ?*const Mp) c_int {
+	const r = r_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
+	const a = a_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
 	blip_mp.sign.neg(r, a) catch |e| return mapError(e);
 	return BLIP_MP_OK;
 }
 
-export fn blip_mp_abs(r: *Mp, a: *const Mp) c_int {
+export fn blip_mp_abs(r_arg: ?*Mp, a_arg: ?*const Mp) c_int {
+	const r = r_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
+	const a = a_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
 	blip_mp.sign.abs(r, a) catch |e| return mapError(e);
 	return BLIP_MP_OK;
 }
 
-export fn blip_mp_fits_i64(mp: *const Mp) c_int {
+export fn blip_mp_fits_i64(mp_arg: ?*const Mp) c_int {
+	const mp = mp_arg orelse return -1;
 	return if (blip_mp.sign.fitsI64(mp)) 1 else 0;
 }
 
-export fn blip_mp_fits_u64(mp: *const Mp) c_int {
+export fn blip_mp_fits_u64(mp_arg: ?*const Mp) c_int {
+	const mp = mp_arg orelse return -1;
 	return if (blip_mp.sign.fitsU64(mp)) 1 else 0;
 }
 
-export fn blip_mp_fits_i32(mp: *const Mp) c_int {
+export fn blip_mp_fits_i32(mp_arg: ?*const Mp) c_int {
+	const mp = mp_arg orelse return -1;
 	return if (blip_mp.sign.fitsI32(mp)) 1 else 0;
 }
 
-export fn blip_mp_fits_u32(mp: *const Mp) c_int {
+export fn blip_mp_fits_u32(mp_arg: ?*const Mp) c_int {
+	const mp = mp_arg orelse return -1;
 	return if (blip_mp.sign.fitsU32(mp)) 1 else 0;
 }
 
 // --- popcount / scan (M12-A6) -------------------------------------------
 
-export fn blip_mp_popcount(mp: *const Mp) usize {
+export fn blip_mp_popcount(mp_arg: ?*const Mp) usize {
+	const mp = mp_arg orelse return std.math.maxInt(usize);
 	return blip_mp.scan.popcount(mp);
 }
 
-export fn blip_mp_scan0(mp: *const Mp, start: usize) usize {
+export fn blip_mp_scan0(mp_arg: ?*const Mp, start: usize) usize {
+	const mp = mp_arg orelse return std.math.maxInt(usize);
 	return blip_mp.scan.scan0(mp, start);
 }
 
-export fn blip_mp_scan1(mp: *const Mp, start: usize) usize {
+export fn blip_mp_scan1(mp_arg: ?*const Mp, start: usize) usize {
+	const mp = mp_arg orelse return std.math.maxInt(usize);
 	return blip_mp.scan.scan1(mp, start);
 }
 
 // --- GCD / LCM (M12-A4) -------------------------------------------------
 
-export fn blip_mp_gcd(r: *Mp, a: *const Mp, b: *const Mp) c_int {
+export fn blip_mp_gcd(r_arg: ?*Mp, a_arg: ?*const Mp, b_arg: ?*const Mp) c_int {
+	const r = r_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
+	const a = a_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
+	const b = b_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
 	blip_mp.gcd.gcd(r, a, b) catch |e| return mapError(e);
 	return BLIP_MP_OK;
 }
 
-export fn blip_mp_lcm(r: *Mp, a: *const Mp, b: *const Mp) c_int {
+export fn blip_mp_lcm(r_arg: ?*Mp, a_arg: ?*const Mp, b_arg: ?*const Mp) c_int {
+	const r = r_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
+	const a = a_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
+	const b = b_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
 	blip_mp.gcd.lcm(r, a, b) catch |e| return mapError(e);
 	return BLIP_MP_OK;
 }
@@ -290,19 +364,26 @@ export fn blip_mp_rng_destroy(rng: ?*Rng) void {
 	if (rng) |r| allocator.destroy(r);
 }
 
-export fn blip_mp_set_random_bits(mp: *Mp, rng: *Rng, bits: usize) c_int {
+export fn blip_mp_set_random_bits(mp_arg: ?*Mp, rng_arg: ?*Rng, bits: usize) c_int {
+	const mp = mp_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
+	const rng = rng_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
 	blip_mp.random_mp.setRandomBits(mp, rng.random(), bits) catch |e| return mapError(e);
 	return BLIP_MP_OK;
 }
 
-export fn blip_mp_set_random_below(mp: *Mp, rng: *Rng, n: *const Mp) c_int {
+export fn blip_mp_set_random_below(mp_arg: ?*Mp, rng_arg: ?*Rng, n_arg: ?*const Mp) c_int {
+	const mp = mp_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
+	const rng = rng_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
+	const n = n_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
 	blip_mp.random_mp.setRandomBelow(mp, rng.random(), n) catch |e| return mapError(e);
 	return BLIP_MP_OK;
 }
 
 // --- String I/O (M12-A3) ------------------------------------------------
 
-export fn blip_mp_set_str(mp: *Mp, str: [*]const u8, str_len: usize, base: u8) c_int {
+export fn blip_mp_set_str(mp_arg: ?*Mp, str_arg: ?[*]const u8, str_len: usize, base: u8) c_int {
+	const mp = mp_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
+	const str = str_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
 	const slice = str[0..str_len];
 	blip_mp.string_io.setStr(mp, slice, base) catch |e| return mapError(e);
 	return BLIP_MP_OK;
@@ -314,17 +395,16 @@ export fn blip_mp_set_str(mp: *Mp, str: [*]const u8, str_len: usize, base: u8) c
 /// BLIP_MP_ERR_BUFFER_TOO_SMALL and the buffer contents are unspecified —
 /// caller should reallocate to *required and retry. If buf_len >= required+1
 /// the result is NUL-terminated for C convenience.
-export fn blip_mp_to_string(
-	mp: *const Mp,
-	base: u8,
-	buf: [*]u8,
-	buf_len: usize,
-	required: *usize,
-) c_int {
+export fn blip_mp_to_string(mp_arg: ?*const Mp, base: u8, buf_arg: ?[*]u8, buf_len: usize, required_arg: ?*usize) c_int {
+	const mp = mp_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
+	const required = required_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
 	const s = blip_mp.string_io.toString(mp, allocator, base) catch |e| return mapError(e);
 	defer allocator.free(s);
 	required.* = s.len;
 	if (buf_len < s.len) return BLIP_MP_ERR_BUFFER_TOO_SMALL;
+	// buf may be NULL on the size-probe call (buf_len < required); only
+	// dereference it once we know we must actually write.
+	const buf = buf_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
 	@memcpy(buf[0..s.len], s);
 	if (buf_len > s.len) buf[s.len] = 0; // NUL-terminate when room
 	return BLIP_MP_OK;
@@ -332,58 +412,76 @@ export fn blip_mp_to_string(
 
 // --- Primality (M13-B1) -------------------------------------------------
 
-export fn blip_mp_is_probably_prime(
-	mp: *const Mp,
-	rng: *Rng,
-	witnesses: u32,
-	out: *c_int,
-) c_int {
+export fn blip_mp_is_probably_prime(mp_arg: ?*const Mp, rng_arg: ?*Rng, witnesses: u32, out_arg: ?*c_int) c_int {
+	const mp = mp_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
+	const rng = rng_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
+	const out = out_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
 	const verdict = blip_mp.primes.isProbablyPrime(mp, allocator, rng.random(), witnesses) catch |e| return mapError(e);
 	out.* = if (verdict) 1 else 0;
 	return BLIP_MP_OK;
 }
 
-export fn blip_mp_next_prime(out: *Mp, n: *const Mp, rng: *Rng) c_int {
+export fn blip_mp_next_prime(out_arg: ?*Mp, n_arg: ?*const Mp, rng_arg: ?*Rng) c_int {
+	const out = out_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
+	const n = n_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
+	const rng = rng_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
 	blip_mp.primes.nextPrime(out, n, allocator, rng.random()) catch |e| return mapError(e);
 	return BLIP_MP_OK;
 }
 
 // --- Roots (M13-B2) -----------------------------------------------------
 
-export fn blip_mp_isqrt(out: *Mp, n: *const Mp) c_int {
+export fn blip_mp_isqrt(out_arg: ?*Mp, n_arg: ?*const Mp) c_int {
+	const out = out_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
+	const n = n_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
 	blip_mp.roots.isqrt(out, n) catch |e| return mapError(e);
 	return BLIP_MP_OK;
 }
 
-export fn blip_mp_isqrt_rem(root: *Mp, rem: *Mp, n: *const Mp) c_int {
+export fn blip_mp_isqrt_rem(root_arg: ?*Mp, rem_arg: ?*Mp, n_arg: ?*const Mp) c_int {
+	const root = root_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
+	const rem = rem_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
+	const n = n_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
 	blip_mp.roots.isqrtRem(root, rem, n) catch |e| return mapError(e);
 	return BLIP_MP_OK;
 }
 
-export fn blip_mp_iroot(out: *Mp, n: *const Mp, k: u32) c_int {
+export fn blip_mp_iroot(out_arg: ?*Mp, n_arg: ?*const Mp, k: u32) c_int {
+	const out = out_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
+	const n = n_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
 	blip_mp.roots.iroot(out, n, k) catch |e| return mapError(e);
 	return BLIP_MP_OK;
 }
 
-export fn blip_mp_is_perfect_square(mp: *const Mp) c_int {
+export fn blip_mp_is_perfect_square(mp_arg: ?*const Mp) c_int {
+	const mp = mp_arg orelse return -1;
 	return if (blip_mp.roots.isPerfectSquare(mp)) 1 else 0;
 }
 
 // --- Symbols (M13-B3) ---------------------------------------------------
 
-export fn blip_mp_jacobi(a: *const Mp, n: *const Mp, out: *c_int) c_int {
+export fn blip_mp_jacobi(a_arg: ?*const Mp, n_arg: ?*const Mp, out_arg: ?*c_int) c_int {
+	const a = a_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
+	const n = n_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
+	const out = out_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
 	const v = blip_mp.symbols.jacobi(a, n, allocator) catch |e| return mapError(e);
 	out.* = @intCast(v);
 	return BLIP_MP_OK;
 }
 
-export fn blip_mp_legendre(a: *const Mp, p: *const Mp, out: *c_int) c_int {
+export fn blip_mp_legendre(a_arg: ?*const Mp, p_arg: ?*const Mp, out_arg: ?*c_int) c_int {
+	const a = a_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
+	const p = p_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
+	const out = out_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
 	const v = blip_mp.symbols.legendre(a, p, allocator) catch |e| return mapError(e);
 	out.* = @intCast(v);
 	return BLIP_MP_OK;
 }
 
-export fn blip_mp_kronecker(a: *const Mp, n: *const Mp, out: *c_int) c_int {
+export fn blip_mp_kronecker(a_arg: ?*const Mp, n_arg: ?*const Mp, out_arg: ?*c_int) c_int {
+	const a = a_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
+	const n = n_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
+	const out = out_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
 	const v = blip_mp.symbols.kronecker(a, n, allocator) catch |e| return mapError(e);
 	out.* = @intCast(v);
 	return BLIP_MP_OK;
@@ -391,17 +489,20 @@ export fn blip_mp_kronecker(a: *const Mp, n: *const Mp, out: *c_int) c_int {
 
 // --- Combinatorial (M13-B4) ---------------------------------------------
 
-export fn blip_mp_factorial(out: *Mp, n: u32) c_int {
+export fn blip_mp_factorial(out_arg: ?*Mp, n: u32) c_int {
+	const out = out_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
 	blip_mp.combinatorial.factorial(out, n) catch |e| return mapError(e);
 	return BLIP_MP_OK;
 }
 
-export fn blip_mp_binomial(out: *Mp, n: u32, k: u32) c_int {
+export fn blip_mp_binomial(out_arg: ?*Mp, n: u32, k: u32) c_int {
+	const out = out_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
 	blip_mp.combinatorial.binomial(out, n, k) catch |e| return mapError(e);
 	return BLIP_MP_OK;
 }
 
-export fn blip_mp_fibonacci(out: *Mp, n: u32) c_int {
+export fn blip_mp_fibonacci(out_arg: ?*Mp, n: u32) c_int {
+	const out = out_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
 	blip_mp.combinatorial.fibonacci(out, n) catch |e| return mapError(e);
 	return BLIP_MP_OK;
 }
@@ -461,30 +562,36 @@ export fn blip_mp_fp_destroy(fp: ?*Fp) void {
 
 // --- Construction ------------------------------------------------------
 
-export fn blip_mp_fp_set_i64(fp: *Fp, mantissa: i64, scale: i32, base: c_int) c_int {
+export fn blip_mp_fp_set_i64(fp_arg: ?*Fp, mantissa: i64, scale: i32, base: c_int) c_int {
+	const fp = fp_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
 	const b = baseFromC(base) orelse return BLIP_MP_ERR_INVALID_INPUT;
 	fp.setI64(mantissa, scale, b) catch |e| return mapError(e);
 	return BLIP_MP_OK;
 }
 
-export fn blip_mp_fp_set_rational_decimal(fp: *Fp, num: i64, den: i64) c_int {
+export fn blip_mp_fp_set_rational_decimal(fp_arg: ?*Fp, num: i64, den: i64) c_int {
+	const fp = fp_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
 	fp.setRationalDecimal(num, den) catch |e| return mapError(e);
 	return BLIP_MP_OK;
 }
 
-export fn blip_mp_fp_set_rational_binary(fp: *Fp, num: i64, den: i64) c_int {
+export fn blip_mp_fp_set_rational_binary(fp_arg: ?*Fp, num: i64, den: i64) c_int {
+	const fp = fp_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
 	fp.setRationalBinary(num, den) catch |e| return mapError(e);
 	return BLIP_MP_OK;
 }
 
-export fn blip_mp_fp_set_str(fp: *Fp, str: [*]const u8, str_len: usize, base: c_int) c_int {
+export fn blip_mp_fp_set_str(fp_arg: ?*Fp, str_arg: ?[*]const u8, str_len: usize, base: c_int) c_int {
+	const fp = fp_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
+	const str = str_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
 	const b = baseFromC(base) orelse return BLIP_MP_ERR_INVALID_INPUT;
 	const slice = str[0..str_len];
 	fp.setStr(slice, b) catch |e| return mapError(e);
 	return BLIP_MP_OK;
 }
 
-export fn blip_mp_fp_set_f64(fp: *Fp, v: f64) c_int {
+export fn blip_mp_fp_set_f64(fp_arg: ?*Fp, v: f64) c_int {
+	const fp = fp_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
 	fp.setF64(v) catch |e| return mapError(e);
 	return BLIP_MP_OK;
 }
@@ -493,7 +600,9 @@ export fn blip_mp_fp_set_f64(fp: *Fp, v: f64) c_int {
 ///   NON_TERMINATING — original is decimal with no terminating binary form
 ///   NOT_REPRESENTABLE — needs >53 mantissa bits, or out of f64 range
 /// Caller wanting silent rounding must round explicitly first via roundToScale.
-export fn blip_mp_fp_get_f64_exact(fp: *const Fp, out: *f64) c_int {
+export fn blip_mp_fp_get_f64_exact(fp_arg: ?*const Fp, out_arg: ?*f64) c_int {
+	const fp = fp_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
+	const out = out_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
 	const v = fp.getF64Exact() catch |e| return mapError(e);
 	out.* = v;
 	return BLIP_MP_OK;
@@ -501,35 +610,43 @@ export fn blip_mp_fp_get_f64_exact(fp: *const Fp, out: *f64) c_int {
 
 // --- Queries -----------------------------------------------------------
 
-export fn blip_mp_fp_is_zero(fp: *const Fp) c_int {
+export fn blip_mp_fp_is_zero(fp_arg: ?*const Fp) c_int {
+	const fp = fp_arg orelse return -1;
 	return if (fp.isZero()) 1 else 0;
 }
 
-export fn blip_mp_fp_get_base(fp: *const Fp) c_int {
+export fn blip_mp_fp_get_base(fp_arg: ?*const Fp) c_int {
+	const fp = fp_arg orelse return -1;
 	return @intFromEnum(fp.base);
 }
 
-export fn blip_mp_fp_get_scale(fp: *const Fp) i32 {
+export fn blip_mp_fp_get_scale(fp_arg: ?*const Fp) i32 {
+	const fp = fp_arg orelse return std.math.minInt(i32);
 	return fp.scale;
 }
 
 /// Borrowed pointer into `fp.mantissa`. Valid until the next mutating
 /// call on `fp`. Caller MUST NOT destroy the returned Mp (it's owned by
 /// the Fp). Caller MAY pass it to read-only `blip_mp_*` operations.
-export fn blip_mp_fp_get_mantissa(fp: *Fp) *blip_mp.Mp {
+export fn blip_mp_fp_get_mantissa(fp_arg: ?*Fp) ?*blip_mp.Mp {
+	const fp = fp_arg orelse return null;
 	return &fp.mantissa;
 }
 
 // --- Canonical form ----------------------------------------------------
 
-export fn blip_mp_fp_canonicalize(fp: *Fp) c_int {
+export fn blip_mp_fp_canonicalize(fp_arg: ?*Fp) c_int {
+	const fp = fp_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
 	fp.canonicalize() catch |e| return mapError(e);
 	return BLIP_MP_OK;
 }
 
 // --- Comparison --------------------------------------------------------
 
-export fn blip_mp_fp_cmp(a: *const Fp, b: *const Fp, out: *c_int) c_int {
+export fn blip_mp_fp_cmp(a_arg: ?*const Fp, b_arg: ?*const Fp, out_arg: ?*c_int) c_int {
+	const a = a_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
+	const b = b_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
+	const out = out_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
 	const order = blip_mp.fp.cmp(a, b) catch |e| return mapError(e);
 	out.* = switch (order) {
 		.lt => -1,
@@ -539,7 +656,10 @@ export fn blip_mp_fp_cmp(a: *const Fp, b: *const Fp, out: *c_int) c_int {
 	return BLIP_MP_OK;
 }
 
-export fn blip_mp_fp_eq(a: *const Fp, b: *const Fp, out: *c_int) c_int {
+export fn blip_mp_fp_eq(a_arg: ?*const Fp, b_arg: ?*const Fp, out_arg: ?*c_int) c_int {
+	const a = a_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
+	const b = b_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
+	const out = out_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
 	const eq_val = blip_mp.fp.eq(a, b) catch |e| return mapError(e);
 	out.* = if (eq_val) 1 else 0;
 	return BLIP_MP_OK;
@@ -547,35 +667,45 @@ export fn blip_mp_fp_eq(a: *const Fp, b: *const Fp, out: *c_int) c_int {
 
 // --- Arithmetic --------------------------------------------------------
 
-export fn blip_mp_fp_add(r: *Fp, a: *const Fp, b: *const Fp) c_int {
+export fn blip_mp_fp_add(r_arg: ?*Fp, a_arg: ?*const Fp, b_arg: ?*const Fp) c_int {
+	const r = r_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
+	const a = a_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
+	const b = b_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
 	blip_mp.fp.add(r, a, b) catch |e| return mapError(e);
 	return BLIP_MP_OK;
 }
 
-export fn blip_mp_fp_sub(r: *Fp, a: *const Fp, b: *const Fp) c_int {
+export fn blip_mp_fp_sub(r_arg: ?*Fp, a_arg: ?*const Fp, b_arg: ?*const Fp) c_int {
+	const r = r_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
+	const a = a_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
+	const b = b_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
 	blip_mp.fp.sub(r, a, b) catch |e| return mapError(e);
 	return BLIP_MP_OK;
 }
 
-export fn blip_mp_fp_mul(r: *Fp, a: *const Fp, b: *const Fp) c_int {
+export fn blip_mp_fp_mul(r_arg: ?*Fp, a_arg: ?*const Fp, b_arg: ?*const Fp) c_int {
+	const r = r_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
+	const a = a_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
+	const b = b_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
 	blip_mp.fp.mul(r, a, b) catch |e| return mapError(e);
 	return BLIP_MP_OK;
 }
 
-export fn blip_mp_fp_div_exact(r: *Fp, a: *const Fp, b: *const Fp) c_int {
+export fn blip_mp_fp_div_exact(r_arg: ?*Fp, a_arg: ?*const Fp, b_arg: ?*const Fp) c_int {
+	const r = r_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
+	const a = a_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
+	const b = b_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
 	blip_mp.fp.divExact(r, a, b) catch |e| return mapError(e);
 	return BLIP_MP_OK;
 }
 
 /// Caller passes `max_scale_digits`. *out_exact is set to 1 if the result
 /// is bit-exact, 0 if it had to truncate. Lossiness never silent.
-export fn blip_mp_fp_div_precision(
-	r: *Fp,
-	a: *const Fp,
-	b: *const Fp,
-	max_scale_digits: u32,
-	out_exact: *c_int,
-) c_int {
+export fn blip_mp_fp_div_precision(r_arg: ?*Fp, a_arg: ?*const Fp, b_arg: ?*const Fp, max_scale_digits: u32, out_exact_arg: ?*c_int) c_int {
+	const r = r_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
+	const a = a_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
+	const b = b_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
+	const out_exact = out_exact_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
 	const exact = blip_mp.fp.divPrecision(r, a, b, max_scale_digits) catch |e| return mapError(e);
 	out_exact.* = if (exact) 1 else 0;
 	return BLIP_MP_OK;
@@ -583,25 +713,33 @@ export fn blip_mp_fp_div_precision(
 
 // --- Cross-base conversion --------------------------------------------
 
-export fn blip_mp_fp_to_decimal(out: *Fp, x: *const Fp) c_int {
+export fn blip_mp_fp_to_decimal(out_arg: ?*Fp, x_arg: ?*const Fp) c_int {
+	const out = out_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
+	const x = x_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
 	blip_mp.fp.toDecimal(out, x) catch |e| return mapError(e);
 	return BLIP_MP_OK;
 }
 
-export fn blip_mp_fp_to_binary(out: *Fp, x: *const Fp) c_int {
+export fn blip_mp_fp_to_binary(out_arg: ?*Fp, x_arg: ?*const Fp) c_int {
+	const out = out_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
+	const x = x_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
 	blip_mp.fp.toBinary(out, x) catch |e| return mapError(e);
 	return BLIP_MP_OK;
 }
 
 // --- Rounding ----------------------------------------------------------
 
-export fn blip_mp_fp_round_to_scale(out: *Fp, a: *const Fp, target_scale: i32, mode: c_int) c_int {
+export fn blip_mp_fp_round_to_scale(out_arg: ?*Fp, a_arg: ?*const Fp, target_scale: i32, mode: c_int) c_int {
+	const out = out_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
+	const a = a_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
 	const m = roundFromC(mode) orelse return BLIP_MP_ERR_INVALID_INPUT;
 	blip_mp.fp.roundToScale(out, a, target_scale, m) catch |e| return mapError(e);
 	return BLIP_MP_OK;
 }
 
-export fn blip_mp_fp_round_to_mp(out: *blip_mp.Mp, a: *const Fp, mode: c_int) c_int {
+export fn blip_mp_fp_round_to_mp(out_arg: ?*blip_mp.Mp, a_arg: ?*const Fp, mode: c_int) c_int {
+	const out = out_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
+	const a = a_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
 	const m = roundFromC(mode) orelse return BLIP_MP_ERR_INVALID_INPUT;
 	blip_mp.fp.roundToMp(out, a, m) catch |e| return mapError(e);
 	return BLIP_MP_OK;
@@ -613,16 +751,16 @@ export fn blip_mp_fp_round_to_mp(out: *blip_mp.Mp, a: *const Fp, mode: c_int) c_
 /// the required length to *required (excluding any NUL). If buf_len <
 /// required, returns BUFFER_TOO_SMALL — caller realloc-then-retry pattern.
 /// When buf_len > required, the buffer is NUL-terminated for C convenience.
-export fn blip_mp_fp_to_string_canonical(
-	fp: *const Fp,
-	buf: [*]u8,
-	buf_len: usize,
-	required: *usize,
-) c_int {
+export fn blip_mp_fp_to_string_canonical(fp_arg: ?*const Fp, buf_arg: ?[*]u8, buf_len: usize, required_arg: ?*usize) c_int {
+	const fp = fp_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
+	const required = required_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
 	const s = blip_mp.fp.toStringCanonical(allocator, fp) catch |e| return mapError(e);
 	defer allocator.free(s);
 	required.* = s.len;
 	if (buf_len < s.len) return BLIP_MP_ERR_BUFFER_TOO_SMALL;
+	// buf may be NULL on the size-probe call (buf_len < required); only
+	// dereference it once we know we must actually write.
+	const buf = buf_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
 	@memcpy(buf[0..s.len], s);
 	if (buf_len > s.len) buf[s.len] = 0;
 	return BLIP_MP_OK;
@@ -630,17 +768,16 @@ export fn blip_mp_fp_to_string_canonical(
 
 /// Format with EXACTLY `frac_digits` digits after the radix point. See
 /// blip_mp_fp_to_string_canonical for the buf/buf_len/required pattern.
-export fn blip_mp_fp_to_string_fixed(
-	fp: *const Fp,
-	frac_digits: u32,
-	buf: [*]u8,
-	buf_len: usize,
-	required: *usize,
-) c_int {
+export fn blip_mp_fp_to_string_fixed(fp_arg: ?*const Fp, frac_digits: u32, buf_arg: ?[*]u8, buf_len: usize, required_arg: ?*usize) c_int {
+	const fp = fp_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
+	const required = required_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
 	const s = blip_mp.fp.toStringFixed(allocator, fp, frac_digits) catch |e| return mapError(e);
 	defer allocator.free(s);
 	required.* = s.len;
 	if (buf_len < s.len) return BLIP_MP_ERR_BUFFER_TOO_SMALL;
+	// buf may be NULL on the size-probe call (buf_len < required); only
+	// dereference it once we know we must actually write.
+	const buf = buf_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
 	@memcpy(buf[0..s.len], s);
 	if (buf_len > s.len) buf[s.len] = 0;
 	return BLIP_MP_OK;
@@ -649,16 +786,16 @@ export fn blip_mp_fp_to_string_fixed(
 /// Format in scientific notation. Decimal: 'M.MMMeE'. Binary: 'M.MMMpE'
 /// (C99 hex-float style — but with binary digits per the brief). See
 /// blip_mp_fp_to_string_canonical for the buf/buf_len/required pattern.
-export fn blip_mp_fp_to_string_scientific(
-	fp: *const Fp,
-	buf: [*]u8,
-	buf_len: usize,
-	required: *usize,
-) c_int {
+export fn blip_mp_fp_to_string_scientific(fp_arg: ?*const Fp, buf_arg: ?[*]u8, buf_len: usize, required_arg: ?*usize) c_int {
+	const fp = fp_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
+	const required = required_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
 	const s = blip_mp.fp.toStringScientific(allocator, fp) catch |e| return mapError(e);
 	defer allocator.free(s);
 	required.* = s.len;
 	if (buf_len < s.len) return BLIP_MP_ERR_BUFFER_TOO_SMALL;
+	// buf may be NULL on the size-probe call (buf_len < required); only
+	// dereference it once we know we must actually write.
+	const buf = buf_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
 	@memcpy(buf[0..s.len], s);
 	if (buf_len > s.len) buf[s.len] = 0;
 	return BLIP_MP_OK;
@@ -669,7 +806,9 @@ export fn blip_mp_fp_to_string_scientific(
 ///   NON_TERMINATING — original is decimal AND no terminating binary form
 ///   NOT_REPRESENTABLE — magnitude exceeds f64 range, OR mode == EXACT_OR_ERROR
 ///                       AND mantissa exceeds 53 bits
-export fn blip_mp_fp_get_f64(fp: *const Fp, mode: c_int, out: *f64) c_int {
+export fn blip_mp_fp_get_f64(fp_arg: ?*const Fp, mode: c_int, out_arg: ?*f64) c_int {
+	const fp = fp_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
+	const out = out_arg orelse return BLIP_MP_ERR_NULL_HANDLE;
 	const m = roundFromC(mode) orelse return BLIP_MP_ERR_INVALID_INPUT;
 	const v = blip_mp.fp.Fp.getF64(fp, m) catch |e| return mapError(e);
 	out.* = v;
