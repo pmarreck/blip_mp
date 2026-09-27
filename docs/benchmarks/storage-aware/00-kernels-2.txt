@@ -1,0 +1,73 @@
+=== fft_microbench (iters=10000000) ===
+
+RESULT impl=addModP_scalar ns_per_op=0.903
+RESULT impl=subModP_scalar ns_per_op=0.748
+RESULT impl=mulModP_scalar ns_per_op=0.896
+
+--- vector x2 (ns_per_vec_op | ns_per_scalar_equiv) ---
+RESULT impl=addModP_x2 ns_per_op=0.998 ns_per_scalar_equiv=0.499
+RESULT impl=subModP_x2 ns_per_op=0.834 ns_per_scalar_equiv=0.417
+RESULT impl=mulModP_x2 ns_per_op=1.849 ns_per_scalar_equiv=0.924
+RESULT impl=montMul_scalar ns_per_op=1.311
+RESULT impl=montMul_x2 ns_per_op=1.385 ns_per_scalar_equiv=0.693
+
+--- Goldilocks-prime (p = 2^64 - 2^32 + 1) scalar ops ---
+RESULT impl=goldAddMod_scalar ns_per_op=1.153
+RESULT impl=goldSubMod_scalar ns_per_op=0.960
+RESULT impl=goldMulMod_scalar ns_per_op=2.405
+
+--- butterfly cost: 30-bit p vs Goldilocks p ---
+butterfly@30-bit-p:   2.55 ns  (mul 0.90 + add 0.90 + sub 0.75)
+butterfly@Goldilocks: 4.52 ns  (mul 2.41 + add 1.15 + sub 0.96)
+per-butterfly ratio (Goldilocks / 30-bit): 1.77x
+
+projected NTT-mul ns @ 32K-bit operands (3·(N/2)·log₂N butterflies, scalar):
+  30-bit p (N=8192, log2N=13):    407001 ns
+  Goldilocks (N=4096, log2N=12): 333104 ns
+  PROJECTED SPEEDUP (Goldilocks vs 30-bit): 1.22x
+  → MARGINAL: Goldilocks projects to 22% gain — consider whether worth the implementation cost
+
+--- speedup vs scalar (>1.0 = SIMD wins) ---
+addModP: 1.81x
+subModP: 1.79x
+mulModP: 0.97x
+montMul: 1.89x (vec vs scalar Mont)
+mulModP_x2 vs montMul_x2 (lower is better): scalar%P_vec=1.849 mont_vec=1.385
+
+--- full NTT pass at N=8192 (iters=200) ---
+RESULT impl=nttWithTwiddles_scalar n=8192 ns_per_pass=287687
+RESULT impl=nttWithTwiddlesVec n=8192 ns_per_pass=262828
+NTT speedup (vec vs scalar): 1.09x
+RESULT impl=nttWithTwiddlesMontVec n=8192 ns_per_pass=266883
+Mont NTT speedup (mont_vec vs scalar): 1.08x
+Mont NTT speedup (mont_vec vs %P_vec): 0.98x
+RESULT impl=nttStockhamVec n=8192 ns_per_pass=254774
+Stockham vs Cooley-Tukey vec (1x) — lower is better
+Stockham NTT speedup (stockham_vec vs %P_vec): 1.03x
+Stockham NTT speedup (stockham_vec vs scalar): 1.13x
+RESULT impl=nttStockhamVecU4 n=8192 ns_per_pass=243544
+Stockham U4 speedup vs nttStockhamVec:      1.046x
+RESULT impl=nttStockhamVecU8 n=8192 ns_per_pass=242439
+Stockham U8 speedup vs nttStockhamVec:      1.051x
+Stockham U8 speedup vs nttStockhamVecU4:    1.005x
+RESULT impl=nttStockhamMontVec n=8192 ns_per_pass=260097
+Stockham+Mont speedup vs nttStockhamVec:    0.98x
+Stockham+Mont speedup vs nttWithMontVec:    1.03x
+Stockham+Mont speedup vs scalar baseline:   1.11x
+RESULT impl=nttRadix4Vec n=8192 ns_per_pass=198432
+Radix-4 NTT speedup (r4_vec vs %P_vec): 1.32x
+Radix-4 NTT speedup (r4_vec vs scalar): 1.45x
+STORAGE impl=toom3 bytes=512 iterations=100 wall_ns=3813 cpu_ns=4320
+STORAGE impl=small_fft bytes=512 iterations=100 wall_ns=88947 cpu_ns=88991
+STORAGE impl=gold_fft bytes=512 iterations=100 wall_ns=63035 cpu_ns=63222
+STORAGE impl=asymmetric_mp bytes=512 iterations=100 wall_ns=2244 cpu_ns=2700
+STORAGE impl=toom3 bytes=4096 iterations=100 wall_ns=145851 cpu_ns=145528
+STORAGE impl=small_fft bytes=4096 iterations=100 wall_ns=992603 cpu_ns=987259
+STORAGE impl=gold_fft bytes=4096 iterations=100 wall_ns=621921 cpu_ns=619038
+STORAGE impl=asymmetric_mp bytes=4096 iterations=100 wall_ns=122051 cpu_ns=121913
+STORAGE impl=toom3 bytes=8192 iterations=10 wall_ns=437161 cpu_ns=435493
+STORAGE impl=gold_fft bytes=8192 iterations=10 wall_ns=1334549 cpu_ns=1326286
+STORAGE impl=asymmetric_mp bytes=8192 iterations=10 wall_ns=480354 cpu_ns=477932
+STORAGE impl=toom3 bytes=32768 iterations=10 wall_ns=4011037 cpu_ns=3986853
+STORAGE impl=gold_fft bytes=32768 iterations=10 wall_ns=6106579 cpu_ns=6066683
+STORAGE impl=asymmetric_mp bytes=32768 iterations=10 wall_ns=7780173 cpu_ns=7717651

@@ -13,8 +13,9 @@ Project purpose and constraints: [INTENT.md](INTENT.md).
 Arithmetic operates on byte payloads without stored integer limb arrays or
 integer-array casts. Division and Montgomery scratch use magnitude bytes with
 temporary register-sized reads. Every stored FFT coefficient, twiddle and
-residue has its own canonical BLIP encoding. FFT slots reserve 16 bytes each
-for encodings of 1–10 bytes; unused capacity is not part of the value.
+residue has its own canonical BLIP encoding. FFT slots reserve five bytes
+for small-prime residues and ten for Goldilocks; unused capacity is not part of
+the value.
 
 BLIP's encoded length and an integer object's resident size are different
 measurements. `Mp` is a 72-byte object in the current 64-bit build and contains
@@ -28,7 +29,10 @@ cover the September 27, 2026 migration on a Linux x86_64 Threadripper 3990X,
 using Zig 0.16.0 ReleaseFast and GMP 6.3.0. They include before/after medians,
 variation, FFT costs and reproducible commands. Small-addition buckets remain
 1.21–1.30× faster than ordinary GMP on this host; the other 67 matched buckets
-favor GMP. Encoded FFT passes take 2.30–3.87× their former time.
+favor GMP. The initial encoded FFT passes took 2.30–3.87× their former time. Subsequent
+[storage-aware changes](docs/benchmarks/storage-aware/README.md) reduce forced
+small-prime multiplication by 33.6–35.2% and Goldilocks by 5.3–7.6%, while
+preserving canonical BLIP for every stored residue.
 
 Wins depend on the operation, integer size and platform. The older Apple
 Silicon and Zen 4 measurements remain historical records; they are not results

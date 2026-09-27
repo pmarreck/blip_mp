@@ -6,6 +6,11 @@ compiler, allocation costs and machine. Canonical BLIP residues introduce
 encoding work into FFT stores; the measurements must include that cost.
 No new algorithm or discovery is claimed by this investigation.
 
+The first [storage-aware experiment](benchmarks/storage-aware/README.md) now
+measures field-sized slots, common-header checks and fused stages. The
+[sentinel/type investigation](BLIP_ALGORITHM_TYPES.md) records the sibling
+specification and the unresolved contract for contextual fixed-width types.
+
 ## Gaps verified in this code
 
 | Area | Current implementation | Established avenue to investigate |
@@ -78,10 +83,9 @@ for this library nor a claim of practical speed at the sizes in its benchmarks.
    research question is how much encoding work can be removed without
    increasing register spills or instruction count. Check generated machine
    code and measure full multiplication as well as isolated passes.
-3. **Pack BLIP residue slots more tightly.** Current slots reserve 16 bytes
-   for encodings of 1–10 bytes. Prime-specific capacities of 5 or 10 bytes,
-   or small blocks with offsets, could reduce cache traffic. This is an
-   untested layout hypothesis. Benchmark decoding, writes, scratch footprint
+3. **Pack BLIP residue slots more tightly.** The initial slots reserved 16 bytes.
+   Five-byte and ten-byte field-specific slots are now implemented and measured.
+   Smaller blocks with offsets remain an untested layout hypothesis. Benchmark decoding, writes, scratch footprint
    and end-to-end multiplication; random access must still be efficient.
 4. **Exploit zeros before a transform becomes dense.** Immediate BLIP zero
    is cheap to identify. Test skipping zero-heavy initial butterflies or

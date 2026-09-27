@@ -1,6 +1,6 @@
 //! Test-only adapters retain numerical fixtures while exercising encoded storage.
 const std = @import("std");
-const residue = @import("fft_residue.zig");
+const residue = @import("fft_residue.zig").Small;
 const allocator = std.testing.allocator;
 
 fn pack(values: []const u64) ![]u8 {

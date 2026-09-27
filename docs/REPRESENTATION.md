@@ -8,28 +8,33 @@ bytes, sometimes zero-extended to reserve carry space. A 64-bit arithmetic step
 reads eight bytes; that access width is not an auxiliary stored representation.
 
 Every stored FFT coefficient, field residue and twiddle is independently BLIP
-encoded. `src/fft_residue.zig` reserves 16 bytes per slot so butterfly indexing
+encoded. `src/fft_residue.zig` reserves five bytes for small-prime residues
+and ten for full-u64 Goldilocks residues, so butterfly indexing
 is constant-time in the algorithmic sense. This is not a cryptographic timing
 claim. The first byte identifies the live encoding; unused capacity is ignored.
 
 | Residue | Canonical bytes (hex) | Live bytes | Reserved bytes |
 |---|---|---:|---:|
-| 0 | `00` | 1 | 16 |
-| 127 | `7f` | 1 | 16 |
-| 128 | `82 80 00` | 3 | 16 |
-| 2^63 | `89 00 00 00 00 00 00 00 80 00` | 10 | 16 |
+| 0 | `00` | 1 | 5 or 10 |
+| 127 | `7f` | 1 | 5 or 10 |
+| 128 | `82 80 00` | 3 | 5 or 10 |
+| 2^63 | `89 00 00 00 00 00 00 00 80 00` | 10 | 10 |
 
 The final zero in the last example is the signed representation's positive sign
 extension. Fixed-capacity slots contain variable-length encodings; they are not
-a densely packed BLIP stream. Capacity doubled from the former eight-byte
-residue arrays, and every butterfly store now encodes its result. The benchmark
-report includes that cost. Packing slots more tightly remains an experiment.
+a densely packed BLIP stream. The initial migration reserved 16 bytes per
+slot. Field-sized slots now reduce that capacity by 68.75% and 37.5%, respectively.
+The small-field codec recognizes the common `84` header directly. Fused stages,
+CRT reconstruction and inverse scaling avoid redundant encoding round trips
+while their temporary values remain in registers. Zero initialization writes
+only the immediate header byte. See the [measurements](benchmarks/storage-aware/README.md).
 
 `src/chunks.zig` serves magnitude-byte arithmetic; `src/fft_residue.zig` serves
 encoded FFT values. FFT kernels never reinterpret their slots as integer arrays.
 The public low-level FFT signatures now take byte slices whose lengths are
 multiples of `fft.residue.slot_bytes`; callers must encode inputs through
-`fft.residue.write`. The higher-level `Mp` and C APIs keep their existing shape.
+`fft.residue.write`. Goldilocks uses `fft.gold_residue` and its separate stride.
+The higher-level `Mp` and C APIs keep their existing shape.
 
 Verification includes:
 

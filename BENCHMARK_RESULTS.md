@@ -1,5 +1,13 @@
 # BENCHMARK_RESULTS.md — blip_mp vs GMP
 
+## September 27 evening: storage-aware FFT
+
+Field-sized canonical slots, an existing-header fast path and fused arithmetic
+reduce forced small-prime products by 33.6–35.2% and Goldilocks by 5.3–7.6%.
+[Repeated CPU/wall measurements and limits](docs/benchmarks/storage-aware/README.md).
+The earlier tables below are retained as historical measurements.
+
+
 ## September 27, 2026: byte scratch and canonical BLIP FFT residues
 
 Arithmetic revision: `8a7c515`; baseline: `a6d0d3e`. Linux x86_64,

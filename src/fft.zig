@@ -10,7 +10,8 @@
 // References: Cooley & Tukey (1965), Schönhage & Strassen (1971).
 
 const std = @import("std");
-pub const residue = @import("fft_residue.zig");
+pub const residue = @import("fft_residue.zig").Small;
+pub const gold_residue = @import("fft_residue.zig").Gold;
 
 // ── Field parameters (single-prime variant) ──────────────────────────────────
 
@@ -246,10 +247,9 @@ pub fn mulMagnitudes(allocator: std.mem.Allocator, a: []const u8, b: []const u8,
 /// malloc; ~5-10 K ns total at N=8192). With this entry point the only
 /// per-call cost is the actual transform work.
 ///
-/// Internally uses Stockham auto-sort NTT (E.2) — skips the bit-reversal
-/// pass entirely, ~9% per NTT × 3 NTTs per multiply ≈ 5-8 K ns saved at
-/// N=8192. The Cooley-Tukey path (`nttWithTwiddlesVec`) is preserved on
-/// the type system but no longer the production path.
+/// Uses fused radix-4 stages to reduce BLIP decode/encode round trips.
+/// The final inverse scaling feeds the carry loop directly in registers.
+/// Stockham scratch remains accepted for alternate kernels.
 pub fn mulMagnitudesWithScratch(
 	a: []const u8,
 	b: []const u8,
@@ -277,7 +277,6 @@ pub fn mulMagnitudesWithScratch(
 	const pb_n = pb[(0) * residue.slot_bytes .. (N) * residue.slot_bytes];
 	const tw_fwd_n = tw_fwd[(0) * residue.slot_bytes .. (N / 2) * residue.slot_bytes];
 	const tw_inv_n = tw_inv[(0) * residue.slot_bytes .. (N / 2) * residue.slot_bytes];
-	const sc_n = stockham_scratch[(0) * residue.slot_bytes .. (N) * residue.slot_bytes];
 
 	// Precompute twiddles once, reuse across 3 NTT calls (forward A,
 	// forward B, inverse). Cuts per-call mulModP count nearly in half.
@@ -293,23 +292,22 @@ pub fn mulMagnitudesWithScratch(
 		}
 	}
 
-	@memset(pa_n, 0);
-	@memset(pb_n, 0);
+	residue.clear(pa_n);
+	residue.clear(pb_n);
 	for (a, 0..) |byte, i| residue.write(pa_n, i, byte);
 	for (b, 0..) |byte, i| residue.write(pb_n, i, byte);
 
-	nttStockhamVecU4(pa_n, sc_n, tw_fwd_n);
-	nttStockhamVecU4(pb_n, sc_n, tw_fwd_n);
+	nttRadix4Vec(pa_n, tw_fwd_n);
+	nttRadix4Vec(pb_n, tw_fwd_n);
 	for (0..N) |i| residue.write(pa_n, i, mulModP(residue.read(pa_n, i), residue.read(pb_n, i)));
-	nttStockhamVecU4(pa_n, sc_n, tw_inv_n);
+	nttRadix4Vec(pa_n, tw_inv_n);
 	const n_inv = invModP(@intCast(N));
-	for (0..(pa_n.len / residue.slot_bytes)) |element| residue.write(pa_n, element, mulModP(residue.read(pa_n, element), n_inv));
 
 	// Carry propagation through the byte-output buffer.
 	var carry: u64 = 0;
 	var i: usize = 0;
 	while (i < need_len) : (i += 1) {
-		const val = residue.read(pa_n, i) + carry;
+		const val = mulModP(residue.read(pa_n, i), n_inv) + carry;
 		out[i] = @truncate(val & 0xFF);
 		carry = val >> 8;
 	}
@@ -523,14 +521,12 @@ pub fn mulMagnitudesCRT(
 	try convolveOnce(F1, allocator, a, b, N, c1);
 	try convolveOnce(F2, allocator, a, b, N, c2);
 
-	// CRT-merge each digit, then carry-propagate to bytes. We reuse `c1`
-	// as the merged digit buffer to avoid another N-element allocation.
-	for (0..N) |i| residue.write(c1, i, crtCombine(residue.read(c1, i), residue.read(c2, i)));
+	// Reconstructed coefficients exceed a field residue; carry directly in registers.
 
 	var carry: u64 = 0;
 	var i: usize = 0;
 	while (i < need_len) : (i += 1) {
-		const val = residue.read(c1, i) + carry;
+		const val = crtCombine(residue.read(c1, i), residue.read(c2, i)) + carry;
 		out[i] = @truncate(val & 0xFF);
 		carry = val >> 8;
 	}
@@ -2697,7 +2693,7 @@ pub fn goldNthRootOfUnity(N: usize) u64 {
 
 /// Bit-reverse permutation of a length-N array (N a power of 2).
 fn goldBitReverse(a: []u8) void {
-	const N = (a.len / residue.slot_bytes);
+	const N = (a.len / gold_residue.slot_bytes);
 	var j: usize = 0;
 	var i: usize = 1;
 	while (i < N) : (i += 1) {
@@ -2708,9 +2704,9 @@ fn goldBitReverse(a: []u8) void {
 		}
 		j ^= bit;
 		if (i < j) {
-			const swap_value = residue.read(a, i);
-			residue.write(a, i, residue.read(a, j));
-			residue.write(a, j, swap_value);
+			const swap_value = gold_residue.read(a, i);
+			gold_residue.write(a, i, gold_residue.read(a, j));
+			gold_residue.write(a, j, swap_value);
 		}
 	}
 }
@@ -2719,7 +2715,7 @@ fn goldBitReverse(a: []u8) void {
 /// omega_N^j for j in 0..N/2. Output is bit-reversed-naturally-ordered.
 pub fn goldNttWithTwiddles(a: []u8, twiddles: []const u8) void {
 	goldBitReverse(a);
-	const N = (a.len / residue.slot_bytes);
+	const N = (a.len / gold_residue.slot_bytes);
 	var half: usize = 1;
 	while (half < N) : (half *= 2) {
 		const step = N / (half * 2);
@@ -2727,10 +2723,10 @@ pub fn goldNttWithTwiddles(a: []u8, twiddles: []const u8) void {
 		while (k < N) : (k += 2 * half) {
 			var j: usize = 0;
 			while (j < half) : (j += 1) {
-				const t = goldMulMod(residue.read(a, k + j + half), residue.read(twiddles, j * step));
-				const u = residue.read(a, k + j);
-				residue.write(a, k + j, goldAddMod(u, t));
-				residue.write(a, k + j + half, goldSubMod(u, t));
+				const t = goldMulMod(gold_residue.read(a, k + j + half), gold_residue.read(twiddles, j * step));
+				const u = gold_residue.read(a, k + j);
+				gold_residue.write(a, k + j, goldAddMod(u, t));
+				gold_residue.write(a, k + j + half, goldSubMod(u, t));
 			}
 		}
 	}
@@ -2739,8 +2735,8 @@ pub fn goldNttWithTwiddles(a: []u8, twiddles: []const u8) void {
 /// Inverse NTT — same as forward with inverse twiddles, then scale by N^-1.
 pub fn goldInttWithTwiddles(a: []u8, twiddles_inv: []const u8) void {
 	goldNttWithTwiddles(a, twiddles_inv);
-	const n_inv = goldInvMod(@intCast((a.len / residue.slot_bytes)));
-	for (0..(a.len / residue.slot_bytes)) |element| residue.write(a, element, goldMulMod(residue.read(a, element), n_inv));
+	const n_inv = goldInvMod(@intCast((a.len / gold_residue.slot_bytes)));
+	for (0..(a.len / gold_residue.slot_bytes)) |element| gold_residue.write(a, element, goldMulMod(gold_residue.read(a, element), n_inv));
 }
 
 /// Stockham auto-sort NTT for Goldilocks. Avoids the bit-reverse permutation
@@ -2748,11 +2744,11 @@ pub fn goldInttWithTwiddles(a: []u8, twiddles_inv: []const u8) void {
 /// 30-bit-prime `nttStockham`, just using `goldMulMod` / `goldAddMod` /
 /// `goldSubMod`. After log2(n) passes, result is in `a`.
 pub fn goldNttStockham(a: []u8, scratch: []u8, twiddles: []const u8) void {
-	const n = (a.len / residue.slot_bytes);
+	const n = (a.len / gold_residue.slot_bytes);
 	if (n <= 1) return;
 	std.debug.assert(n & (n - 1) == 0);
-	std.debug.assert((scratch.len / residue.slot_bytes) == n);
-	std.debug.assert((twiddles.len / residue.slot_bytes) >= n / 2);
+	std.debug.assert((scratch.len / gold_residue.slot_bytes) == n);
+	std.debug.assert((twiddles.len / gold_residue.slot_bytes) >= n / 2);
 
 	const half_n = n >> 1;
 	var src: []u8 = a;
@@ -2768,12 +2764,12 @@ pub fn goldNttStockham(a: []u8, scratch: []u8, twiddles: []const u8) void {
 			const src_base = q_idx * m2;
 			var j: usize = 0;
 			while (j < m2) : (j += 1) {
-				const w = residue.read(twiddles, j * stride);
-				const x = residue.read(src, src_base + j);
-				const y = residue.read(src, src_base + j + half_n);
+				const w = gold_residue.read(twiddles, j * stride);
+				const x = gold_residue.read(src, src_base + j);
+				const y = gold_residue.read(src, src_base + j + half_n);
 				const t = goldMulMod(y, w);
-				residue.write(dst, q + j, goldAddMod(x, t));
-				residue.write(dst, q + j + m2, goldSubMod(x, t));
+				gold_residue.write(dst, q + j, goldAddMod(x, t));
+				gold_residue.write(dst, q + j + m2, goldSubMod(x, t));
 			}
 		}
 		const tmp = src;
@@ -2826,39 +2822,39 @@ pub fn goldMulMagnitudesWithScratch(
 	const need_digit_len = (need_byte_len + 1) / 2;
 	var N: usize = 1;
 	while (N < need_digit_len) N <<= 1;
-	std.debug.assert((pa.len / residue.slot_bytes) >= N);
-	std.debug.assert((pb.len / residue.slot_bytes) >= N);
-	std.debug.assert((tw_fwd.len / residue.slot_bytes) >= N / 2);
-	std.debug.assert((tw_inv.len / residue.slot_bytes) >= N / 2);
+	std.debug.assert((pa.len / gold_residue.slot_bytes) >= N);
+	std.debug.assert((pb.len / gold_residue.slot_bytes) >= N);
+	std.debug.assert((tw_fwd.len / gold_residue.slot_bytes) >= N / 2);
+	std.debug.assert((tw_inv.len / gold_residue.slot_bytes) >= N / 2);
 
-	std.debug.assert((stockham_scratch.len / residue.slot_bytes) >= N);
+	std.debug.assert((stockham_scratch.len / gold_residue.slot_bytes) >= N);
 
-	const pa_n = pa[(0) * residue.slot_bytes .. (N) * residue.slot_bytes];
-	const pb_n = pb[(0) * residue.slot_bytes .. (N) * residue.slot_bytes];
-	const tw_fwd_n = tw_fwd[(0) * residue.slot_bytes .. (N / 2) * residue.slot_bytes];
-	const tw_inv_n = tw_inv[(0) * residue.slot_bytes .. (N / 2) * residue.slot_bytes];
-	const sc_n = stockham_scratch[(0) * residue.slot_bytes .. (N) * residue.slot_bytes];
+	const pa_n = pa[(0) * gold_residue.slot_bytes .. (N) * gold_residue.slot_bytes];
+	const pb_n = pb[(0) * gold_residue.slot_bytes .. (N) * gold_residue.slot_bytes];
+	const tw_fwd_n = tw_fwd[(0) * gold_residue.slot_bytes .. (N / 2) * gold_residue.slot_bytes];
+	const tw_inv_n = tw_inv[(0) * gold_residue.slot_bytes .. (N / 2) * gold_residue.slot_bytes];
+	const sc_n = stockham_scratch[(0) * gold_residue.slot_bytes .. (N) * gold_residue.slot_bytes];
 
 	// Precompute twiddles.
 	const omega_n = goldNthRootOfUnity(N);
 	const omega_n_inv = goldInvMod(omega_n);
-	residue.write(tw_fwd_n, 0, 1);
-	residue.write(tw_inv_n, 0, 1);
+	gold_residue.write(tw_fwd_n, 0, 1);
+	gold_residue.write(tw_inv_n, 0, 1);
 	var j: usize = 1;
 	while (j < N / 2) : (j += 1) {
-		residue.write(tw_fwd_n, j, goldMulMod(residue.read(tw_fwd_n, j - 1), omega_n));
-		residue.write(tw_inv_n, j, goldMulMod(residue.read(tw_inv_n, j - 1), omega_n_inv));
+		gold_residue.write(tw_fwd_n, j, goldMulMod(gold_residue.read(tw_fwd_n, j - 1), omega_n));
+		gold_residue.write(tw_inv_n, j, goldMulMod(gold_residue.read(tw_inv_n, j - 1), omega_n_inv));
 	}
 
 	// Pack bytes into 16-bit digits (LE within each digit).
-	@memset(pa_n, 0);
-	@memset(pb_n, 0);
+	gold_residue.clear(pa_n);
+	gold_residue.clear(pb_n);
 	{
 		var i: usize = 0;
 		while (i * 2 < a.len) : (i += 1) {
 			const lo: u64 = a[i * 2];
 			const hi: u64 = if (i * 2 + 1 < a.len) @as(u64, a[i * 2 + 1]) else 0;
-			residue.write(pa_n, i, lo | (hi << 8));
+			gold_residue.write(pa_n, i, lo | (hi << 8));
 		}
 	}
 	{
@@ -2866,7 +2862,7 @@ pub fn goldMulMagnitudesWithScratch(
 		while (i * 2 < b.len) : (i += 1) {
 			const lo: u64 = b[i * 2];
 			const hi: u64 = if (i * 2 + 1 < b.len) @as(u64, b[i * 2 + 1]) else 0;
-			residue.write(pb_n, i, lo | (hi << 8));
+			gold_residue.write(pb_n, i, lo | (hi << 8));
 		}
 	}
 
@@ -2874,17 +2870,16 @@ pub fn goldMulMagnitudesWithScratch(
 	// Stockham auto-sort eliminates the explicit bit-reverse permutation.
 	goldNttStockham(pa_n, sc_n, tw_fwd_n);
 	goldNttStockham(pb_n, sc_n, tw_fwd_n);
-	for (0..N) |i| residue.write(pa_n, i, goldMulMod(residue.read(pa_n, i), residue.read(pb_n, i)));
+	for (0..N) |i| gold_residue.write(pa_n, i, goldMulMod(gold_residue.read(pa_n, i), gold_residue.read(pb_n, i)));
 	goldNttStockham(pa_n, sc_n, tw_inv_n);
 	const n_inv = goldInvMod(@intCast(N));
-	for (0..(pa_n.len / residue.slot_bytes)) |element| residue.write(pa_n, element, goldMulMod(residue.read(pa_n, element), n_inv));
 
 	// Carry propagation: each digit holds a value up to ~2^43; emit 16 bits
 	// per digit, carry the rest. Output bytes are LE.
 	var carry: u64 = 0;
 	var out_pos: usize = 0;
 	for (0..N) |i| {
-		const val = residue.read(pa_n, i) +% carry; // u64 add (carry adds < 2^48, val fits)
+		const val = goldMulMod(gold_residue.read(pa_n, i), n_inv) +% carry; // u64 add (carry adds < 2^48, val fits)
 		// Emit low 16 bits as 2 bytes (LE).
 		if (out_pos < out.len) out[out_pos] = @truncate(val & 0xFF);
 		if (out_pos + 1 < out.len) out[out_pos + 1] = @truncate((val >> 8) & 0xFF);
@@ -2946,15 +2941,15 @@ test "goldMulMagnitudes: cross-check vs schoolbook (small)" {
 		const need_digit_len = (a.len + b.len + 1) / 2;
 		var N: usize = 1;
 		while (N < need_digit_len) N <<= 1;
-		const pa = try allocator.alloc(u8, (N) * residue.slot_bytes);
+		const pa = try allocator.alloc(u8, (N) * gold_residue.slot_bytes);
 		defer allocator.free(pa);
-		const pb = try allocator.alloc(u8, (N) * residue.slot_bytes);
+		const pb = try allocator.alloc(u8, (N) * gold_residue.slot_bytes);
 		defer allocator.free(pb);
-		const tw_fwd = try allocator.alloc(u8, (N / 2) * residue.slot_bytes);
+		const tw_fwd = try allocator.alloc(u8, (N / 2) * gold_residue.slot_bytes);
 		defer allocator.free(tw_fwd);
-		const tw_inv = try allocator.alloc(u8, (N / 2) * residue.slot_bytes);
+		const tw_inv = try allocator.alloc(u8, (N / 2) * gold_residue.slot_bytes);
 		defer allocator.free(tw_inv);
-		const sc = try allocator.alloc(u8, (N) * residue.slot_bytes);
+		const sc = try allocator.alloc(u8, (N) * gold_residue.slot_bytes);
 		defer allocator.free(sc);
 
 		const got = goldMulMagnitudesWithScratch(a, b, out, pa, pb, tw_fwd, tw_inv, sc);

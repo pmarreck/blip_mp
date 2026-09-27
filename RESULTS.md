@@ -1,5 +1,10 @@
 # Results after the BLIP-residue migration
 
+Follow-up: [storage-aware FFT measurements](docs/benchmarks/storage-aware/README.md)
+reduce forced small-prime products by 33.6–35.2% and Goldilocks by 5.3–7.6%
+relative to the 16-byte BLIP implementation. The tables below preserve the
+earlier migration comparison; they are not timings of the follow-up revision.
+
 Measured September 27, 2026 on an AMD Ryzen Threadripper 3990X (Zen 2,
 64 cores / 128 threads), Linux 6.18.43 x86_64, Zig 0.16.0 ReleaseFast,
 GMP 6.3.0. The arithmetic revision is `8a7c515`; the baseline is `a6d0d3e`.
@@ -96,7 +101,7 @@ seeded data, alternating baseline and migrated binaries.
 | nttRadix4Vec | 85858 | 197512 | 2.30 |
 
 ATTENTION: these transform variants take roughly 2.30–3.87× their former time.
-This is the measured cost of the current BLIP-slot implementation, not a lower
+This is the measured cost of the initial 16-byte BLIP-slot implementation, not a lower
 bound on BLIP arithmetic. Radix-4 is the fastest measured encoded variant here,
 which makes register-local stage fusion a useful follow-up experiment. No
 production threshold was changed on the basis of these primitive timings.

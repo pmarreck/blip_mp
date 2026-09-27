@@ -7,7 +7,7 @@
 const std = @import("std");
 
 pub const TimeSpec = extern struct { tv_sec: c_long, tv_nsec: c_long };
-extern "c" fn clock_gettime(clk_id: c_int, tp: *TimeSpec) c_int;
+pub extern "c" fn clock_gettime(clk_id: c_int, tp: *TimeSpec) c_int;
 
 /// Monotonic nanosecond timestamp via CLOCK_MONOTONIC.
 pub fn nowNs() u64 {

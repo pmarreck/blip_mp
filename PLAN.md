@@ -2,17 +2,22 @@
 
 Purpose: [INTENT.md](INTENT.md). The [legacy roadmap](docs/plan_context/legacy-roadmap.md) preserves all prior tasks, decisions and measurements; its checkboxes include stale and conflicting statuses.
 
-## Current work (BDFN (Benevolent Dictator For Now), 2026-09-27)
+## Storage-aware optimization (BDFN (Benevolent Dictator For Now), 2026-09-27 evening)
 
-- [x] Replace production limb-array storage with byte buffers; pass the storage audit and 13,053 GMP comparisons (done 2026-09-27 16:30 EDT).
-- [x] BLIP-encode every stored FFT residue and twiddle; verify canonical encodings, transforms and allocation failure cleanup (done 2026-09-27 16:30 EDT).
-- [x] Capture three-run ReleaseFast medians, forced FFT samples and hyperfine CPU/wall logs before and after migration (done 2026-09-27 16:37 EDT).
+- [x] Specialize canonical BLIP residue storage for the FFT field; test tight capacity, every length boundary and poisoned padding, then measure codec and transform costs. (done 2026-09-27 19:57 EDT)
+- [x] Fuse FFT stages and avoid redundant zero/twiddle work where measured; preserve canonical BLIP for every stored intermediate and compare complete multiplication. (done 2026-09-27 19:57 EDT)
+- [x] Inspect sibling BLIP reserved symbols and evaluate context-defined fixed-width types as a design proposal, without changing the format. (done 2026-09-27 19:57 EDT)
+- [ ] Start research experiments after the FFT work: recursive Toom-3 and asymmetric multiplication, with failing tests and before/after measurements.
+- [ ] Evaluate remaining research candidates for tighter packing, sparse transforms and truncated Montgomery work; retain measured null results and rank further experiments.
+- [ ] Publish before/after evidence and update README, results, representation notes and optimization research; commit passing units of work.
+
+## Current work (BDFN, 2026-09-27)
+
 - [x] Update README, RESULTS and BENCHMARK_RESULTS; preserve historical results and flag regressions and unmatched buckets (done 2026-09-27 16:37 EDT).
 - [x] Research GMP algorithms and SIMD; record verified gaps and untested BLIP experiments in docs/OPTIMIZATION_RESEARCH.md (done 2026-09-27 16:37 EDT).
 
 ## Documentation
 
-- [x] Establish INTENT.md with BDFN's BLIP origin and size-dependent GMP framing; migrate terminology and preserve the roadmap history (done 2026-09-27 15:58 EDT; a6d0d3e).
 
 ## Follow-up and existing backlog
 

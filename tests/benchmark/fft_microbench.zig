@@ -537,4 +537,5 @@ pub fn main() !void {
 	std.debug.print("RESULT impl=nttRadix4Vec n={d} ns_per_pass={d:.0}\n", .{ NTT_N, ns_ntt_r4_vec });
 	std.debug.print("Radix-4 NTT speedup (r4_vec vs %P_vec): {d:.2}x\n", .{ns_ntt_vec / ns_ntt_r4_vec});
 	std.debug.print("Radix-4 NTT speedup (r4_vec vs scalar): {d:.2}x\n", .{ns_ntt_scalar / ns_ntt_r4_vec});
+	try @import("storage_aware.zig").run();
 }

@@ -56,41 +56,44 @@ pub const FFT_THRESHOLD: usize = 99999;
 // time we allocate; reused thereafter. If a different allocator is passed
 // later the cache transparently reallocates — but in practice every caller
 // uses the same `Mp.allocator` for its lifetime.
-const FftScratch = struct {
-	cached_N: usize = 0,
-	pa: []u8 = &.{},
-	pb: []u8 = &.{},
-	tw_fwd: []u8 = &.{},
-	tw_inv: []u8 = &.{},
-	stockham: []u8 = &.{},
-	owner_alloc: ?std.mem.Allocator = null,
+const FftScratch = TransformScratch(fft.residue.slot_bytes);
+fn TransformScratch(comptime slot_bytes: usize) type {
+	return struct {
+		cached_N: usize = 0,
+		pa: []u8 = &.{},
+		pb: []u8 = &.{},
+		tw_fwd: []u8 = &.{},
+		tw_inv: []u8 = &.{},
+		stockham: []u8 = &.{},
+		owner_alloc: ?std.mem.Allocator = null,
 
-	fn ensureCapacity(self: *FftScratch, allocator: std.mem.Allocator, N: usize) !void {
-		if (self.cached_N >= N and self.owner_alloc != null and allocatorEq(self.owner_alloc.?, allocator)) return;
-		// Keep the old allocation valid until all replacement buffers exist.
-		var next: FftScratch = .{ .owner_alloc = allocator };
-		errdefer next.releaseUnsafe();
-		next.pa = try allocator.alloc(u8, N * fft.residue.slot_bytes);
-		next.pb = try allocator.alloc(u8, N * fft.residue.slot_bytes);
-		next.tw_fwd = try allocator.alloc(u8, N / 2 * fft.residue.slot_bytes);
-		next.tw_inv = try allocator.alloc(u8, N / 2 * fft.residue.slot_bytes);
-		next.stockham = try allocator.alloc(u8, N * fft.residue.slot_bytes);
-		next.cached_N = N;
-		self.releaseUnsafe();
-		self.* = next;
-	}
-
-	fn releaseUnsafe(self: *FftScratch) void {
-		if (self.owner_alloc) |a| {
-			a.free(self.pa);
-			a.free(self.pb);
-			a.free(self.tw_fwd);
-			a.free(self.tw_inv);
-			a.free(self.stockham);
+		fn ensureCapacity(self: *@This(), allocator: std.mem.Allocator, N: usize) !void {
+			if (self.cached_N >= N and self.owner_alloc != null and allocatorEq(self.owner_alloc.?, allocator)) return;
+			// Keep the old allocation valid until all replacement buffers exist.
+			var next: @This() = .{ .owner_alloc = allocator };
+			errdefer next.releaseUnsafe();
+			next.pa = try allocator.alloc(u8, N * slot_bytes);
+			next.pb = try allocator.alloc(u8, N * slot_bytes);
+			next.tw_fwd = try allocator.alloc(u8, N / 2 * slot_bytes);
+			next.tw_inv = try allocator.alloc(u8, N / 2 * slot_bytes);
+			next.stockham = try allocator.alloc(u8, N * slot_bytes);
+			next.cached_N = N;
+			self.releaseUnsafe();
+			self.* = next;
 		}
-		self.* = .{};
-	}
+
+		fn releaseUnsafe(self: *@This()) void {
+			if (self.owner_alloc) |a| {
+				a.free(self.pa);
+				a.free(self.pb);
+				a.free(self.tw_fwd);
+				a.free(self.tw_inv);
+				a.free(self.stockham);
+			}
+			self.* = .{};
+		}
 };
+}
 
 inline fn allocatorEq(a: std.mem.Allocator, b: std.mem.Allocator) bool {
 	return a.ptr == b.ptr and a.vtable == b.vtable;
@@ -109,7 +112,7 @@ pub fn releaseFftScratch() void {
 
 // ── Per-thread Goldilocks-NTT scratch cache (Phase 2) ─────────────────────────
 // Goldilocks keeps the same five encoded buffers, including Stockham scratch.
-const GoldFftScratch = FftScratch;
+const GoldFftScratch = TransformScratch(fft.gold_residue.slot_bytes);
 
 threadlocal var gold_fft_scratch: GoldFftScratch = .{};
 

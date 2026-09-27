@@ -583,7 +583,7 @@ fn checkEncodedFft(allocator: std.mem.Allocator) !usize {
 				const actual_len = if (backend == 0) try fft.mulMagnitudes(allocator, a, b, actual) else if (backend == 1) try fft.mulMagnitudesCRT(allocator, a, b, actual) else blk: {
 					var n: usize = 1;
 					while (n < size) n *= 2;
-					const bytes = n * fft.residue.slot_bytes;
+					const bytes = n * fft.gold_residue.slot_bytes;
 					const scratch = try allocator.alloc(u8, 4 * bytes);
 					defer allocator.free(scratch);
 					break :blk fft.goldMulMagnitudesWithScratch(a, b, actual, scratch[0..bytes], scratch[bytes .. 2 * bytes], scratch[2 * bytes .. 5 * bytes / 2], scratch[5 * bytes / 2 .. 3 * bytes], scratch[3 * bytes .. 4 * bytes]);
