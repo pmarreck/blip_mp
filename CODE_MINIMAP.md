@@ -5,8 +5,10 @@ Per-file index of important code locations. Refreshed 2026-05-03 after the M1–
 ## Top-level docs / config
 
 - `SPEC.md` — original design spec for BLIP-storage bignum library
-- `PROJECT_OVERVIEW.md` — goals, terminology, non-goals, architecture
-- `PLAN.md` — milestone checklist and roadmap (M0 through M11)
+- `INTENT.md` — purpose, scope, constraints and success criteria
+- `TERMINOLOGY.md` — encoding, arithmetic and storage vocabulary
+- `PLAN.md` — current work and backlog reconciliation
+- `docs/plan_context/legacy-roadmap.md` — preserved milestone history, decisions and detailed follow-ups
 - `RESULTS.md` — headline benchmark results, M5-5 controlled experiment writeup, win/loss breakdown
 - `BENCHMARK_RESULTS.md` — per-run history (Run 1..N) with each milestone's bench
 - `README.md` — project landing page (GitHub-facing)

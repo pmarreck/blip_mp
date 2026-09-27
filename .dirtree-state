@@ -1,0 +1,7 @@
+# Dirtree: Stateful directory trees in the CLI for humans and LLMs. https://github.com/pmarreck/dirtree
+ver=1.2
+annotate=[
+	INTENT.md = Project purpose, scope and evidence required for success
+	TERMINOLOGY.md = BLIP arithmetic and byte-storage terminology
+	docs/plan_context/legacy-roadmap.md = Preserved roadmap decisions, experiments and unresolved tasks
+]

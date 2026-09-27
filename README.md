@@ -1,5 +1,7 @@
 # blip_mp
 
+Project purpose, scope and success criteria: [INTENT.md](INTENT.md).
+
 **A pure-Zig multi-precision integer library that stores values as BLIP-encoded bytes (variable-length, self-describing) instead of GMP's fixed-width-limb-array representation.** Beats GMP at the most common bignum operations on Apple Silicon. Pure Zig, no inline assembly, no LGPL link constraint.
 
 > *"Storage-as-wire-form" + small-buffer-optimization + lazy-on-demand metadata caching. Validated empirically against GMP's 8240-test cross-checked reference.*

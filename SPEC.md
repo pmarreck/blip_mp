@@ -1,5 +1,9 @@
 # blip_mp — BLIP-Native Multi-Precision Integers
 
+Historical design proposal. [INTENT.md](INTENT.md) records the current purpose
+and later decisions; the alternatives and exclusions below describe the initial
+experiment. Use [include/blip_mp.h](include/blip_mp.h) for the current C contract.
+
 A research-grade arbitrary-precision integer library where the **canonical storage form is BLIP** (variable-length integer encoding) instead of GMP's fixed-width-limb-array representation. Goal: dramatic overhead reduction for small and medium bignums while remaining competitive with GMP on large numbers.
 
 **Status:** rough design spec — soliciting implementation attempts.
