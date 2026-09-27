@@ -1,86 +1,39 @@
 # blip_mp
 
-Project purpose, scope and success criteria: [INTENT.md](INTENT.md).
+A pure-Zig arbitrary-precision arithmetic library built on BDFN (Benevolent Dictator For Now)'s
+[BLIP integer encoding](https://github.com/pmarreck/BLIP). Values use canonical,
+variable-length signed BLIP bytes. Small values stay inline; larger values use
+heap storage. GMP is used for testing and benchmarks, with no runtime dependency
+in the library.
 
-**A pure-Zig multi-precision integer library that stores values as BLIP-encoded bytes (variable-length, self-describing) instead of GMP's fixed-width-limb-array representation.** Beats GMP at the most common bignum operations on Apple Silicon. Pure Zig, no inline assembly, no LGPL link constraint.
+Project purpose and constraints: [INTENT.md](INTENT.md).
 
-> *"Storage-as-wire-form" + small-buffer-optimization + lazy-on-demand metadata caching. Validated empirically against GMP's 8240-test cross-checked reference.*
+## What this experiment establishes
 
----
+Arithmetic operates on byte payloads without stored integer limb arrays or
+integer-array casts. Division and Montgomery scratch use magnitude bytes with
+temporary register-sized reads. Every stored FFT coefficient, twiddle and
+residue has its own canonical BLIP encoding. FFT slots reserve 16 bytes each
+for encodings of 1–10 bytes; unused capacity is not part of the value.
 
-## Why does this exist?
+BLIP's encoded length and an integer object's resident size are different
+measurements. `Mp` is a 72-byte object in the current 64-bit build and contains
+metadata and inline capacity. Compact wire encodings alone do not prove lower
+resident memory than GMP.
 
-GMP's `mpz_t` is the de-facto bignum representation in serious numerical software. Its weakness: **per-value overhead is fixed and structural, regardless of how large the actual integer is.**
+## Measurements
 
-```
-mpz_t = { int _mp_alloc, int _mp_size, mp_limb_t *_mp_d }
-       ≈ 16 bytes of struct
-       + heap allocation for _mp_d
-       + alignment padding
-       + allocator bookkeeping
+The latest [results](RESULTS.md) and [benchmark log](BENCHMARK_RESULTS.md)
+cover the September 27, 2026 migration on a Linux x86_64 Threadripper 3990X,
+using Zig 0.16.0 ReleaseFast and GMP 6.3.0. They include before/after medians,
+variation, FFT costs and reproducible commands. Small-addition buckets remain
+1.21–1.30× faster than ordinary GMP on this host; the other 67 matched buckets
+favor GMP. Encoded FFT passes take 2.30–3.87× their former time.
 
-Storing the value 5 takes ~24 bytes spread across two cache lines,
-mediated by a malloc round-trip.
-```
-
-For workloads dominated by small or medium numbers (accumulator loops, EC scalars, polynomial coefficients, hash-derived integers), GMP's structural overhead is a 5–25× memory blowup over the actual information content, plus an allocator round-trip on every value created or destroyed.
-
-**BLIP** ([spec](https://github.com/pmarreck/BLIP)) is a self-describing variable-length integer encoding:
-
-| Value | BLIP bytes | GMP storage |
-|---|---|---|
-| `5` | 1 byte (immediate) | 24+ bytes (struct + heap) |
-| `2^32` | 5 bytes (header + 4 LE) | 24+ bytes |
-| `2^256` | 33 bytes | 16 bytes struct + 32 bytes heap |
-| `2^4096` | 513 bytes contiguous | 16 + 512 + bookkeeping |
-
-`blip_mp` builds an arbitrary-precision integer library directly on top of BLIP storage. No separate length field, no heap pointer indirection for small values, no allocator round-trip for accumulator loops. **The bytes ARE the value.**
-
----
-
-## What did we measure?
-
-Apple Silicon (M-series), aarch64-darwin, Zig 0.16.0 ReleaseFast, libc malloc.
-
-### Headline wins
-
-- **All `i64`-fitting values: 1.95–2.66× faster than GMP**
-- **All three standard RSA mul sizes (1024, 2048, 3072 bit) beat GMP by 1.19–1.45×** — twelve mul sizes total beat GMP after the iter-33 Karatsuba-leaf cleanup added new wins at 4096, 6144, and 8192 bit too.
-- **RSA-2048 trifecta**: blip_mp beats GMP at `mul` (1.16×) + `divMod` (1.31×) + `powm` (1.11×) at the most-deployed crypto operand size worldwide.
-- **Addition at 768-bit and above: 1.04–1.28× faster than GMP** (eight sizes now beat GMP after the M5/M9 bookkeeping cleanup; was previously 1.03× at 4096+ only)
-- **Subtraction at 256-bit and above: 1.03–2.11× faster than GMP** — ten Mp.sub sizes beat GMP after the chunked-`subPayloads` fix mirrored the long-standing addPayloads optimization. Headline: 6144-bit sub went 606 ns → 48 ns (12.7×).
-- **Large multiplication (16384+ bits via Toom-3): 1.03× faster** (modest)
-- **Modular exponentiation (RSA-2048): 13% faster than GMP** (Mp.powm with Montgomery, M7-4.3 + Möller-Granlund-improved inner div). At 1024 we beat by 3%; at 3072 by 8%. This is the headliner for any serious crypto workload (RSA encrypt/decrypt/sign, DH key exchange, ECC scalar mul).
-- **Long division (2048-bit / 1024-bit): 24% faster than GMP** (Mp.divMod with u64-base Knuth Algorithm D) — 36× faster than the byte-base implementation that originally lagged by 28.8×.
-- **Correctness: 13029/13029 random GMP cross-validation tests pass** across add, sub, mul, div, mod, divMod, powm, invMod, and `Fp` (rational) cross-checks against `mpq_t` — the complete modular-arithmetic + exact-rational API.
-- **Real-world: pi-spigot at 10,000 digits runs within 1.22× of GMP** — a streaming Gibbons spigot port with mul-heavy ratio. Started a session at 3.55×; closed 72% of the gap via the same techniques GMP uses (`mpn_mul_1` dispatch for single-limb operand, per-thread scratch caches, specialized squaring, sub-quadratic `mpz_get_str`). At small N (≤100 digits) pi-blip is tied or faster than pi-c (C + GMP-with-asm).
-- **Modular exponentiation at 1024-bit: 21% FASTER than GMP** (after specialized squaring landed) — RSA-1024 modexp falls into blip_mp's schoolbook tier where the n²/2 squaring symmetry trick directly pays out.
-
-### The honest losses
-
-We're slower than GMP at:
-- **128-bit addition and subtraction** (~0.56–0.65× of GMP). The remaining gap at the smallest size is the load+store ABI cost difference from blip_mp's heavier struct (one cache line + 8B vs GMP's 24-byte mpz_t) — fundamental, not algorithmic. Other small sizes (192-512 bit) are now within 70-90% of GMP after the cleanup landed.
-- **128–256 bit multiplication** (0.40–0.67×). Same per-op overhead.
-- **16384+ bit multiplication** (0.55–0.87× post-iter-33). 8192-bit was 0.72× behind GMP pre-iter-33; the Karatsuba-leaf chunking flipped it to 1.04× WIN. 16384-bit closed from 0.68× → 0.87×. 32768-bit still in FFT territory (0.55×). GMP uses Schönhage-Strassen FFT mul above ~16K-bit. We have a full pure-Zig FFT stack (single-prime NTT + two-prime CRT + NEON-SIMD butterflies) shipped + correctness-validated but gated off in production — even with the 1.40× speedup from vectorization (32K-bit FFT path: 191K → 135K ns), Toom-3 still wins at 100K ns post-iter-33. M6-4-E ladder in PLAN.md targets the alloc-elimination + Stockham + inline-asm levers needed to flip it.
-
-### Surprise: GMP's hand-tuned aarch64 asm gives ~0% advantage on Apple Silicon
-
-We built a second GMP variant with `--disable-assembly` and ran the same benchmark. The asm advantage is essentially zero across all our test sizes. At 4096-bit and 32768-bit add, **the C reference code is actually faster than the asm.** Modern clang `-O3` generates near-optimal ADCS chains from C `__builtin_add_overflow` that the hand-tuned asm can't beat — and the asm becomes an opaque call boundary that breaks inlining.
-
-**Implication on aarch64:** every gap to GMP is purely algorithmic. We don't need inline asm. We need FFT mul and tighter bookkeeping. Both are pure-Zig achievable.
-
-### Cross-platform: x86_64 (AMD Zen 4) tells a different story
-
-We ran the same `nix build .#bench` on a NixOS x86_64 Framework laptop (AMD Ryzen 9 7940HS — Zen 4 with full AVX-512, AVX2, BMI/ADX). Two clean findings:
-
-1. **GMP-asm is load-bearing on x86_64**: 1.65–3.88× faster than GMP-noasm depending on size/op. Decades of hand-tuned `mpn_*` chains with `adcx`/`adox`/`mulx` + AVX2/AVX-512 paths IS doing real work on x86_64 — the M-series finding does NOT generalize.
-2. **The BLIP-storage paradigm still wins on x86_64**: compared against GMP-noasm-x86_64 (the storage-paradigm-only baseline), pure-Zig blip_mp wins at 22+ size/op pairs — including 1.46× faster on immediate add, 1.30–1.68× faster on add at 4K–32K-bit, 1.5–1.8× faster on mul at 1K–8K-bit, and 1.73× faster on RSA-2048 powm.
-
-So on x86_64 vs **GMP-asm**, blip_mp wins all tier-0/1 sizes but loses tier-3 by 1.5–4× (= the GMP-asm advantage above). Closing that on x86_64 would require equivalent hand-asm work in our codebase, OR upstream Zig codegen improvements for `adcx`/`adox` chains and AVX big-int SIMD. Full numbers in `BENCHMARK_RESULTS.md` Run 18 and `RESULTS.md` "Cross-platform validation" section.
-
-**Cross-platform conclusion:** the architectural advantage of BLIP-storage + sign-extended SBO + byte-direct chunked arithmetic + Möller-Granlund div + Mont-form powm is **platform-independent**. On M-series it produces a clean win-on-most-things vs GMP. On Zen 4 it produces a clean win-on-most-things vs GMP-noasm. The GMP-asm gap on x86_64 is a separate axis (hand-tuned asm vs pure-Zig codegen) — orthogonal to the storage paradigm.
-
----
+Wins depend on the operation, integer size and platform. The older Apple
+Silicon and Zen 4 measurements remain historical records; they are not results
+for this revision. GMP without assembly is a separate comparison and does not
+by itself isolate BLIP's storage costs from algorithm or compiler differences.
 
 ## Quick start
 
@@ -91,7 +44,7 @@ git clone https://github.com/pmarreck/blip_mp
 cd blip_mp
 
 ./build           # native ReleaseFast build via nix; also builds bp
-./test            # 461 unit tests + 13029 GMP cross-checks + C FFI smoke + bp CLI smoke
+./test            # unit tests + GMP cross-checks + C FFI smoke + bp CLI smoke
 ./result/bin/blip_mp_bench    # run the bench (after nix build .#packages.<sys>.bench)
 ```
 
@@ -174,54 +127,32 @@ pub fn main() !void {
 
 ---
 
-## Architecture in one paragraph
+## Architecture
 
-`Mp` is a 72-byte struct (one cache line + 8B). Inline mode stores values up to 24 bytes encoded in `inline_buf`; heap mode uses `heap_buf` with a `heap_offset` field that lets results be written without shifting (the header gets placed directly before the payload). For inline length-prefixed values, an internal invariant maintains `inline_buf[1..9]` as the full sign-extended i64 — the arithmetic hot path reads it as a single `LDR` u64 load. Cached `(payload_offset, sign, payload_len)` fields skip per-op header parsing. Tier dispatch is automatic: i64-fitting values use native arithmetic; larger values use byte-direct two's-complement add/sub or Karatsuba/Toom-3 mul over the BLIP payload bytes. **No auxiliary "limb array" data structure exists** — we read u64/u128/u256/u512 chunks directly from the byte payload via `readInt`/`writeInt`. The bytes ARE the value, all the way through.
+The Zig core handles in-memory arithmetic. The C FFI and `bp` calculator are
+consumers. Inline values use native scalar arithmetic; large add/sub operations
+read chunks directly from the payload. Multiplication includes schoolbook,
+Karatsuba, Toom-3 and three NTT backends. Division and modular exponentiation
+also keep scratch in byte buffers. FFT arithmetic decodes BLIP residues into
+registers and encodes every stored result.
 
-Full details in [`CODE_MINIMAP.md`](CODE_MINIMAP.md), benchmark history in [`BENCHMARK_RESULTS.md`](BENCHMARK_RESULTS.md), and the comprehensive results writeup in [`RESULTS.md`](RESULTS.md).
+The single-prime and CRT FFT thresholds currently exclude their entire supported
+ranges. Goldilocks remains reachable at sufficiently large equal-length inputs.
+Backend-specific correctness tests run independently of production dispatch.
+See [CODE_MINIMAP.md](CODE_MINIMAP.md) for source locations.
 
----
+## Scope and next experiments
 
-## Tradeoffs and limitations
+The library includes exact binary/decimal fixed-point arithmetic, but does not
+provide full GMP API compatibility, unrestricted rationals or MPFR semantics.
+Portable behavior is intended across macOS ARM64, Linux ARM64/x86_64 and Windows
+ARM64/x86_64. The current migration was executed and measured on Linux x86_64;
+historical runs do not establish current cross-platform verification.
 
-**What this library is:** a research-grade arbitrary-precision integer library that validates the BLIP-storage paradigm and beats GMP at common sizes on Apple Silicon. Pure Zig, no asm, no LGPL constraint.
-
-**What it isn't (yet):**
-- **FFT multiplication is correctness-shipped but gated off** — full single-prime NTT + two-prime CRT + NEON-SIMD vectorized butterflies live in `src/fft.zig`, all bit-identical to GMP across 8240/8240 cross-checks at sizes up to 256K-bit. But constant factors keep Toom-3 ahead at every operand size in our supported range (M-series-specific finding: pure-NEON Montgomery integrates slower than the existing scalar-inside-vector form because it crowds the NEON pipe and starves M4's dual scalar mul pipes). The 13–15% remaining gap needs alloc-elimination + inline asm, planned in M6-4-E.
-- **Modular inverse lags GMP** by ~2.5–4× at 256-2048 bit (down from 29-38× before M9 Lehmer; down from 7-8× after M10 wider-window Lehmer; down from 4-6× after M11 recursive HGCD + the divMod/mul scratch caches landed). Headline: 2048-bit invMod is now 2.49× behind GMP (was 3.96× post-M11, 7.85× pre-M10). Further closure would need the FFT-mul-as-HGCD-leaf option flipped on (M11.2 PROD enablement, blocked on FFT viability).
-- **Two platforms validated** — aarch64-darwin (Apple M-series) is the headline, x86_64-linux (AMD Zen 4 with AVX-512) is the cross-check. Library is bit-portable: 461 unit tests + 13029 GMP cross-validations + C FFI smoke + bp CLI smoke pass on both. The asm-vs-clang result is M-series-specific; on x86_64 GMP's hand-asm is genuinely load-bearing (1.65–3.88× over GMP-noasm). Windows (x86_64 + aarch64) is covered by the Garnix CI cross-build matrix.
-- **Not optimized for non-aligned operand sizes** — `tier3Op` works on any size but is fastest when payload lengths are multiples of 8 bytes (which most cryptographic sizes are).
-
-**What it isn't trying to be:**
-- Not a full GMP replacement. No `mpf_t` (floats), no `mpq_t` (rationals), no `mpfr` (extended-precision floats).
-- Not chasing huge-number records. GMP's per-arch asm tuning is decades of work; we stop being competitive at 64K+ bit operands until FFT lands.
-- Not asm-tuned. The M5-5 controlled experiment showed asm gives ~0% on M-series — and we beat GMP-asm at 22+ sizes there anyway. **On x86_64 the picture differs**: GMP-asm gives 1.65–3.88× over GMP-noasm on Zen 4, so blip_mp loses tier-3 to GMP-asm on x86_64 (but still beats GMP-noasm-x86_64, the storage-paradigm baseline). Closing the x86_64 GMP-asm gap is future work — would require equivalent hand-asm or Zig compiler improvements for `adcx`/`adox` + AVX big-int codegen.
-
----
-
-## Roadmap
-
-**In priority order:**
-
-1. **Finish the FFT-vs-Toom-3 flip** (M6-4-E in PLAN.md). The FFT primitives, CRT extension, and NEON-SIMD butterfly are all shipped and correctness-validated; closed Toom-3 gap from 1.93× to 1.15×. Remaining 13–15% needs caller-supplied scratch (eliminates 4 per-call allocs ≈ 6–9K ns — partially done via the per-thread scratch caches), wiring Stockham into production, and possibly hand-scheduled aarch64 inline asm for the butterfly inner loop.
-
-2. ~~**Tighter `tier3Op` bookkeeping**~~ — DONE 2026-05-02. Five new add wins (768/1536/2048/3072/4096 bit); 128-bit gap closed by ~40%; 1024-bit at parity.
-
-3. ~~**Cross-platform validation on x86_64 Linux + Windows.**~~ — DONE. Garnix builds aarch64/x86_64 on Linux/Darwin/Windows; cross-platform x86_64 Zen 4 run confirmed (a) GMP-asm IS load-bearing on x86_64 (1.65–3.88× over GMP-noasm — different result than M-series); (b) BLIP storage paradigm still wins vs GMP-noasm-x86_64.
-
-4. ~~**True recursive half-GCD for `Mp.invMod` (M11)**~~ — DONE 2026-05-03. Closed 2048-bit invMod from 7.85× → 2.49× of GMP. Further closure would need M11.2 PROD enablement (blocked on FFT mul viability).
-
-5. ~~**C FFI header** (`include/blip_mp.h`)~~ — DONE 2026-05 (M8). `bp` CLI uses it; downstream Rust/Lua/Python bindings get the same surface.
-
-6. **Karatsuba/Toom-3 squaring variants** — schoolbook squaring (`mpn_sqr_basecase` analogue) is shipped and gives 21% on RSA-1024 powm. The recursive Karatsuba and Toom-3 variants for squaring would close the remaining gap at 4K+ bit modular exponentiation (RSA-4096 / DH-4096).
-
-7. **Direct-to-`r.heap_buf` write in `Mp.mulU64`** — currently writes to scratch + memcpys via `writeMpFromPayload`. Direct-write would save the trailing memcpy (≈5–10% on mul-by-small-constant-heavy workloads like the pi spigot).
-
-8. **Toom-Cook 4-way** for 4K-16K bit mul. Deprioritized — its modest 15-30% gain isn't worth the implementation cost while FFT remains the headliner.
-
-9. **`hyperfine` integration** in `./bm` for proper statistical benchmark aggregation. Current numbers are 3-run hand medians.
-
----
+[Optimization research](docs/OPTIMIZATION_RESEARCH.md) compares the current
+algorithm set with GMP and examines SIMD, recursive Toom, asymmetric products,
+truncated Montgomery work and BLIP-aware FFT layouts. Candidate experiments are
+marked as untested. Execution status lives in [PLAN.md](PLAN.md).
 
 ## License intent
 
@@ -231,7 +162,7 @@ MIT or Apache-2.0 (TBD before tagging a release). Both permit linkage with libgm
 
 ## Acknowledgments
 
-- The [BLIP encoding spec](https://github.com/pmarreck/BLIP) by BDFN (Benevolent Dictator For Now).
+- The [BLIP encoding spec](https://github.com/pmarreck/BLIP) by BDFN.
 - GMP team for the reference implementation we cross-validate against.
 - Marco Bodrato and Alberto Zanoni for the Toom-3 interpolation formulas.
 

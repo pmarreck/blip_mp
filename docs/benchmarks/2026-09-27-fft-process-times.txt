@@ -1,0 +1,11 @@
+Benchmark 1: before-fft
+  Time (mean ± σ):     409.5 ms ±   6.8 ms    [User: 405.0 ms, System: 2.1 ms]
+  Range (min … max):   404.5 ms … 417.2 ms    3 runs
+ 
+Benchmark 2: after-fft
+  Time (mean ± σ):     911.1 ms ±   7.3 ms    [User: 904.2 ms, System: 1.7 ms]
+  Range (min … max):   903.9 ms … 918.6 ms    3 runs
+ 
+Summary
+  before-fft ran
+    2.23 ± 0.04 times faster than after-fft

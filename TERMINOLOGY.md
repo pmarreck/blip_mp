@@ -10,9 +10,9 @@
 | SBO | Small-buffer optimization: store short encodings inside the integer object to avoid a separate payload allocation. |
 | `Fp` | Exact fixed-point value represented by an `Mp` mantissa, a scale and a binary or decimal base. It does not represent every rational number. |
 | `bp` | The Forth-style RPN calculator that consumes the library through its C API. |
-| Limb | A genuinely stored fixed-width array element, such as a GMP limb or a remaining `[]u64` storage element. |
+| Limb | A genuinely stored fixed-width array element, such as a GMP limb. Production arithmetic no longer stores these arrays. |
 | Chunk / view | A register-sized read of a byte buffer used for arithmetic. A transient `u64` value is not itself stored limb-array representation. |
-| Fully limbless | The M15 goal of byte-buffer storage throughout, including division and FFT intermediates. This requires verification before describing it as completed. |
+| Fully limbless | Byte-buffer arithmetic without stored limb arrays. FFT residues additionally carry canonical variable-length BLIP encodings; see docs/REPRESENTATION.md for the checked scope. |
 | mpn layer | GMP's low-level limb-array primitives. Linking these was an early alternative, superseded by independent arithmetic in the core. |
 
 The limb/chunk distinction follows BDFN (Benevolent Dictator For Now)'s May 16 terminology decision recorded

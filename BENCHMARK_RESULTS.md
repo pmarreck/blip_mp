@@ -1,5 +1,44 @@
 # BENCHMARK_RESULTS.md — blip_mp vs GMP
 
+## September 27, 2026: byte scratch and canonical BLIP FFT residues
+
+Arithmetic revision: `8a7c515`; baseline: `a6d0d3e`. Linux x86_64,
+Threadripper 3990X (Zen 2), Zig 0.16.0 ReleaseFast, GMP 6.3.0. Three-run
+medians preserve four small-addition wins over ordinary GMP (1.21–1.30×);
+GMP wins the other 67 matched buckets. BLIP wins 46/71 against GMP-noasm,
+which is a separate implementation comparison rather than a storage-only control.
+
+Every stored FFT residue and twiddle now has a canonical variable-length BLIP
+encoding. Sixteen-byte slots replace eight-byte residue arrays. Forced
+8,192-point NTT passes take 2.30–3.87× their baseline time. The normal
+benchmark does not dispatch to FFT at its operand sizes.
+
+ATTENTION: measured regressions include +14.5% for 65,536-bit multiplication
+and +9.8% for 1,024-bit powm. Whole-benchmark hyperfine means were 13.406 s
+before and 13.670 s after, with CPU times retained in JSON. The source of the
+non-FFT multiplication regression remains unprofiled.
+
+See [current results](RESULTS.md) for the before/after table, FFT variants,
+CPU/wall times and methodological limits. Raw evidence:
+
+- [Baseline medians and ranges](docs/benchmarks/2026-09-27-before.txt)
+- [Migrated medians and ranges](docs/benchmarks/2026-09-27-after.txt)
+- [Full operation comparison TSV](docs/benchmarks/2026-09-27-comparison.tsv)
+- [Alternating FFT samples](docs/benchmarks/2026-09-27-fft.txt)
+- [Whole-benchmark CPU/wall JSON](docs/benchmarks/2026-09-27-process-times.json)
+- [FFT CPU/wall JSON](docs/benchmarks/2026-09-27-fft-process-times.json)
+
+The legacy combined tables contain zero placeholders where GMP was not run;
+treat those cells as unmeasured. The TSV uses NA and excludes such cells
+from ratios. All correctness test groups and the optimized build passed;
+13,053 GMP comparisons found zero mismatches.
+
+## Historical runs
+
+The runs below describe earlier implementations and machines. Their headline
+claims, proposed work and platform conclusions do not describe this revision.
+The original May headline write-up is preserved [here](docs/benchmarks/2026-05-results.md).
+
 ## Run 18 — 2026-05-04 EST (x86_64-linux Zen 4 cross-platform validation)
 
 ### What this run measures

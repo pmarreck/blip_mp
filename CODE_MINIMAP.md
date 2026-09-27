@@ -9,7 +9,7 @@ Per-file index of important code locations. Refreshed 2026-05-03 after the M1–
 - `TERMINOLOGY.md` — encoding, arithmetic and storage vocabulary
 - `PLAN.md` — current work and backlog reconciliation
 - `docs/plan_context/legacy-roadmap.md` — preserved milestone history, decisions and detailed follow-ups
-- `RESULTS.md` — headline benchmark results, M5-5 controlled experiment writeup, win/loss breakdown
+- `RESULTS.md` — current byte-storage migration results, regressions and measurement limits
 - `BENCHMARK_RESULTS.md` — per-run history (Run 1..N) with each milestone's bench
 - `README.md` — project landing page (GitHub-facing)
 - `CODE_MINIMAP.md` — this file
@@ -112,11 +112,11 @@ Large-number arithmetic operating directly on BLIP payload bytes — no auxiliar
 - `divModSignedScratchNeed`, `divModKnuthScratchNeed` — scratch sizing helpers
 
 **Tier-3 conversion / Montgomery**:
-- `bytesToLimbs(bytes, limbs)` / `limbsToBytes(limbs, bytes)` — byte ↔ u64 array round-trip
-- `payloadToMagLimbs(pay, neg, limbs) -> usize` — fused: copy + negate + trim + bytesToLimbs (iteration 12)
-- `writeMagLimbsAsTwosComp(limbs, n_limbs, neg, dst) -> usize` — fused: limbsToBytes + negate + sign-ext + trim (iteration 12)
-- `negateLimbsInPlace(limbs)` — multi-limb 2's-complement negate (ADC chain)
-- `cmpLimbsGE(a, b)` / `subLimbsInPlace(a, b)` — Mont reduction helpers
+- `copyMagnitudePadded(bytes, out)` — byte copy with zero padding; no array conversion
+- `payloadToMagnitudeChunks(pay, neg, out)` — byte magnitude copy, sign handling and chunk count
+- `writeMagnitudeChunksAsTwosComp(bytes, count, neg, dst)` — canonical signed payload emission
+- `negateChunksInPlace(bytes)` — byte-buffer two’s-complement negation
+- `chunksGE` / `subtractChunksInPlace` — byte-buffer Montgomery helpers
 - `modInvNeg64(m: u64) -> u64` — Newton's method for (-m^-1) mod 2^64
 - `montMul` / `computeR2ModM` — arbitrary-odd-modulus Montgomery primitives (used by Mp.powm)
 
@@ -168,7 +168,7 @@ Exact arbitrary-precision fixed-point on top of Mp. **No NaN, no ±∞, no signe
 - Headline test: `0.1 + 0.2 == 0.3 EXACTLY` (and the inverse killshot: setF64(0.1) → toDecimal → 55-digit decimal expansion of the IEEE754 lie).
 
 ### `src/fft.zig` (2082 lines)
-Pure-Zig FFT mul stack (M6-3 + M6-4). Currently gated off in production but correctness-validated at every level.
+Pure-Zig FFT multiplication. Every residue is canonical BLIP in a 16-byte slot. Single-prime and CRT production dispatch are excluded by thresholds; Goldilocks is reachable at very large sizes.
 
 **Field abstraction** (M6-3.14):
 - `Field { p, primitive_root, max_ntt_len }` with comptime-generic methods
@@ -233,3 +233,12 @@ End-to-end FFI smoke test (M8 + iters 24/25 expansions). Exercises lifecycle (in
 
 ### `cli/bp.c` (~880 lines, M16)
 **`bp`** — Forth-style RPN exact-arbitrary-precision calculator. Stack-based; consumes `Mp` values via the public C surface (no direct Zig import — satisfies the "CLI dogfoods the FFI" architectural mandate). Supports three input forms (argv, stdin, heredoc), Forth `:` user-word definitions (threaded code), redefinition, and whitespace-tokenized argv args. Linux portability via `_POSIX_C_SOURCE` define for `strdup()`. Built as the `bp` binary alongside the static lib.
+
+## September 2026 representation audit
+
+- `src/chunks.zig`: unaligned LE scalar reads/writes over magnitude byte buffers.
+- `src/fft_residue.zig`: canonical positive BLIP residues, slot addressing and encoding boundary tests.
+- `src/fft_test_support.zig`: test-only adapters preserving independent numeric fixtures.
+- `src/storage_audit.zig`: AST-based check for stored wide-integer arrays and typed byte-array views in migrated arithmetic modules; classifier tested over allowed/forbidden sets.
+- `docs/OPTIMIZATION_RESEARCH.md`: GMP algorithm gaps, SIMD sources and proposed experiments.
+- `docs/benchmarks/`: September before/after logs and the preserved May results write-up.

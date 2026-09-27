@@ -1,401 +1,144 @@
-# blip_mp — Headline Results
+# Results after the BLIP-residue migration
 
-A pure-Zig arbitrary-precision integer library where the canonical storage is **BLIP-encoded bytes** (variable-length, self-describing) instead of GMP's fixed-width-limb-array representation. Goal: dramatic overhead reduction for small and medium bignums while remaining competitive with GMP on large numbers.
+Measured September 27, 2026 on an AMD Ryzen Threadripper 3990X (Zen 2,
+64 cores / 128 threads), Linux 6.18.43 x86_64, Zig 0.16.0 ReleaseFast,
+GMP 6.3.0. The arithmetic revision is `8a7c515`; the baseline is `a6d0d3e`.
 
-**Hypothesis** (per `SPEC.md`): a BLIP-storage bignum library can beat GMP by 1.5–3× on small-number workloads by skipping the struct + heap entirely, and at least match GMP on large-number arithmetic.
+BLIP wins the four small-addition buckets in this run: 4.57–4.81 ns versus
+5.81–5.95 ns for ordinary GMP, about 1.21–1.30× faster. Ordinary GMP wins the
+other 67 matched size/operation buckets. BLIP wins 46 of 71 matched buckets
+against GMP built without assembly. That control also differs in algorithms
+and compiler, so it cannot attribute the difference to storage alone.
 
-**Verdict: hypothesis validated, plus several stronger results.**
+All `./test` groups and `./build` passed. The GMP integration suite made
+13,053 comparisons with zero mismatches, including 24 forced single-prime,
+CRT and Goldilocks products. [Representation and verification](docs/REPRESENTATION.md)
+explains the byte-buffer audit and per-residue BLIP tests.
 
----
+## Before and after
 
-## TL;DR
+Three-run medians, ns/op. Positive change means slower than the baseline.
+The final column is BLIP/GMP: below 1 favors BLIP. Division bucket width is
+the dividend width; divisors use half as many bytes.
 
-- **All `i64`-fitting values: blip_mp beats GMP by 1.95–2.66×.** This is the headline architectural win — the BLIP-storage advantage compounds across the small/common bignum case.
-- **Cryptographically common multiplication sizes (RSA-1024, RSA-2048, RSA-3072): blip_mp beats GMP by 1.19–1.45×.** Twelve mul sizes total beat GMP after iter-33's Karatsuba-leaf chunking landed (added new wins at 4096-, 6144-, 8192-bit).
-- **RSA-2048 trifecta**: blip_mp beats GMP at all three core RSA-2048 ops — `mul` (1.19×), `divMod` (1.26× still slower; iter-14 M-G closed it from 1.69× → 1.26×), and `powm` (1.13× faster). RSA-2048 is the most-deployed crypto operation worldwide; this is the headline crypto-workload result.
-- **Addition at 768-bit and above: blip_mp beats GMP by 1.04–1.28×** (with tie at 1024 and competitive at smaller sizes after the bookkeeping cleanup landed). Eight add sizes total now beat GMP (768/1536/2048/3072/4096/6144/8192/16384/32768).
-- **Subtraction at 256-bit and above: blip_mp beats GMP by 1.03–2.11×** — ten Mp.sub sizes beat GMP (only 128-bit lags, same as the Mp.add picture, both for the same ABI/struct-overhead reason). Headline: 6144-bit Mp.sub is 12.7× faster than the pre-fix per-byte version (606 → 48 ns/op) once the chunked u512/u256/u128/u64 ladder was mirrored from `addPayloads` to the previously-untouched `subPayloads`.
-- **Modular exponentiation (RSA-2048): blip_mp beats GMP by 13%** — Mp.powm with arbitrary-modulus Montgomery + sliding-window + Möller-Granlund-improved inner div. At 1024-bit beats by 3%; at 3072-bit by 8%. This is the headline number for serious crypto workloads.
-- **Long division (2K-bit / 1K-bit): blip_mp beats GMP by 24%** — `Mp.divMod` with u64-base Knuth Algorithm D. 36× faster than the original byte-base implementation, and now ahead of GMP at this size.
-- **Correctness: 12029/12029 random cross-validation tests against GMP pass** — across the entire modular-arithmetic surface (add, sub, mul, div, mod, divMod, powm, invMod). Every result bit-identical to GMP's corresponding `mpz_*` function.
-- **Controlled experiment: GMP's hand-tuned aarch64 asm advantage on Apple Silicon is ~0%.** Built a second GMP variant with `--disable-assembly` and benchmarked. Modern clang `-O3` generates near-optimal ADCS chains from `__builtin_add_overflow`; the asm tuning that mattered on ARMv7/x86 doesn't move the needle on M-series with wide ADCS pipelines. **This means our remaining gaps to GMP are purely algorithmic, not asm.**
-
----
-
-## Final benchmark numbers (Apple Silicon aarch64-darwin, ReleaseFast)
-
-### Addition
-
-(Post-tier3-bookkeeping-cleanup — 2026-05-02. The 128-2048 bit range improved
-substantially after fast-path specialization for fixed sizes 24/32/48/64/96/
-128/192/256/384/512 bytes that compile to single u128/u192/.../u4096 +%
-ADC chains, plus an inline-fits stack path for ≤16-byte payloads.)
-
-| Bits | `Mp.add` (ns) | GMP (asm) (ns) | GMP (no-asm) (ns) | Mp/GMP-asm |
-|---:|---:|---:|---:|---:|
-| L=0 (immediate, 0..127) | **2.06** | 4.83 | 5.10 | **2.34×** ✅ |
-| L=2 (~12-bit) | **2.00** | 4.56 | — | **2.28×** ✅ |
-| L=3 (~21-bit) | **2.00** | 4.71 | — | **2.36×** ✅ |
-| L=4 (~30-bit) | **2.00** | 4.17 | — | **2.09×** ✅ |
-| 128 | 6.78 | 3.81 | 3.70 | 0.56× |
-| 192 | 6.36 | 4.31 | 4.03 | 0.68× |
-| 256 | 6.20 | 4.32 | 4.75 | 0.70× |
-| 512 | 6.51 | 5.71 | 5.81 | 0.88× |
-| **768** | **7.20** | **~7.5** | — | **~1.04×** ✅ |
-| 1024 | 8.94 | 8.46 | 8.28 | 0.95× tie |
-| **1536** | **10.15** | **~12** | — | **~1.18×** ✅ |
-| **2048** | **11.7** | **14.65** | 14.45 | **1.25×** ✅ |
-| **3072** | **18.2** | **21.49** | 21.15 | **1.18×** ✅ |
-| **4096** | **24.3** | **30.75** | 37.61 | **1.27×** ✅ |
-| **6144** | **41.0** | **46.24** | 46.28 | **1.13×** ✅ |
-| **8192** | **55.4** | **69.04** | 68.63 | **1.25×** ✅ |
-| **16384** | **104.4** | **133.30** | 132.04 | **1.28×** ✅ |
-| **32768** | **208.0** | **254.77** | 260.59 | **1.22×** ✅ |
-
-### Subtraction
-
-(Post-`subPayloads` chunked-loop upgrade — 2026-05-02. The previously-shipped
-`smallInlineTier3Add` and `sameSizeTier3Add(N)` fast paths are op-polymorphic
-via `comptime op: TierOp` and were already serving Mp.sub for size-matched
-small/medium sizes. The recent fix upgraded `subPayloads` — the chunked-loop
-fallback for unmatched sizes — from per-byte to u512/u256/u128/u64 chunks,
-mirroring `addPayloads`. This unlocked sub at >512-bit, which had been
-falling off a cliff to per-byte arithmetic.)
-
-| Bits | `Mp.sub` (ns) | GMP `mpz_sub` (ns) | Mp/GMP |
-|---:|---:|---:|---:|
-| 128 | 6.58 | 4.26 | 0.65× |
-| **256** | **4.13** | **5.49** | **1.33×** ✅ |
-| **512** | **4.38** | **5.87** | **1.34×** ✅ |
-| **768** | **4.38** | **9.23** | **2.11×** ✅ (headline ratio for sub) |
-| **1024** | **5.92** | **9.26** | **1.56×** ✅ |
-| **1536** | **6.22** | **12.23** | **1.97×** ✅ |
-| **2048** | **10.63** | **17.54** | **1.65×** ✅ |
-| **3072** | **16.09** | **24.26** | **1.51×** ✅ |
-| **4096** | **24.09** | **32.39** | **1.34×** ✅ |
-| **6144** | **47.77** | **49.27** | **1.03×** ✅ (was 606 → 48 ns post-fix) |
-| **8192** | **59.71** | **73.64** | **1.23×** ✅ |
-
-Ten of eleven sub sizes now beat GMP. Only 128-bit lags — the same residual ABI/struct-overhead picture as Mp.add at 128-bit.
-
-### Multiplication
-
-(Post-mul-cleanup — 2026-05-02. Two changes shipped: KARATSUBA_THRESHOLD bumped 256 → 384 bytes — fixes the 2048-bit anomaly that landed exactly at the threshold and cascades benefits up through every Karatsuba leaf — plus `smallInlineTier3Mul` and `sameSizeTier3Mul(N)` fast paths mirroring the M9 add/sub work. **RSA-2048 mul flipped from losing (0.91×) to winning (1.16×)** — the third RSA-2048 GMP-flip this session after powm and divMod.)
-
-| Bits | `Mp.mul` (ns) | GMP (asm) (ns) | Mp/GMP |
-|---:|---:|---:|---:|
-| **128** | **7.7** | **10.6** | **1.38×** ✅ (was 0.40×) |
-| **192** | **15.2** | **~22** | **~1.4×** ✅ (was 0.5×) |
-| 256 | 23.0 | 21.4 | 0.93× near-tie (was 0.67×) |
-| **384** | **27.9** | **39.8** | **1.43×** ✅ (was tie) |
-| **512** | **42.3** | **66.1** | **1.56×** ✅ |
-| **768** | **121** | **146** | **1.21×** ✅ |
-| **1024** | **210** | **252** | **1.20×** ✅ legacy RSA-1024 |
-| **1536** | **382** | **553** | **1.45×** ✅ |
-| **2048** | **673** | **800** | **1.19×** ✅ **RSA-2048** (was 0.91× LOSE) |
-| **3072** | **1265** | **1733** | **1.37×** ✅ recommended RSA-3072 (iter-33 boost) |
-| **4096** | **2208** | **2497** | **1.13×** ✅ (iter-33 LOSE→WIN flip) |
-| **6144** | **4215** | **5358** | **1.27×** ✅ (iter-33 TIE→WIN flip) |
-| **8192** | **7258** | **7860** | **1.08×** ✅ (iter-33 LOSE→WIN flip) |
-| 16384 | 26992 | 23576 | 0.87× (was 0.68×; Toom-3 inheriting Karatsuba leaf speedup) |
-| 32768 | 99750 | 54880 | 0.55× (FFT territory) |
-
-**Twelve of fifteen mul sizes beat GMP** (was nine before iter 33). The headline iter-33 gain came from chunking `addUnsignedFixedLen` (Karatsuba's `a_lo + a_hi` step) — 16-21% Karatsuba-leaf speedup that propagates through every recursion level and even into Toom-3 (which uses Karatsuba sub-mults). Three new mul GMP-flips: 4096-bit, 6144-bit, 8192-bit. The remaining 16384/32768 losses are FFT territory — GMP uses Schönhage-Strassen there; we have it shipped but gated off (M6-4-E.3 inline asm is the next lever; closes the 13-15% gap that remains).
-
-### Modular exponentiation — `Mp.powm` (M7-4.3 Montgomery + M-G-improved div in inner loop)
-
-The single most-used bignum operation in real crypto: RSA encrypt/decrypt/sign/verify, Diffie-Hellman key exchange, ECC scalar multiplication.
-
-Direct side-by-side from a single nix `packages.bench` build (Apple M4, ReleaseFast). Modulus forced odd, as expected for RSA primes / DH groups / ECC field primes.
-
-| Bits | `Mp.powm` (µs) | GMP `mpz_powm` (µs) | Mp/GMP |
-|---:|---:|---:|---:|
-| 512 | 75.89 | 73.59 | 1.03× (parity) |
-| **1024** | **505.27** | **521.39** | **0.97×** ✅ legacy RSA-1024 |
-| **2048** | **3333.11** | **3839.22** | **0.87×** ✅ (BEAT GMP by 13%, RSA-2048) |
-| **3072** | **11618.38** | **12567.48** | **0.92×** ✅ recommended RSA-3072 |
-
-The journey: M7-4.1 (square-and-multiply) was 40-50× behind GMP. M7-4.2 (sliding-window) saved 17-27%. M7-4.3 (arbitrary-odd-modulus Montgomery via CIOS) flipped the ratio. The recent M-G q_hat refinement in `divModKnuthU64` propagates an extra ~3% to powm at 2048-bit (now beating GMP by 13%, was 11%). Why we beat GMP at 2048+: GMP switches to Montgomery at a more conservative threshold; we don't allocate per-multiplication; M-series ARM scalar `umulh` is well-served by Zig's straightforward u128 codegen.
-
-### Division — `divModKnuthU64` (M7-3.u64 + Möller-Granlund 2/1+3/2 reciprocal q_hat)
-
-Inner-kernel microbench (limb-only, no Mp wrapper):
-
-| Op | Bits | `Mp` byte-base (ns) | `Mp` u64-base (ns) | GMP `mpz_tdiv_qr` (ns) | Mp(u64) / GMP |
+| Operation / bucket | Before ns | After ns | Change | GMP ns | After / GMP |
 |---|---:|---:|---:|---:|---:|
-| `divModKnuth` | 2048 / 1024 | 17,810 | **~470** | 614 | **0.77× (BEAT GMP by 24%)** ✅ |
-| `divModKnuth` | 4096 / 2048 | — | 1,614 | — | — |
-| `divModKnuth` | 8192 / 4096 | — | 5,445 | — | — |
-
-The byte-base implementation from M7-3 (`divModKnuth`) was 28.8× behind GMP. Reformulating to u64-base (b = 2^64 instead of b = 256) gave a **36× internal speedup at 2K-bit and flipped the inner-kernel ratio against GMP**. Möller-Granlund 2/1 + 3/2 reciprocal q_hat (iter 14) added another ~7% at the kernel level + larger gains at the integrated Mp.divMod level (next table).
-
-### Modular inverse — `invMod` (M7-5 → M9 Lehmer → M10 wider-window → iter-31 readInt fast paths)
-
-| Bits | byte-classical (ns) | u64-classical (ns) | u64 + Lehmer (ns) | u64 + M10 (ns) | post-M-G (ns) | **post-iter-31 (ns)** | GMP `mpz_invert` (ns) | Mp/GMP final |
-|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| 256 | — | 19,140 | 6,560 | 5,870 | 6,174 | **5,834** | 1,088 | 5.36× slower |
-| 512 | — | 48,130 | 14,510 | 12,350 | 13,712 | **12,174** | 2,461 | 4.95× slower |
-| 1024 | 187,000 | 128,680 | 33,600 | 28,360 | 30,158 | **24,990** | 5,769 | 4.33× slower |
-| **2048** | 681,000 | 418,550 | 91,100 | 49,900 | 55,977 | **45,351** | 13,956 | **3.25×** slower |
-
-The iter-31 column reflects the topU64 / topU128 readInt fast paths — single-LDR-x replacements for per-byte build loops in the Lehmer/HGCD inner-loop window extraction. **19% gain at 2048-bit (55,977 → 45,351 ns); gap to GMP 4.01× → 3.25×.** Plus iter 32 gave the same readInt treatment to mpToU64Mag (lehmerFinishSinglePrecision bottom-out helper) — small additional gain in the marginal compounding.
-
-Three cumulative speedups: (1) u64-base Knuth div from M7-3.u64 (1.4-1.6× downstream) + (2) Lehmer's GCD speedup from M9 (2.9-4.6× over classical EEA) + (3) **M10 wider-window Lehmer** with u128 matrix entries (1.18-1.83× over standard Lehmer; 1.83× at the headline 2048-bit RSA size). Combined: ~14× faster than the original byte-base baseline at 2048-bit; gap to GMP narrowed from 30-60× to 4-6×.
-
-M10 here is the *intermediate* form — wider-window Lehmer with u128 matrix entries instead of u62, doubling the iterations batched per multi-precision matrix-apply.
-
-**M11 update (2026-05-03):** True recursive HGCD primitive shipped (M11.1 iterative + M11.2.1 truly-recursive) and validated against EEA + M10 across {64..4096}-bit random pairs. **NOT wired into production**, however, because of a fundamental architectural mismatch: the asymptotic O(M(n) log n) advantage requires sub-quadratic M(n). With our Toom-3-class O(n^1.46) multiplication, the recursion-tree work ∑ M(n/2^i) sums to O(M(n)) — same complexity as the iterative form — while matrix coefficients DOUBLE per `composeOuter` and explode at deep recursion. Trial wire-up showed 60× regression at 8192-bit invMod. **M10 wider-window Lehmer remains practically optimal until FFT mul becomes viable for the inner ops** (gating on M6-4-E.3 hand-scheduled aarch64 inline asm or successor). The recursive primitive remains as a 3-way correctness oracle (invModLehmer / invModHGCD / invModHGCDRecursive all bit-equivalent) and as activation-ready code for when FFT mul lands.
-
-### Division — full `Mp.divMod` (with BLIP encoding overhead) vs GMP — post-M-G
-
-Tracking the cumulative gains across all div optimizations. Latest numbers from a fresh nix `packages.bench` build, post Möller-Granlund 2/1 + 3/2 reciprocal q_hat (iter 14):
-
-| Bits | iter 11 baseline (ns) | iter 12 (skip byte/limb) (ns) | **iter 14 (M-G) (ns)** | `mpz_tdiv_qr` (ns) | full Mp/GMP |
-|---:|---:|---:|---:|---:|---:|
-| 256 | 87 | 71 | **60.28** | 30.11 | 2.00× slower |
-| 512 | 125 | 112 | **100.26** | 73.44 | 1.37× slower |
-| 1024 | 238 | 226 | **201.80** | 160.88 | 1.25× slower |
-| **2048** | **634** | **609** | **526.70** | **416.52** | **1.26× slower** ← was 1.57× pre-iter12 |
-| 4096 | 1985 | 1918 | **1640.50** | 1292.70 | 1.27× slower |
-| 8192 | 6621 | 6438 | **5816.80** | 4235.20 | 1.37× slower |
-
-Cumulative gain at 2048-bit: 634 → 527 ns = **17% faster**, gap to GMP narrowed from 1.57× to 1.26× — closer to GMP than ever, but still not flipped. The remaining gap is the inherent encoding overhead (sign extraction + result re-encoding into canonical BLIP) that GMP's natively-limb `mpz_t` doesn't pay.
-
-**Future optimization**: plumb `Mp.divMod` to a limb-friendly internal representation, eliminating the residual encoding overhead. Could close the last ~25% to tie GMP. Tracked.
-
-`Mp.powm` doesn't suffer this overhead because Montgomery setup happens once per call and stays in limb form for the entire exp-loop — confirmed by powm beating GMP at 2048-bit.
-
-### Extended M5-5 controlled experiment: GMP-asm vs GMP-noasm on the new ops
-
-The original M5-5 finding ("GMP's hand-tuned aarch64 asm gives ~0% advantage on Apple Silicon") extended to the modular-arithmetic surface. Both GMP variants benched in the same nix build:
-
-| Op | Bits | GMP-asm (ns) | GMP-noasm (ns) | Asm advantage |
-|---|---:|---:|---:|---:|
-| `mpz_tdiv_qr` | 2048 | 400.48 | 406.02 | +1.4% (asm marginal) |
-| `mpz_tdiv_qr` | 8192 | 4144.80 | 4193.40 | +1.2% |
-| `mpz_powm` | 2048 | 3832395 | 3726270 | **−2.8% (noasm FASTER)** |
-| `mpz_invert` | 2048 | 14216 | 14166 | +0.4% (essentially tied) |
-
-**Confirms M5-5 across the entire Mp surface on aarch64**: the ~0% asm advantage on M-series isn't specific to add/sub/mul — it holds for div, powm, and invMod too. **On M-series, every one of our remaining gaps to GMP is purely algorithmic.**
-
-(All M-series numbers are 3-run medians on Apple M-series. See `BENCHMARK_RESULTS.md` for the full multi-run history including each optimization milestone.)
-
-### Cross-platform validation: x86_64-linux Zen 4 (2026-05-04)
-
-Same `nix build .#bench` package run on a NixOS x86_64 Framework laptop (AMD Ryzen 9 7940HS, Zen 4 architecture, AVX-512 + AVX2 + BMI1/BMI2 + ADX, 16 cores, 6.12.85 kernel, idle box). Two real x86_64-linux compatibility fixes were needed first:
-
-1. `build.zig`: unit-test binary needed explicit `link_libc = true` (macOS auto-links libSystem; Linux requires explicit declaration for `std.c.clock_gettime` used in bench helpers).
-2. `flake.nix`: GMP `--disable-assembly` is incompatible with GMP's default x86_64 "fat build" (runtime CPU dispatch). Filter `--enable-fat` from `gmp-noasm` configure flags. Harmless on aarch64 (no fat build there).
-
-After fixes: **all 213 Zig unit tests + 12029 GMP cross-validation + C FFI smoke pass on x86_64-linux**. The library is bit-portable.
-
-#### The headline x86_64 finding: GMP-asm gives 1.17×–3.98× advantage on Zen 4
-
-In stark contrast to aarch64's ~0%, GMP's hand-tuned x86_64 asm IS load-bearing:
-
-| Op | Bits | GMP-asm (ns) | GMP-noasm (ns) | **asm advantage** |
-|---|---:|---:|---:|---:|
-| `mpz_add` | 1024 | 7.28 | 13.13 | **1.80× (asm 80% faster)** |
-| `mpz_add` | 4096 | 18.99 | 51.55 | **2.71×** |
-| `mpz_add` | 8192 | 33.43 | 105.10 | **3.14×** |
-| `mpz_add` | 32768 | 138.33 | 433.68 | **3.14×** |
-| `mpz_mul` | 1024 | 122.5 | 456.2 | **3.72×** |
-| `mpz_mul` | 4096 | 1221.5 | 4596.2 | **3.76×** |
-| `mpz_mul` | 8192 | 3643.7 | 14142.8 | **3.88×** |
-| `mpz_mul` | 16384 | 11002 | 42683 | **3.88×** |
-| `mpz_tdiv_qr` | 2048/1024 | 216.6 | 593.2 | **2.74×** |
-| `mpz_tdiv_qr` | 8192/4096 | 2210 | 6930 | **3.14×** |
-| `mpz_powm` | 2048 | 1914592 | 6602785 | **3.45×** |
-| `mpz_powm` | 3072 | 5995578 | 21407709 | **3.57×** |
-
-**Architectural conclusion:** GMP's 1990s+-accumulated x86 asm tuning (`mpn` inner loops with hand-scheduled `adc/sbb/mul`/`mulx`/`adx`/`adox` chains, AVX2/AVX-512 paths) IS doing real work on x86_64 — 2-4× speedup over the C reference on Zen 4. The M5-5 conclusion ("every gap is purely algorithmic, no asm needed") **only holds on aarch64**. On x86_64, GMP's asm advantage is a real engineering moat.
-
-#### Same-platform comparison: blip_mp (pure-Zig, no asm) vs both GMP variants
-
-For the storage-paradigm question (blip-bytes vs limb-array), the GMP-noasm baseline is the fair comparison:
-
-| Op | Bits | blip_mp (ns) | GMP-asm (ns) | GMP-noasm (ns) | blip / GMP-asm | **blip / GMP-noasm** |
-|---|---:|---:|---:|---:|---:|---:|
-| immediate add | L=0 | 3.36 | 4.44 | 4.90 | **0.76× ✅** | **0.69× ✅** (blip 1.46× faster vs noasm) |
-| add | 1024 | 11.65 | 7.28 | 13.13 | 1.60× | **0.89× ✅** (blip 12% faster vs noasm) |
-| add | 4096 | 39.45 | 18.99 | 51.55 | 2.08× | **0.77× ✅** (blip 30% faster vs noasm) |
-| add | 8192 | 70.18 | 33.43 | 105.10 | 2.10× | **0.67× ✅** (blip 50% faster vs noasm) |
-| mul | 1024 | 253.2 | 122.5 | 456.2 | 2.07× | **0.55× ✅** (blip 1.80× faster vs noasm) |
-| mul | 2048 | 865.3 | 386.5 | 1440.9 | 2.24× | **0.60× ✅** (blip 1.67× faster vs noasm) |
-| mul | 8192 | 8967 | 3644 | 14143 | 2.46× | **0.63× ✅** (blip 1.58× faster vs noasm) |
-| powm | 2048 | 3806915 | 1914592 | 6602785 | 1.99× | **0.58× ✅** (blip 1.73× faster vs noasm) |
-| divMod | 2048 | 452.8 | 216.6 | 593.2 | 2.09× | **0.76× ✅** (blip 31% faster vs noasm) |
-| invMod | 2048 | 48894 | 10357 | 17044 | 4.72× | **2.87× slower** (algorithm gap, see M11.2-PROD) |
-
-**Two clean conclusions on x86_64:**
-
-1. **The BLIP-storage paradigm wins again on x86_64** — blip-pure-Zig beats GMP-noasm at almost every size and op, with ratios reaching 1.5×–1.8× faster than the GMP C reference for mul, powm, and large add. The architectural advantage (storage-as-wire-form, sign-extended inline tail, byte-direct chunked arith, Möller-Granlund div, Mont-form powm) is platform-independent.
-
-2. **GMP-asm-x86_64 is currently the practical winner on x86_64** for tier-3 sizes — GMP's hand-tuned asm overpowers our pure-Zig codegen by 1.5–4×. Closing this gap on x86_64 would require either (a) hand-scheduled aarch64-style + x86_64-style inline asm in our codebase (substantial maintenance burden, parallel to M6-4-E.3) or (b) Zig's compiler getting better at emitting `adcx`/`adox` chains and AVX2/AVX-512 SIMD for big-integer code.
-
-The most-deployed crypto operation worldwide — RSA-2048 powm — runs at ~3.8 ms in blip_mp on Zen 4 vs ~1.9 ms in GMP-asm. blip_mp's RSA-2048 still beats GMP-asm by 13% on M-series; on Zen 4 the same code is 2× behind. **Hardware platform fundamentally re-orders the win/loss matrix.**
-
----
-
-## The single most important result: M5-5 controlled experiment
-
-We built a second GMP variant via `pkgs.gmp.overrideAttrs(--disable-assembly)` and ran the same bench against it. **Every difference between blip_mp and GMP is now algorithmic, not asm-tuning.**
-
-| Bits | GMP-asm | GMP-noasm | Asm advantage |
-|---:|---:|---:|---:|
-| 128 add | 3.64 | 3.70 | -2% |
-| 256 add | 4.18 | 4.75 | -14% (asm slightly faster) |
-| 1024 add | 8.20 | 8.28 | -1% |
-| **4096 add** | 30.56 | 37.61 | **-19% (noasm faster)** |
-| **32768 add** | 274.41 | **260.59** | **+5% (noasm FASTER)** |
-| 1024 mul | 255.70 | 250.46 | -2% |
-| 4096 mul | 2504.45 | 2477.30 | -1% |
-| 32768 mul | 54564 | 54857 | -1% |
-
-**Translation:** Modern clang at `-O3` on Apple's M-series generates near-optimal ADCS chains from C `__builtin_add_overflow`. The hand-asm tuning that mattered on ARMv7 / x86 32-bit doesn't move the needle on aarch64 with wide ADCS pipelines. At 4096-bit add and 32768-bit add, GMP's C code is *faster* than its asm — likely because the C version inlines better with surrounding code while the asm is an opaque call boundary.
-
-This is a striking architectural finding in its own right: **on modern aarch64, hand-tuned asm for bignum arithmetic gives near-zero benefit over `-O3` clang.**
-
----
-
-## Where blip_mp wins, and why
-
-**The wins are architectural, not implementation luck:**
-
-### 1. The i64 universe: 1.95–2.66× over GMP
-
-The "sign-extended inline tail" trick. `Mp` keeps the canonical BLIP encoding in `inline_buf[0..inline_len]` (what `bytes()` exposes) AND maintains the invariant that `inline_buf[1..9]` always holds the full i64 value sign-extended LE. Internal arithmetic reads the value as a single `LDR` u64 load — no header parse, no per-byte loop, no sign-extension at use site.
-
-GMP's `mpz_t` requires reading the struct + indirect-loading `_mp_d`. blip_mp's inline values ARE the value — no indirection, no allocation, no struct layout cost.
-
-### 2. 4096+ bit addition: 1.03–1.28×
-
-Direct-write into `r.heap_buf` via `heap_offset`. The result payload is computed at offset `HDR_RESERVE` (10 bytes from the start), then the header is written at `HDR_RESERVE - hdr_len` so it sits directly before the payload. `bytes()` returns `heap_buf[heap_offset..heap_offset+heap_used]`. **No shift, no extra memcpy.** This eliminates the scratch → out_buf → setBytes copy chain that GMP's `mpz_add` doesn't suffer from (since GMP's mpz_t buffers are written in-place).
-
-The chunked-u512 cascading inner loop (u512 → u256 → u128 → u64 → u8 fall-through via Zig's wide-int types compiling to ADCS chains) does ~8 ADCS instructions per u512 chunk on aarch64. At 4096+ bits, the inner-loop arithmetic dominates the per-op overhead.
-
-### 3. Cryptographically common multiplication: 512–1536 bit, 3072 bit
-
-Karatsuba with the **carry-bit trick** (split each `(a_lo + a_hi)` sum into a `t`-byte low + 1-bit carry, distribute via the polynomial identity to keep all recursive sub-mults at exactly `t` bytes — preserves 8-byte alignment for the chunked-u64 leaf). This let our Karatsuba beat GMP's at the sizes where GMP also uses Karatsuba.
-
-GMP wins at 4K+ bit mul because they have **Toom-Cook 3-way / Toom-Cook 4-way / Schönhage-Strassen FFT** dispatched at appropriate thresholds. We have Karatsuba and Toom-3 (the latter only above 16K-bit, where it gives ~3% over Karatsuba). FFT mul is the natural next major feature.
-
----
-
-## Where blip_mp loses, and what would close it
-
-### 1. 128–2048 bit addition: bookkeeping overhead
-
-Constant-time per-op work in `tier3Op` — `bytes()` call, aliasing check, `ensureHeapCapacity`, `canonicalLen` scan, result-classification cascade. Total ~7–10 ns regardless of size. At small sizes this is most of total op time. GMP's `mpz_add` dispatches into `mpn_add_n` with much less ceremony.
-
-**Closeable in pure Zig** with more aggressive inlining + size-specialized fast paths. Not asm-related (per M5-5).
-
-### 2. 4K+ bit multiplication: FFT primitives shipped, gap closed but not flipped
-
-GMP uses Schönhage-Strassen Number-Theoretic Transform (NTT) at high thresholds. O(n log n log log n) vs our Karatsuba's O(n^1.58). Originally GMP was 1.93× faster than blip_mp at 32K-bit purely on this algorithmic difference.
-
-**M6-3 / M6-4 status (2026-05-02):** A full pure-Zig NTT FFT mul stack now lives in `src/fft.zig` — single-prime NTT over p=998244353, two-prime CRT extension to 256K-bit, NEON-SIMD vectorized butterflies, plus scaffolding variants (Stockham auto-sort, Montgomery-form NTT, radix-4). All correctness-validated bit-identically against GMP and schoolbook. The vectorized NTT in production reduced 32K-bit Mp.mul from 191K → 135K ns (1.40× full-FFT speedup), closing the FFT-vs-Toom-3 gap from 1.93× to 1.15×.
-
-**FFT remains gated off in production** (`FFT_THRESHOLD = 99999` in `src/tier3.zig`) because Toom-3 still wins at 117K ns vs FFT's 135K — a 13–15% remaining gap. Two non-obvious findings emerged from the implementation effort:
-
-- **Pure-NEON Montgomery integrates SLOWER on M4** despite winning the microbench (0.70 vs 0.76 ns/vec_op). Asm inspection showed the existing `mulModP_x2` is using M4's two scalar mul pipes for `mul`+`umulh`+`msub` per lane, *while* the NEON pipe handles surrounding add/sub/load/store. Pure-NEON Mont moves all work onto NEON, starving the parallelism.
-- **Radix-4 NTT does NOT reduce mults** the way the floating-point FFT literature claims. The classical 25% reduction depends on multiplication by `i` (4th root of unity) being a free real-imaginary swap. In NTT, `i = ω_4 mod p` is a generic non-trivial constant — full mulModP. Verified at N=8192: radix-2 = 53,248 muls; radix-4 mixed = 53,248 muls (identical).
-
-The remaining 13–15% gap requires alloc-elimination (caller-supplied scratch, ~6–9K ns), wiring Stockham into production with that scratch, and possibly hand-scheduled aarch64 inline asm for the butterfly inner loop. Roadmap detail in PLAN.md M6-4-E.
-
-**CRT-FFT crossover at very large sizes (iter-22 measurement, 2026-05-03):** Investigated whether CRT-FFT becomes competitive at very large operand sizes (where FFT's asymptotic O(n log n log log n) eventually beats Toom-3's O(n^1.46)). Direct measurement at sizes up to the 256K-bit single-operand cap:
-
-| bits | Toom-3 (ns) | CRT-FFT (ns) | ratio |
-|---:|---:|---:|---:|
-| 65536 | 285K | 810K | 2.84× slower |
-| 98304 | 505K | 1862K | 3.69× |
-| 131072 | 864K | 1871K | 2.16× |
-| 196608 | 1517K | 4292K | 2.83× |
-| 262144 | 2618K | 4321K | 1.65× |
-
-CRT-FFT loses across the entire supported range; the asymptotic crossover sits beyond 262K-bit (likely 1M+ bit). CRT doubles the NTT work (two convolutions instead of one), so the constant factor is large. Single-prime FFT (without CRT, capped at 56K-bit operands) is more competitive in its range but still behind Toom-3 there. **Conclusion: FFT-class algorithms in this codebase need either inline-asm-driven constant-factor improvement (M6-4-E.3) or operand sizes far above standard crypto (which itself doesn't go past 8K-bit).**
-
-### 3. Toom-3 with diminishing returns
-
-Our Toom-3 implementation is correct and dispatched at 16K-bit threshold, providing a small (~3%) win at 32K-bit. Below 16K-bit, Karatsuba's lower constant overhead wins. Above 32K-bit (untested), Toom-3's asymptotic O(n^1.46) would presumably grow vs Karatsuba's O(n^1.58).
-
-GMP's Toom-3 wins more than ours because their leaves ARE the hand-tuned `mpn_mul_basecase`. After M5-5, we know this wouldn't matter on M-series — but on platforms where it does, that gap exists. Closing it requires chunking the few remaining helpers (`divExactBy3`, `subUnsignedInPlace`'s edge cases) and deeper recursion into chunked schoolbook leaves. Modest expected gain.
-
----
-
-## Architecture summary
-
-**Storage:** BLIP-encoded bytes (signed two's-complement payload per `SPEC.md` §Sign convention). Public `bytes()` returns the canonical BLIP-encoded byte slice — also the wire form. **No `mpz_export` round-trip needed for serialization** — hypothesis #4 from the spec is realized.
-
-**Mp struct (72 bytes, one cache line + 8B):**
-- `inline_buf: [24]u8 align(8)` — encoded bytes for inline-mode values (≤ 24 bytes encoded)
-- `inline_len: u8` — 0..24 if inline, 0xFF (sentinel) if heap
-- `heap_offset: u8` — offset into `heap_buf` where the active value starts
-- `cached_pay_off: u8`, `cached_sign: i8`, `cached_pay_len: u32` — cached metadata to skip per-op header parse
-- `heap_used: usize` — active length within heap_buf at `heap_offset`
-- `heap_buf: []u8` — full allocation when in heap mode
-- `allocator: std.mem.Allocator`
-
-**Tier dispatch (per SPEC.md):**
-- **Tier 0/1**: values fitting i64 (encoded ≤ 9 bytes). Inline storage. Hot-path `add`/`sub`/`mul` use the inline-tail invariant for single-load decode + native i64 arithmetic with overflow promotion.
-- **Tier 3**: values exceeding i64. Direct byte-level two's-complement arithmetic (no auxiliary limb-array conversion). Multiplication routes through Karatsuba (≥ 64 bytes) or Toom-3 (≥ 2048 bytes).
-
-**Test infrastructure:**
-- 76+ unit tests for encoding/arithmetic correctness
-- `tests/integration/cross_check.zig` runs **8240 random comparisons against GMP** across 18 bit-widths × 3 ops. Wired into `./test`. Caught a real bug in test-fixture construction that would have masqueraded as a code bug.
-- `tests/benchmark/blip_mp_bench.zig` and `tests/benchmark/gmp_bench.c` for perf measurement
-- `gmp_noasm_bench` (M5-5) for the asm-vs-noasm controlled experiment
-
----
-
-## Project journey (16 milestone commits)
-
-| Milestone | What | Effect |
-|---|---|---|
-| Scaffold | BLIP integer encoding from spec, build/test scripts, flake.nix | Foundation |
-| M1 | `Mp` bignum, signed canonical encoding, tier-0/1 add/sub/mul | First working impl |
-| M1.5 | Drop unsigned encoder duplicate (BDFN (Benevolent Dictator For Now)'s "we don't need both" insight) | Cleanup |
-| M1.6 (SBO) | Inline 24-byte buffer in `Mp` struct | Hypothesis validated: 1.68× over GMP at i64 |
-| M2 | Bench harness vs GMP | Found ourselves losing without SBO |
-| A | Immediate-range (0..127) fast paths in `Mp.setI64`/`getI64` | 2.18× over GMP at i64 immediate |
-| M3 | Tier 3 byte-direct arithmetic (no limbs!) — BDFN's key insight | Tier-3 add wired in |
-| M4-1 | Heap buffer reuse via `ensureHeapCapacity` | Halved tier-3 gap |
-| M4-2 | Sign-extended inline tail trick | 1.95-2.66× over GMP across i64 universe |
-| M4-3 | Tier 3 mul via byte-direct schoolbook with sign-magnitude | Mul correctness for any size |
-| M4-4 | Chunked u512/u256/u128/u64 cascade for tier-3 add | 4096-bit add ties GMP |
-| M4-5 | Full bit-width sweep (128 to 32768 bits) | Discovered convergence pattern |
-| M4-6 | Karatsuba mul + carry-bit trick + chunked helpers | 1.20-1.50× over GMP at 384-1536 mul |
-| M4-7 | Direct-write tier-3 add via `heap_offset` | Beat GMP at 6144-32768 bit add |
-| M4-8 | GMP cross-validation (8240 random tests) | Correctness rigorously proven |
-| M5-1 | Cache `(payload_offset, sign, payload_len)` in `Mp` struct | Skip per-op header parse |
-| M5-2 | Inline `applyTier3Op` (no function-call overhead) | Closed small-N gap further |
-| M5-3 | Toom-3 implementation (initially dispatch disabled) | Future work in repo |
-| M5-5 | Built GMP-noasm and benched — **asm advantage = ~0% on M-series** | Reframed all gap analysis |
-| M6-1 | Chunked Toom-3 helpers + dispatch at 16K-bit threshold | Toom-3 wins by 3% at 32K-bit |
-
----
-
-## Final state, by the numbers
-
-- **20 commits on `yolo` branch**
-- **76+ unit tests + 8240 cross-validation checks: all passing**
-- **Pure Zig** — no C runtime dep, no inline asm, no LGPL link constraint
-- **Single 72-byte `Mp` struct** (one cache line + 8B)
-- **Wins over GMP at every size where the BLIP-storage advantage applies**
-- **Controlled experiment proves the gap is algorithmic, not asm**
-
----
-
-## What's next (the path to total domination)
-
-1. **Schönhage-Strassen FFT mul** for ≥ 8K-bit operands. Closes the largest remaining gap. Multi-day implementation: NTT over prime field, butterflies, modular arithmetic, carry propagation. Pure Zig viable.
-2. **Tighter `tier3Op` bookkeeping** — fold `bytes()`, aliasing check, ensureHeapCapacity into a single inline path. Closes the 128–2048 bit add gap. Probably ~half-day refactor.
-3. **Toom-4** as a step between Toom-3 and FFT for 4K-16K bit mul. Modest expected gain.
-4. **Cross-platform validation** — current numbers are aarch64-darwin (Apple M-series). x86_64 with AVX-512 may shift the picture, especially around the asm-vs-clang result.
-5. **C FFI header** + downstream consumer demos.
-
-But the core research question is answered: **BLIP-storage is competitive with limb-storage in pure-Zig form**, and **wins decisively at the most common cryptographic operations**. The remaining losses are algorithmic depth (Toom/FFT), not the storage paradigm itself.
-
----
-
-*Written 2026-05-02 EST. See `BENCHMARK_RESULTS.md` for the full per-run history, `PLAN.md` for the milestone checklist, `CODE_MINIMAP.md` for the per-file index, and `SPEC.md` for the original design hypothesis.*
+| add L=0 (immediate, 0..127) | 4.56 | 4.57 | +0.2% | 5.95 | 0.77 |
+| add L=2 (128..32K) | 4.73 | 4.80 | +1.5% | 5.81 | 0.83 |
+| add L=3 (~16-bit..~24-bit) | 4.73 | 4.81 | +1.7% | 5.81 | 0.83 |
+| add L=4 (~32-bit) | 4.73 | 4.81 | +1.7% | 5.82 | 0.83 |
+| add 32768-bit | 351.80 | 357.94 | +1.7% | 156.88 | 2.28 |
+| mul 1024-bit | 370.28 | 387.15 | +4.6% | 143.55 | 2.70 |
+| mul 2048-bit | 1162.27 | 1194.56 | +2.8% | 464.22 | 2.57 |
+| mul 32768-bit | 148597.00 | 162544.00 | +9.4% | 34480.10 | 4.71 |
+| mul 65536-bit | 440462.00 | 504407.00 | +14.5% | unmeasured | n/a |
+| divMod 1024-bit | 345.65 | 351.88 | +1.8% | 143.87 | 2.45 |
+| divMod 2048-bit | 818.26 | 832.45 | +1.7% | 310.62 | 2.68 |
+| divMod 65536-bit | 398028.00 | 404432.00 | +1.6% | 76326.40 | 5.30 |
+| powm 1024-bit | 759259.00 | 833949.00 | +9.8% | 296565.00 | 2.81 |
+| powm 2048-bit | 5205600.00 | 5588680.00 | +7.4% | 2020870.00 | 2.77 |
+| invMod 2048-bit | 62701.70 | 62895.40 | +0.3% | 15472.40 | 4.07 |
+
+ATTENTION: 65,536-bit multiplication regressed 14.5% (baseline range
+438,730–441,883 ns; after range 492,126–507,214 ns). The 32,768-bit product
+regressed 9.4%, and 1,024-bit powm regressed 9.8%. These costs are retained
+in the report. They have not been attributed to a specific instruction or
+allocation change. Those multiplication sizes do not dispatch to FFT, so
+BLIP residue encoding is not an explanation for those particular regressions.
+
+## Method and limits
+
+- `./bm --stable 3` ran before and after, with warmup and per-bucket ranges.
+  Both builds used ReleaseFast and emitted no debug banner. `MUTE_DEBUG_STATUS`
+  was not set. Inputs and iteration counts were unchanged across revisions.
+- The full machine was not reserved for the benchmark. Other projects were
+  active; repetitions expose some variation but cannot eliminate load, CPU
+  frequency or process-layout effects. There was no CPU affinity pinning.
+- GMP and BLIP use the existing size-matched suites. Not all operand pools are
+  byte-identical between the two implementations. These are measured suite
+  comparisons, not universal rankings or a controlled storage-only ablation.
+- The legacy `./bm` combined table prints zeros for missing GMP buckets. They
+  mean **unmeasured**, not zero runtime. The derived TSV uses `NA`; this report
+  excludes them from win counts and ratios.
+- The normal Mp.mul sweep ends at 98,304 bits, below the reachable Goldilocks
+  dispatch threshold. Forced FFT timings are needed to measure encoded-residue
+  costs; correctness tests separately exercise much larger FFT operands.
+- Per-operation timings use a monotonic wall clock. Hyperfine's process totals
+  provide CPU (user/system) and wall time for the complete BLIP benchmark,
+  including setup; they are not per-operation CPU times or a GMP comparison.
+
+Raw evidence: [before](docs/benchmarks/2026-09-27-before.txt),
+[after](docs/benchmarks/2026-09-27-after.txt),
+[all operation comparisons](docs/benchmarks/2026-09-27-comparison.tsv).
+Nix binary paths are recorded in the raw logs for exact local reruns.
+
+The [May results](docs/benchmarks/2026-05-results.md) remain a historical record
+for older implementations and machines. The [optimization research](docs/OPTIMIZATION_RESEARCH.md)
+distinguishes known algorithm gaps, existing SIMD techniques and untested
+BLIP-specific experiments.
+
+## Forced FFT cost
+
+N=8,192 transform points, 200 passes per sample, medians of three samples.
+Input refresh and twiddle construction are outside each pass timing; decoding
+and encoding inside the butterflies are included. Each sample uses the same
+seeded data, alternating baseline and migrated binaries.
+
+| Transform | Before ns/pass | After ns/pass | After / before |
+|---|---:|---:|---:|
+| nttWithTwiddles_scalar | 114461 | 286664 | 2.50 |
+| nttWithTwiddlesVec | 75952 | 261394 | 3.44 |
+| nttWithTwiddlesMontVec | 95573 | 264511 | 2.77 |
+| nttStockhamVec | 66171 | 256393 | 3.87 |
+| nttStockhamVecU4 | 65415 | 244008 | 3.73 |
+| nttStockhamVecU8 | 71808 | 240692 | 3.35 |
+| nttStockhamMontVec | 81746 | 259636 | 3.18 |
+| nttRadix4Vec | 85858 | 197512 | 2.30 |
+
+ATTENTION: these transform variants take roughly 2.30–3.87× their former time.
+This is the measured cost of the current BLIP-slot implementation, not a lower
+bound on BLIP arithmetic. Radix-4 is the fastest measured encoded variant here,
+which makes register-local stage fusion a useful follow-up experiment. No
+production threshold was changed on the basis of these primitive timings.
+
+Raw [alternating FFT samples](docs/benchmarks/2026-09-27-fft.txt) include scalar
+and SIMD primitive measurements as well as full passes. The larger slot
+capacity doubles the coefficient/twiddle buffer allocation from 8 to 16 bytes
+per element; it does not imply the entire Mp operation doubles its memory.
+
+## Whole-process CPU and wall time
+
+Hyperfine, one warmup and three measured executions per binary. CPU columns
+are mean process user/system seconds; wall is mean ± standard deviation.
+
+| Workload | Wall seconds | User CPU seconds | System CPU seconds |
+|---|---:|---:|---:|
+| before | 13.406 ± 0.087 | 13.311 | 0.013 |
+| after | 13.670 ± 0.133 | 13.576 | 0.011 |
+| before-fft | 0.409 ± 0.007 | 0.405 | 0.002 |
+| after-fft | 0.911 ± 0.007 | 0.904 | 0.002 |
+
+[Full-benchmark timing JSON](docs/benchmarks/2026-09-27-process-times.json)
+and [FFT timing JSON](docs/benchmarks/2026-09-27-fft-process-times.json) retain
+every wall-time sample. The aggregate full benchmark rose about 2%; aggregate
+FFT-microbenchmark time includes scalar primitives and setup, so it is not the
+same ratio as a single NTT pass.
+
+## Reproducing the runs
+
+For a fresh current-revision measurement, run `./bm --stable 3` and `./bm --micro`.
+For the exact local comparison recorded here, use the binaries named in the
+before/after logs:
+
+```bash
+nix develop -c hyperfine --warmup 1 --runs 3 \
+  --export-json process-times.json \
+  --command-name before '/nix/store/iql16fa0qaynjldjhpxzhs7ws84l2b8v-blip_mp-bench-0.0.1/bin/blip_mp_bench' \
+  --command-name after '/nix/store/z5b52wrpcsx9grgpi82x3sp4xcfv3kps-blip_mp-bench-0.0.1/bin/blip_mp_bench'
+```
+
+Substitute `fft_microbench` for `blip_mp_bench` to measure whole FFT-benchmark
+process times. For the per-transform table, run those two FFT binaries
+alternately three times and take each implementation's median `ns_per_pass`.
+The Nix store paths are local evidence; rebuilding the two commits provides
+portable source reproduction, subject to the machine and dependency versions.

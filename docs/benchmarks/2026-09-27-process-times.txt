@@ -1,0 +1,11 @@
+Benchmark 1: before
+  Time (mean ± σ):     13.406 s ±  0.087 s    [User: 13.311 s, System: 0.013 s]
+  Range (min … max):   13.318 s … 13.491 s    3 runs
+ 
+Benchmark 2: after
+  Time (mean ± σ):     13.670 s ±  0.133 s    [User: 13.576 s, System: 0.011 s]
+  Range (min … max):   13.579 s … 13.823 s    3 runs
+ 
+Summary
+  before ran
+    1.02 ± 0.01 times faster than after
