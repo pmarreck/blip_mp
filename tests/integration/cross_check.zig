@@ -206,8 +206,12 @@ fn opName(op: Op) []const u8 {
 }
 
 fn runOp(
-	blip_r: *Mp, blip_a: *const Mp, blip_b: *const Mp, op: Op,
-	scratch_q: *Mp, scratch_r: *Mp,
+	blip_r: *Mp,
+	blip_a: *const Mp,
+	blip_b: *const Mp,
+	op: Op,
+	scratch_q: *Mp,
+	scratch_r: *Mp,
 ) !void {
 	switch (op) {
 		.add => try blip_r.add(blip_a, blip_b),
@@ -220,8 +224,12 @@ fn runOp(
 }
 
 fn gmpOp(
-	gmp_r: *mpz_t, gmp_a: *const mpz_t, gmp_b: *const mpz_t, op: Op,
-	scratch_q: *mpz_t, scratch_r: *mpz_t,
+	gmp_r: *mpz_t,
+	gmp_a: *const mpz_t,
+	gmp_b: *const mpz_t,
+	op: Op,
+	scratch_q: *mpz_t,
+	scratch_r: *mpz_t,
 ) void {
 	switch (op) {
 		.add => __gmpz_add(gmp_r, gmp_a, gmp_b),
@@ -415,9 +423,9 @@ const POWM_SIZES = [_]usize{ 8, 16, 32, 60, 64, 128, 192, 256, 384, 512, 768, 10
 /// guaranteeing divExact terminates). Range: [-10000, 10000] roughly.
 fn pickTerminatingNum(rng: std.Random) i64 {
 	const pool = [_]i64{
-		1,    2,    4,    5,    8,    10,   16,    20,    25,    32,
-		40,   50,   64,   80,   100,  125,  128,   160,   200,   250,
-		256,  320,  400,  500,  625,  800,  1000,  1250,  1600,  2000,
+		1,    2,    4,    5,    8,    10,   16,    20,   25,   32,
+		40,   50,   64,   80,   100,  125,  128,   160,  200,  250,
+		256,  320,  400,  500,  625,  800,  1000,  1250, 1600, 2000,
 		2500, 3125, 4000, 5000, 6250, 8000, 10000,
 	};
 	const v = pool[rng.intRangeLessThan(usize, 0, pool.len)];
@@ -531,6 +539,64 @@ fn mpzToMp(out: *Mp, z: *const mpz_t, allocator: std.mem.Allocator) !void {
 	const hdr_len = try blip_mp.tier3.writeHeader(blip_buf, payload.len);
 	@memcpy(blip_buf[hdr_len .. hdr_len + payload.len], payload);
 	try out.setBytes(blip_buf[0 .. hdr_len + payload.len]);
+}
+
+// Force each transform backend, including sizes outside normal benchmark dispatch.
+fn checkEncodedFft(allocator: std.mem.Allocator) !usize {
+	const fft = blip_mp.fft;
+	var rng = std.Random.DefaultPrng.init(0xb11f_2026);
+	var checks: usize = 0;
+	var ga: mpz_t = undefined;
+	var gb: mpz_t = undefined;
+	var product: mpz_t = undefined;
+	__gmpz_init(&ga);
+	defer __gmpz_clear(&ga);
+	__gmpz_init(&gb);
+	defer __gmpz_clear(&gb);
+	__gmpz_init(&product);
+	defer __gmpz_clear(&product);
+	for ([_]usize{ 7, 257, 4096, 16385, 100000 }) |size| {
+		const a = try allocator.alloc(u8, size);
+		defer allocator.free(a);
+		const b = try allocator.alloc(u8, size);
+		defer allocator.free(b);
+		const expected = try allocator.alloc(u8, 2 * size);
+		defer allocator.free(expected);
+		const actual = try allocator.alloc(u8, 2 * size);
+		defer allocator.free(actual);
+		for (0..2) |pattern| {
+			if (pattern == 0) {
+				rng.random().bytes(a);
+				rng.random().bytes(b);
+			} else {
+				@memset(a, 255);
+				@memset(b, 255);
+			}
+			__gmpz_import(&ga, a.len, -1, 1, 0, 0, a.ptr);
+			__gmpz_import(&gb, b.len, -1, 1, 0, 0, b.ptr);
+			__gmpz_mul(&product, &ga, &gb);
+			var expected_len: usize = 0;
+			_ = __gmpz_export(expected.ptr, &expected_len, -1, 1, 0, 0, &product);
+			for (0..3) |backend| {
+				if ((backend == 0 and 2 * size > fft.MAX_FFT_COMBINED_LEN) or
+					(backend == 1 and 2 * size > fft.MAX_FFT_CRT_COMBINED_LEN)) continue;
+				const actual_len = if (backend == 0) try fft.mulMagnitudes(allocator, a, b, actual) else if (backend == 1) try fft.mulMagnitudesCRT(allocator, a, b, actual) else blk: {
+					var n: usize = 1;
+					while (n < size) n *= 2;
+					const bytes = n * fft.residue.slot_bytes;
+					const scratch = try allocator.alloc(u8, 4 * bytes);
+					defer allocator.free(scratch);
+					break :blk fft.goldMulMagnitudesWithScratch(a, b, actual, scratch[0..bytes], scratch[bytes .. 2 * bytes], scratch[2 * bytes .. 5 * bytes / 2], scratch[5 * bytes / 2 .. 3 * bytes], scratch[3 * bytes .. 4 * bytes]);
+				};
+				if (!std.mem.eql(u8, expected[0..expected_len], actual[0..actual_len])) {
+					std.debug.print("FFT mismatch backend={d} bytes={d} pattern={d}\n", .{ backend, size, pattern });
+					return error.FftMismatch;
+				}
+				checks += 1;
+			}
+		}
+	}
+	return checks;
 }
 
 pub fn main() !u8 {
@@ -957,16 +1023,15 @@ pub fn main() !u8 {
 				op_failures += 1;
 				if (op_failures <= 3) {
 					std.debug.print("  MISMATCH op={s} {d}/{d} {s} {d}/{d}: fp={any}/{any} mpq={any}/{any}\n", .{
-						@tagName(op), na, da,
+						@tagName(op),   na,                 da,
 						switch (op) {
 							.add => "+",
 							.sub => "-",
 							.mul => "*",
 							.div_exact => "/",
 						},
-						nb, db,
-						fp_num.bytes(), fp_den.bytes(),
-						mpq_num_mp.bytes(), mpq_den_mp.bytes(),
+						nb,             db,                 fp_num.bytes(),
+						fp_den.bytes(), mpq_num_mp.bytes(), mpq_den_mp.bytes(),
 					});
 				}
 			}
@@ -978,6 +1043,10 @@ pub fn main() !u8 {
 	}
 	if (fp_div_skipped > 0) std.debug.print("  ({d} div trials skipped — non-terminating quotient)\n", .{fp_div_skipped});
 	total_failures += fp_failures;
+
+	const fft_checks = try checkEncodedFft(allocator);
+	total_checks += fft_checks;
+	std.debug.print("  PASS forced BLIP FFT backends: {d} GMP comparisons\n", .{fft_checks});
 
 	std.debug.print("\n=== Summary ===\n", .{});
 	std.debug.print("Total checks: {d}\n", .{total_checks});

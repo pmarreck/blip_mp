@@ -24,5 +24,6 @@ pub const Mp = bignum.Mp;
 pub const Fp = fp.Fp;
 
 test {
+	_ = @import("storage_audit.zig");
 	std.testing.refAllDecls(@This());
 }

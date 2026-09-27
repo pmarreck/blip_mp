@@ -67,10 +67,17 @@ width and an immediate form for small nonnegative values. Document the signed
 interpretation explicitly; interoperability with strict unsigned-BLIP producers
 remains an unresolved extension.
 
-Continue the May 16 direction to eliminate stored fixed-width limb arrays,
-including division scratch and FFT intermediates. Reading byte buffers into
+Eliminate all stored fixed-width limb arrays, including division scratch and
+FFT intermediates. BDFN reaffirmed this requirement on September 27, 2026,
+to demonstrate that BLIP storage is sufficient for the arithmetic. Reading byte buffers into
 register-sized chunks is compatible with this goal. The roadmap records remaining
 storage exceptions; calling the implementation fully limbless requires an audit.
+
+BDFN further specified that every stored FFT intermediate residue must itself
+have a canonical variable-length BLIP encoding, including twiddle factors and
+scratch values. This supersedes the May proposal to store fixed-width residues
+in byte buffers. Allocation capacity may exceed an encoding's length; temporary
+register values remain arithmetic operands. Measure the cost of this representation.
 
 Maintain portable behavior across macOS ARM64, Linux ARM64/x86_64 and Windows
 ARM64/x86_64. Distinguish build coverage, executed correctness tests and measured

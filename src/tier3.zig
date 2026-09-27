@@ -1,9 +1,9 @@
 // Tier 3: large-number arithmetic that operates DIRECTLY on BLIP payload
-// bytes. No intermediate limb-array conversion. The payload IS the two's-
+// bytes. No intermediate chunk-array conversion. The payload IS the two's-
 // complement value; arithmetic happens in place on those bytes.
 //
-// Why no limbs: the bytes are already in arithmetic-ready form (LE two's-
-// complement). Converting to a limb array would only add round-trip overhead
+// Why no chunks: the bytes are already in arithmetic-ready form (LE two's-
+// complement). Converting to a chunk array would only add round-trip overhead
 // without any algorithmic benefit, breaking the spec's hypothesis #2
 // ("beat GMP on cache-bound workloads by being contiguous and pointer-free").
 // Two's-complement add/sub work bit-position-locally, so pos+pos, pos+neg,
@@ -16,6 +16,7 @@
 const std = @import("std");
 const encoding = @import("encoding.zig");
 const fft = @import("fft.zig");
+const byte_chunks = @import("chunks.zig");
 
 // FFT dispatch threshold (bytes per operand). Operand payload-byte count
 // at-or-above which the production multiply path uses the NTT-based
@@ -57,40 +58,26 @@ pub const FFT_THRESHOLD: usize = 99999;
 // uses the same `Mp.allocator` for its lifetime.
 const FftScratch = struct {
 	cached_N: usize = 0,
-	pa: []u64 = &.{},
-	pb: []u64 = &.{},
-	tw_fwd: []u64 = &.{},
-	tw_inv: []u64 = &.{},
-	stockham: []u64 = &.{},
+	pa: []u8 = &.{},
+	pb: []u8 = &.{},
+	tw_fwd: []u8 = &.{},
+	tw_inv: []u8 = &.{},
+	stockham: []u8 = &.{},
 	owner_alloc: ?std.mem.Allocator = null,
 
 	fn ensureCapacity(self: *FftScratch, allocator: std.mem.Allocator, N: usize) !void {
-		if (self.cached_N >= N and self.owner_alloc != null) {
-			// Cache hit. Allocator identity is checked on alloc to avoid
-			// freeing under the wrong allocator below.
-			if (allocatorEq(self.owner_alloc.?, allocator)) return;
-			// Allocator changed — release under the old one and re-alloc.
-			self.releaseUnsafe();
-		}
-		// Need to (re)allocate with the new size.
-		if (self.owner_alloc) |old_alloc| {
-			old_alloc.free(self.pa);
-			old_alloc.free(self.pb);
-			old_alloc.free(self.tw_fwd);
-			old_alloc.free(self.tw_inv);
-			old_alloc.free(self.stockham);
-		}
-		self.pa = try allocator.alloc(u64, N);
-		errdefer allocator.free(self.pa);
-		self.pb = try allocator.alloc(u64, N);
-		errdefer allocator.free(self.pb);
-		self.tw_fwd = try allocator.alloc(u64, N / 2);
-		errdefer allocator.free(self.tw_fwd);
-		self.tw_inv = try allocator.alloc(u64, N / 2);
-		errdefer allocator.free(self.tw_inv);
-		self.stockham = try allocator.alloc(u64, N);
-		self.cached_N = N;
-		self.owner_alloc = allocator;
+		if (self.cached_N >= N and self.owner_alloc != null and allocatorEq(self.owner_alloc.?, allocator)) return;
+		// Keep the old allocation valid until all replacement buffers exist.
+		var next: FftScratch = .{ .owner_alloc = allocator };
+		errdefer next.releaseUnsafe();
+		next.pa = try allocator.alloc(u8, N * fft.residue.slot_bytes);
+		next.pb = try allocator.alloc(u8, N * fft.residue.slot_bytes);
+		next.tw_fwd = try allocator.alloc(u8, N / 2 * fft.residue.slot_bytes);
+		next.tw_inv = try allocator.alloc(u8, N / 2 * fft.residue.slot_bytes);
+		next.stockham = try allocator.alloc(u8, N * fft.residue.slot_bytes);
+		next.cached_N = N;
+		self.releaseUnsafe();
+		self.* = next;
 	}
 
 	fn releaseUnsafe(self: *FftScratch) void {
@@ -121,53 +108,8 @@ pub fn releaseFftScratch() void {
 }
 
 // ── Per-thread Goldilocks-NTT scratch cache (Phase 2) ─────────────────────────
-// Mirrors FftScratch but for the 4 buffers Goldilocks needs (no Stockham
-// scratch — we use simple Cooley-Tukey in-place).
-const GoldFftScratch = struct {
-	cached_N: usize = 0,
-	pa: []u64 = &.{},
-	pb: []u64 = &.{},
-	tw_fwd: []u64 = &.{},
-	tw_inv: []u64 = &.{},
-	stockham: []u64 = &.{},
-	owner_alloc: ?std.mem.Allocator = null,
-
-	fn ensureCapacity(self: *GoldFftScratch, allocator: std.mem.Allocator, N: usize) !void {
-		if (self.cached_N >= N and self.owner_alloc != null) {
-			if (allocatorEq(self.owner_alloc.?, allocator)) return;
-			self.releaseUnsafe();
-		}
-		if (self.owner_alloc) |old_alloc| {
-			old_alloc.free(self.pa);
-			old_alloc.free(self.pb);
-			old_alloc.free(self.tw_fwd);
-			old_alloc.free(self.tw_inv);
-			old_alloc.free(self.stockham);
-		}
-		self.pa = try allocator.alloc(u64, N);
-		errdefer allocator.free(self.pa);
-		self.pb = try allocator.alloc(u64, N);
-		errdefer allocator.free(self.pb);
-		self.tw_fwd = try allocator.alloc(u64, N / 2);
-		errdefer allocator.free(self.tw_fwd);
-		self.tw_inv = try allocator.alloc(u64, N / 2);
-		errdefer allocator.free(self.tw_inv);
-		self.stockham = try allocator.alloc(u64, N);
-		self.cached_N = N;
-		self.owner_alloc = allocator;
-	}
-
-	fn releaseUnsafe(self: *GoldFftScratch) void {
-		if (self.owner_alloc) |a| {
-			a.free(self.pa);
-			a.free(self.pb);
-			a.free(self.tw_fwd);
-			a.free(self.tw_inv);
-			a.free(self.stockham);
-		}
-		self.* = .{};
-	}
-};
+// Goldilocks keeps the same five encoded buffers, including Stockham scratch.
+const GoldFftScratch = FftScratch;
 
 threadlocal var gold_fft_scratch: GoldFftScratch = .{};
 
@@ -329,7 +271,7 @@ pub fn releaseDivScratch() void {
 // ── Per-thread divModKnuthU64 VN scratch cache ────────────────────────────────
 //
 // divModKnuthU64 needs a `vn` working buffer of v_len u64 slots for the
-// normalized divisor. For v_len ≤ VN_FAST_MAX (1024 limbs = 64K-bit) it
+// normalized divisor. For v_len ≤ VN_FAST_MAX (1024 chunks = 64K-bit) it
 // lives on the stack; above that, we previously fell through to a per-call
 // std.heap.c_allocator.alloc + defer free. The streaming pi spigot at
 // N≥1700 digits pushes past the stack cap on every divMod call, leading
@@ -340,12 +282,12 @@ pub fn releaseDivScratch() void {
 // signature; this is the only kernel-internal alloc).
 const VnScratch = struct {
 	cap: usize = 0,
-	buf: []u64 = &.{},
+	buf: []u8 = &.{},
 
 	fn ensureCapacity(self: *VnScratch, need: usize) void {
 		if (self.cap >= need) return;
 		if (self.cap > 0) std.heap.c_allocator.free(self.buf);
-		self.buf = std.heap.c_allocator.alloc(u64, need) catch @panic(
+		self.buf = std.heap.c_allocator.alloc(u8, need * 8) catch @panic(
 			"tier3.divModKnuthU64: out of memory allocating heap-fallback vn scratch",
 		);
 		self.cap = need;
@@ -469,7 +411,7 @@ inline fn payloadByteAt(payload: []const u8, i: usize, sign_ext: u8) u8 {
 /// operands have a full chunk of real bytes available — that's an 8× cut in
 /// inner-loop iterations vs per-byte. Boundary chunks (where one operand's
 /// real bytes run out and we fall back to sign-extension) and the final tail
-/// are handled per-byte. No separate "limbs" data structure — we reinterpret
+/// are handled per-byte. No separate "chunks" data structure — we reinterpret
 /// the contiguous payload bytes through readInt/writeInt.
 pub fn addPayloads(
 	a: []const u8,
@@ -956,7 +898,7 @@ pub fn mulMagnitudes(a: []const u8, b: []const u8, r: []u8) void {
 ///
 /// BDFN (Benevolent Dictator For Now)'s insight: with blip_mp's byte-LE representation, the doubling in
 /// step 2 is essentially a "free" O(N) bit-shift over the data — GMP's
-/// limbs require the same shift cost, so this isn't a blip-vs-gmp lever
+/// chunks require the same shift cost, so this isn't a blip-vs-gmp lever
 /// per se, but it's a real cost reduction either way.
 ///
 /// Aligned u64-chunked variant. Caller must guarantee a.len % 8 == 0 and
@@ -1564,9 +1506,12 @@ pub fn divModSingleU64(a: []u8, a_len: usize, b: u64) struct { q_len: usize, rem
 ///     subtract un[j..j+n+1] -= q_hat*v, correct if subtract went negative.
 ///   Denormalize: shift remainder right by s.
 pub fn divModKnuth(
-	u: []const u8, u_len_in: usize,
-	v: []const u8, v_len: usize,
-	q_out: []u8, r_out: []u8,
+	u: []const u8,
+	u_len_in: usize,
+	v: []const u8,
+	v_len: usize,
+	q_out: []u8,
+	r_out: []u8,
 	work: []u8,
 ) struct { q_len: usize, r_len: usize } {
 	std.debug.assert(v_len >= 2);
@@ -1785,7 +1730,7 @@ inline fn shiftRightByBitsMag(buf: []u8, len: usize, s: u3) usize {
 // during its recursive descent (sub-dividends, sub-quotients, multiply scratch,
 // correction temps). With a system allocator, each call to Mp.divMod that
 // routes through B-Z pays ~5-15 µs of pure malloc/free overhead — enough to
-// fully account for B-Z's prior measured 1.7× slowdown vs limb-Knuth.
+// fully account for B-Z's prior measured 1.7× slowdown vs chunk-Knuth.
 //
 // The arena bump-allocates from a thread-local buffer that the page allocator
 // fills lazily; reset() returns to the start of the buffer between calls so
@@ -1813,96 +1758,56 @@ pub fn releaseBzArena() void {
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-// M15-2: byte-direct Knuth Algorithm D entry. The caller-facing API takes
-// []u8 byte buffers (canonical LE magnitudes). Initial implementation
-// delegates to `divModKnuthU64` via in-place limb casting on an 8-byte-aligned
-// byte buffer (no separate pack/unpack pass — bytes ARE the u64 limbs at
-// 8-byte-aligned offsets). Later commits push the byte-direct logic into
-// the Knuth body itself; this commit establishes the API + correctness.
-//
-// Precondition on `u`:
-//   - 8-byte aligned start (caller uses `allocator.alignedAlloc(u8, .@"8", ...)`).
-//   - Capacity ≥ u_len_in + 8 bytes (D1 normalization carry chunk).
-//   - u[u_len_in..u.len] is undefined on entry, may be clobbered on exit.
-//
-// Returns canonical byte lengths (q_len ≤ u_len_in - v_len + 1; r_len ≤ v_len).
+// Byte-buffer Knuth entry. Input/output lengths are bytes; no alignment or
+// caller padding is required. Rounded scratch owns normalization carry space.
+// Returns trimmed byte lengths. Inputs remain unchanged.
 pub fn divModKnuthU64Bytes(
-	u: []u8, u_len_in: usize,
-	v: []const u8, v_len: usize,
-	q_out: []u8, r_out: []u8,
+	u: []u8,
+	u_len_in: usize,
+	v: []const u8,
+	v_len: usize,
+	q_out: []u8,
+	r_out: []u8,
 	allocator: std.mem.Allocator,
 ) std.mem.Allocator.Error!struct { q_len: usize, r_len: usize } {
-	// Trim u to canonical byte length.
-	var u_len: usize = u_len_in;
-	while (u_len > 0 and u[u_len - 1] == 0) u_len -= 1;
+	const u_len = trimLen(u[0..u_len_in]);
+	const divisor = v[0..trimLen(v[0..v_len])];
+	std.debug.assert(divisor.len > 0);
 	if (u_len == 0) return .{ .q_len = 0, .r_len = 0 };
-	if (u_len < v_len) {
+	if (u_len < divisor.len) {
 		@memcpy(r_out[0..u_len], u[0..u_len]);
 		return .{ .q_len = 0, .r_len = u_len };
 	}
-	// Trim v.
-	var v_len_canon: usize = v_len;
-	while (v_len_canon > 0 and v[v_len_canon - 1] == 0) v_len_canon -= 1;
-	std.debug.assert(v_len_canon >= 1);
-	// Single-byte divisor — divModSingleU64 (limb-Knuth requires v_len >= 2).
-	if (v_len_canon == 1) {
-		const u_copy = try allocator.alloc(u8, u_len);
-		defer allocator.free(u_copy);
-		@memcpy(u_copy, u[0..u_len]);
-		const out = divModSingleU64(u_copy, u_len, v[0]);
-		@memcpy(q_out[0..out.q_len], u_copy[0..out.q_len]);
-		var rem = out.rem;
-		var i: usize = 0;
-		while (rem != 0) : (i += 1) {
-			r_out[i] = @truncate(rem);
+	if (divisor.len <= 8) {
+		const work = try allocator.dupe(u8, u[0..u_len]);
+		defer allocator.free(work);
+		const got = divModSingleU64(work, u_len, readChunkOrZero(divisor, 0));
+		@memcpy(q_out[0..got.q_len], work[0..got.q_len]);
+		var rem = got.rem;
+		var count: usize = 0;
+		while (rem != 0) : (count += 1) {
+			r_out[count] = @truncate(rem);
 			rem >>= 8;
-			if (i + 1 >= r_out.len) break;
 		}
-		return .{ .q_len = out.q_len, .r_len = i };
+		return .{ .q_len = got.q_len, .r_len = count };
 	}
-
-	// Limb-aligned slot layout (byte buffer, aligned). u is the caller's
-	// existing aligned buffer; v/q/r need their own.
-	const u_lim_len_canon = (u_len + 7) / 8;
-	const v_lim_len_canon = (v_len_canon + 7) / 8;
-	// u must have capacity for the D1 normalization carry → u_lim_len_canon + 1 limbs.
-	std.debug.assert(u.len >= (u_lim_len_canon + 1) * 8);
-
-	const v_buf_bytes = v_lim_len_canon * 8;
-	const q_buf_bytes = u_lim_len_canon * 8; // q has at most u_len - v_len + 1 limbs; round up.
-	const r_buf_bytes = v_lim_len_canon * 8;
-	const buf = try allocator.alignedAlloc(u8, .@"8", v_buf_bytes + q_buf_bytes + r_buf_bytes);
-	defer allocator.free(buf);
-	@memset(buf, 0);
-
-	const v_buf = buf[0..v_buf_bytes];
-	const q_buf = buf[v_buf_bytes .. v_buf_bytes + q_buf_bytes];
-	const r_buf = buf[v_buf_bytes + q_buf_bytes ..];
-
-	// Byte copies into aligned limb regions. LE bytes ≡ LE u64 chunks at
-	// 8-byte-aligned offsets, so no byte-shuffling needed.
-	@memcpy(v_buf[0..v_len_canon], v[0..v_len_canon]);
-	// u: zero the D1 carry chunk past u_len.
-	@memset(u[u_len..@min(u.len, (u_lim_len_canon + 1) * 8)], 0);
-
-	const u_lim: []u64 = @alignCast(std.mem.bytesAsSlice(u64, u[0 .. (u_lim_len_canon + 1) * 8]));
-	const v_lim_const: []const u64 = @alignCast(std.mem.bytesAsSlice(u64, v_buf));
-	const q_lim: []u64 = @alignCast(std.mem.bytesAsSlice(u64, q_buf));
-	const r_lim: []u64 = @alignCast(std.mem.bytesAsSlice(u64, r_buf));
-
-	const got = divModKnuthU64(u_lim, u_lim_len_canon, v_lim_const, v_lim_len_canon, q_lim, r_lim);
-
-	// Bytes back. Canonical byte length = limb-length × 8 minus trailing zero
-	// bytes within the top limb.
-	var q_byte_len: usize = got.q_len * 8;
-	while (q_byte_len > 0 and q_buf[q_byte_len - 1] == 0) q_byte_len -= 1;
-	@memcpy(q_out[0..q_byte_len], q_buf[0..q_byte_len]);
-
-	var r_byte_len: usize = got.r_len * 8;
-	while (r_byte_len > 0 and r_buf[r_byte_len - 1] == 0) r_byte_len -= 1;
-	@memcpy(r_out[0..r_byte_len], r_buf[0..r_byte_len]);
-
-	return .{ .q_len = q_byte_len, .r_len = r_byte_len };
+	const uc = (u_len + 7) / 8;
+	const vc = (divisor.len + 7) / 8;
+	const work = try allocator.alloc(u8, (2 * uc + 2 * vc + 1) * 8);
+	defer allocator.free(work);
+	@memset(work, 0);
+	const dividend = work[0 .. (uc + 1) * 8];
+	const divisor_work = work[(uc + 1) * 8 .. (uc + 1 + vc) * 8];
+	const quotient = work[(uc + 1 + vc) * 8 .. (2 * uc + 1 + vc) * 8];
+	const remainder = work[(2 * uc + 1 + vc) * 8 ..];
+	@memcpy(dividend[0..u_len], u[0..u_len]);
+	@memcpy(divisor_work[0..divisor.len], divisor);
+	const got = divModKnuthU64(dividend, uc, divisor_work, vc, quotient, remainder);
+	const q_len = trimLen(quotient[0 .. got.q_len * 8]);
+	const r_len = trimLen(remainder[0 .. got.r_len * 8]);
+	@memcpy(q_out[0..q_len], quotient[0..q_len]);
+	@memcpy(r_out[0..r_len], remainder[0..r_len]);
+	return .{ .q_len = q_len, .r_len = r_len };
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -1917,11 +1822,11 @@ pub fn divModKnuthU64Bytes(
 // available in this module via `mulMagnitudes`.
 //
 // Storage paradigm: this implementation operates directly on `[]u8` BLIP
-// magnitude payloads. No `[]u64` limb-array storage anywhere on the B-Z
+// magnitude payloads. No `[]u64` chunk-array storage anywhere on the B-Z
 // recursion path. The arithmetic primitives it composes — `addUnsignedLE`,
 // `subUnsignedLE`, `cmpUnsignedLE`, `mulMagnitudes` — already read chunked
 // u64 values from byte buffers via `readChunkOrZero`. The leaf case
-// currently bottoms out into `divModKnuthU64` (limb-based, fast); M15-2
+// currently bottoms out into `divModKnuthU64` (chunk-based, fast); M15-2
 // will replace that leaf with a byte-direct Knuth D so the entire tree is
 // byte-direct.
 
@@ -1941,9 +1846,11 @@ pub fn divModKnuthU64Bytes(
 ///   - q_out.len >= n + 1 (carry slack)
 ///   - r_out.len >= n
 fn bzDiv2nByN(
-	u: []const u8, n: usize,
+	u: []const u8,
+	n: usize,
 	v: []const u8,
-	q_out: []u8, r_out: []u8,
+	q_out: []u8,
+	r_out: []u8,
 	allocator: std.mem.Allocator,
 ) std.mem.Allocator.Error!struct { q_len: usize, r_len: usize } {
 	std.debug.assert(u.len == 2 * n);
@@ -2020,7 +1927,8 @@ const BZ_RECURSE_THRESHOLD: usize = 4;
 /// algorithmic speedup over O(n²) Knuth depends on M(n) being sub-quadratic,
 /// so the right answer for B-Z is "always use the fastest mul available".
 fn mulMagAuto(
-	a: []const u8, b: []const u8,
+	a: []const u8,
+	b: []const u8,
 	r: []u8,
 	allocator: std.mem.Allocator,
 ) std.mem.Allocator.Error!void {
@@ -2087,18 +1995,21 @@ fn mulMagAuto(
 
 /// Leaf divider used by the B-Z recursion. Picks the fastest available
 /// kernel for the operand sizes: byte-direct `divModKnuth` for single-
-/// limb divisors (v_len ≤ 8), limb-packed `divModKnuthU64` for ≥ 2 limb
+/// chunk divisors (v_len ≤ 8), chunk-packed `divModKnuthU64` for ≥ 2 chunk
 /// divisors. The pack/unpack at the leaf boundary is a single @memcpy
-/// in each direction since LE bytes and LE u64 limbs are bit-identical
+/// in each direction since LE bytes and LE u64 chunks are bit-identical
 /// at 8-byte-aligned offsets.
 fn divModBZLeaf(
-	u_pay: []const u8, u_pay_len: usize,
-	v_pay: []const u8, v_pay_len: usize,
-	q_out: []u8, r_out: []u8,
+	u_pay: []const u8,
+	u_pay_len: usize,
+	v_pay: []const u8,
+	v_pay_len: usize,
+	q_out: []u8,
+	r_out: []u8,
 	allocator: std.mem.Allocator,
 ) std.mem.Allocator.Error!struct { q_len: usize, r_len: usize } {
-	// Small divisors (≤ 8 bytes = 1 limb): byte-direct Knuth is correct and
-	// avoids divModKnuthU64's v_len >= 2 (limb) precondition.
+	// Small divisors (≤ 8 bytes = 1 chunk): byte-direct Knuth is correct and
+	// avoids divModKnuthU64's v_len >= 2 (chunk) precondition.
 	if (v_pay_len <= 8) {
 		const work = try allocator.alloc(u8, divModKnuthScratchNeed(u_pay_len, v_pay_len));
 		defer allocator.free(work);
@@ -2106,44 +2017,44 @@ fn divModBZLeaf(
 		return .{ .q_len = got.q_len, .r_len = got.r_len };
 	}
 
-	// Limb-packed path: allocate a single 8-byte-aligned scratch covering
-	// u (with D1 carry slot) + v + q + r limb regions, blit bytes in, run
-	// divModKnuthU64, blit back. Same machine code as the limb path inside
+	// Chunk-packed path: allocate a single 8-byte-aligned scratch covering
+	// u (with D1 carry slot) + v + q + r chunk regions, blit bytes in, run
+	// divModKnuthU64, blit back. Same machine code as the chunk path inside
 	// divModSignedLarge — but with byte-payload I/O at the boundary.
-	const u_limbs = (u_pay_len + 7) / 8 + 1; // +1 slot for D1 normalization carry-out
-	const v_limbs = (v_pay_len + 7) / 8;
-	const q_limbs = u_limbs;
-	const r_limbs = v_limbs;
-	const total_bytes = (u_limbs + v_limbs + q_limbs + r_limbs) * 8;
+	const u_chunks = (u_pay_len + 7) / 8 + 1; // +1 slot for D1 normalization carry-out
+	const v_chunks = (v_pay_len + 7) / 8;
+	const q_chunks = u_chunks;
+	const r_chunks = v_chunks;
+	const total_bytes = (u_chunks + v_chunks + q_chunks + r_chunks) * 8;
 
 	const buf = try allocator.alignedAlloc(u8, .@"8", total_bytes);
 	defer allocator.free(buf);
 	@memset(buf, 0);
 
 	var off: usize = 0;
-	const u_buf = buf[off .. off + u_limbs * 8];
-	off += u_limbs * 8;
-	const v_buf = buf[off .. off + v_limbs * 8];
-	off += v_limbs * 8;
-	const q_buf = buf[off .. off + q_limbs * 8];
-	off += q_limbs * 8;
-	const r_buf = buf[off .. off + r_limbs * 8];
+	const u_buf = buf[off .. off + u_chunks * 8];
+	off += u_chunks * 8;
+	const v_buf = buf[off .. off + v_chunks * 8];
+	off += v_chunks * 8;
+	const q_buf = buf[off .. off + q_chunks * 8];
+	off += q_chunks * 8;
+	const r_buf = buf[off .. off + r_chunks * 8];
 
 	@memcpy(u_buf[0..u_pay_len], u_pay[0..u_pay_len]);
 	@memcpy(v_buf[0..v_pay_len], v_pay[0..v_pay_len]);
 
-	const u_lim: []u64 = @alignCast(std.mem.bytesAsSlice(u64, u_buf));
-	const v_lim_const: []const u64 = @alignCast(std.mem.bytesAsSlice(u64, v_buf));
-	const q_lim: []u64 = @alignCast(std.mem.bytesAsSlice(u64, q_buf));
-	const r_lim: []u64 = @alignCast(std.mem.bytesAsSlice(u64, r_buf));
+	const u_lim: []u8 = u_buf;
+	const v_lim_const: []const u8 = v_buf;
+	const q_lim: []u8 = q_buf;
+	const r_lim: []u8 = r_buf;
 
 	const u_lim_len_canon = (u_pay_len + 7) / 8;
 	const v_lim_len_canon = (v_pay_len + 7) / 8;
 
 	const got = divModKnuthU64(u_lim, u_lim_len_canon, v_lim_const, v_lim_len_canon, q_lim, r_lim);
 
-	// Bytes back. divModKnuthU64 returns canonical limb lengths; we still
-	// need to trim trailing-zero bytes within the top limb.
+	// Bytes back. divModKnuthU64 returns canonical chunk lengths; we still
+	// need to trim trailing-zero bytes within the top chunk.
 	var q_byte_len: usize = got.q_len * 8;
 	while (q_byte_len > 0 and q_buf[q_byte_len - 1] == 0) q_byte_len -= 1;
 	@memcpy(q_out[0..q_byte_len], q_buf[0..q_byte_len]);
@@ -2191,9 +2102,11 @@ inline fn decrementMagInPlace(buf: []u8, len_ptr: *usize) void {
 ///   - q_out.len >= n/2 + 1
 ///   - r_out.len >= n
 fn bzDiv3n_2n(
-	u: []const u8, n: usize,
+	u: []const u8,
+	n: usize,
 	v: []const u8,
-	q_out: []u8, r_out: []u8,
+	q_out: []u8,
+	r_out: []u8,
 	allocator: std.mem.Allocator,
 ) std.mem.Allocator.Error!struct { q_len: usize, r_len: usize } {
 	std.debug.assert(u.len == 3 * (n / 2));
@@ -2201,7 +2114,7 @@ fn bzDiv3n_2n(
 	std.debug.assert(n >= 2 and n % 2 == 0);
 	std.debug.assert((v[n - 1] >> 7) == 1);
 
-	// Base case: small n OR odd n → leaf divider (limb-Knuth for ≥ 2 limbs,
+	// Base case: small n OR odd n → leaf divider (chunk-Knuth for ≥ 2 chunks,
 	// byte-Knuth otherwise). Odd n must bottom out here because the recursive
 	// case calls bzDiv2nByN at half scale, which requires n be even (to
 	// split halves cleanly).
@@ -2342,9 +2255,12 @@ const BZ_TOPLEVEL_THRESHOLD: usize = 64;
 ///   - q_out.len >= max(1, u_len - v_len + 1) bytes.
 ///   - r_out.len >= v_len bytes.
 pub fn divModBurnikelZiegler(
-	u: []const u8, u_len_in: usize,
-	v: []const u8, v_len: usize,
-	q_out: []u8, r_out: []u8,
+	u: []const u8,
+	u_len_in: usize,
+	v: []const u8,
+	v_len: usize,
+	q_out: []u8,
+	r_out: []u8,
 	allocator: std.mem.Allocator,
 ) std.mem.Allocator.Error!struct { q_len: usize, r_len: usize } {
 	// Trim u to canonical length.
@@ -2509,22 +2425,22 @@ pub fn divModBurnikelZieglerScratchNeed(u_len: usize, v_len: usize) usize {
 /// `div2by1` primitive in Knuth's q_hat estimate to replace a hardware
 /// 128/64 udiv with a multiply-add. Reference: Möller & Granlund 2010,
 /// "Improved division by invariant integers", IEEE Trans. Comput., Alg. 2.
-inline fn invertLimb(d: u64) u64 {
+inline fn invertChunk(d: u64) u64 {
 	std.debug.assert((d >> 63) == 1); // d must be normalized.
 	// numer = 2^128 - 1 - d * 2^64 = ((~d) << 64) | (2^64 - 1)
 	const numer: u128 = (@as(u128, ~d) << 64) | std.math.maxInt(u64);
 	return @truncate(numer / @as(u128, d));
 }
 
-/// Möller-Granlund Algorithm 4: 2-limb / 1-limb division using the
-/// precomputed reciprocal `v_inv = invertLimb(d)`. Returns the exact
+/// Möller-Granlund Algorithm 4: 2-chunk / 1-chunk division using the
+/// precomputed reciprocal `v_inv = invertChunk(d)`. Returns the exact
 /// quotient (q) and remainder (r) for `(u1 * 2^64 + u0) / d`, with
 /// preconditions: `d` normalized and `u1 < d`. Replaces the hardware
 /// 128/64 udiv with a multiply-add and at most two correction subtracts.
 /// On modern CPUs (esp. aarch64) udiv x is high-latency; mul-mul-cmp wins.
 inline fn div2by1(u_hi: u64, u_lo: u64, d: u64, v_inv: u64) struct { q: u64, r: u64 } {
 	// GMP `udiv_qrnnd_preinv` formulation of Möller-Granlund Algorithm 4.
-	// Pre: d normalized (high bit set), u_hi < d, v_inv = invertLimb(d).
+	// Pre: d normalized (high bit set), u_hi < d, v_inv = invertChunk(d).
 	// The +1 is folded into the high addend so the 128-bit sum captures
 	// all carries mod 2^128 — a bare `+` in Zig is checked-overflow UB,
 	// so we use `+%` explicitly throughout.
@@ -2551,12 +2467,12 @@ inline fn div2by1(u_hi: u64, u_lo: u64, d: u64, v_inv: u64) struct { q: u64, r: 
 	return .{ .q = qh, .r = r };
 }
 
-/// Möller-Granlund Algorithm 6: 3/2 reciprocal of a normalized 2-limb divisor.
-/// Given the top 2 normalized divisor limbs `(d1, d0)` (d1 has high bit set),
+/// Möller-Granlund Algorithm 6: 3/2 reciprocal of a normalized 2-chunk divisor.
+/// Given the top 2 normalized divisor chunks `(d1, d0)` (d1 has high bit set),
 /// returns `vinv = floor((B^3 - 1) / (d1*B + d0)) - B`. Used by `div3by2`.
-inline fn invertLimb2(d1: u64, d0: u64) u64 {
+inline fn invertChunk2(d1: u64, d0: u64) u64 {
 	std.debug.assert((d1 >> 63) == 1);
-	var v: u64 = invertLimb(d1);
+	var v: u64 = invertChunk(d1);
 	var p: u64 = d1 *% v;
 	p +%= d0;
 	if (p < d0) {
@@ -2581,15 +2497,15 @@ inline fn invertLimb2(d1: u64, d0: u64) u64 {
 	return v;
 }
 
-/// Möller-Granlund Algorithm 5: 3-limb / 2-limb division using `invertLimb2`.
-/// Returns the exact quotient (≤ B - 1) and 2-limb remainder, given:
-///   * `(u_hi, u_mid, u_lo)` — 3 dividend limbs, with `(u_hi, u_mid) < (d1, d0)`
-///   * `(d1, d0)` — normalized 2-limb divisor (d1 high bit set)
-///   * `vinv` — invertLimb2(d1, d0)
+/// Möller-Granlund Algorithm 5: 3-chunk / 2-chunk division using `invertChunk2`.
+/// Returns the exact quotient (≤ B - 1) and 2-chunk remainder, given:
+///   * `(u_hi, u_mid, u_lo)` — 3 dividend chunks, with `(u_hi, u_mid) < (d1, d0)`
+///   * `(d1, d0)` — normalized 2-chunk divisor (d1 high bit set)
+///   * `vinv` — invertChunk2(d1, d0)
 /// Replaces a hardware 192/128 divide with a multiply-add chain plus at most
 /// one or two corrections. Used in the inner Knuth loop to estimate q_hat
 /// such that q_hat is **at most 1 too high** vs the true quotient digit
-/// against the full multi-limb divisor — eliminating the v_second refinement
+/// against the full multi-chunk divisor — eliminating the v_second refinement
 /// loop entirely and leaving D5 to fix the rare +1.
 inline fn div3by2(u_hi: u64, u_mid: u64, u_lo: u64, d1: u64, d0: u64, vinv: u64) struct { q: u64, r1: u64, r0: u64 } {
 	// (q1, q0) = u_hi * vinv
@@ -2619,48 +2535,31 @@ inline fn div3by2(u_hi: u64, u_mid: u64, u_lo: u64, d1: u64, d0: u64, vinv: u64)
 	return .{ .q = q1, .r1 = @truncate(r >> 64), .r0 = @truncate(r) };
 }
 
-/// Knuth Algorithm D (TAOCP vol 2 §4.3.1) in base b = 2^64. Operates on
-/// little-endian u64-limb arrays. The structural change vs `divModKnuth`
-/// (byte-base): we do roughly 8× fewer iterations of the outer loop and
-/// 8× fewer q_hat refinements per quotient digit. The q_hat estimate uses
-/// the Möller-Granlund 2/1 reciprocal trick (precomputed at D1 normalize)
-/// so each inner step is a multiply-add instead of a hardware 128/64 udiv.
-///
-/// Inputs (all little-endian, limb[0] = lowest 64 bits):
-///   u: dividend buffer; u[0..u_len] contains the canonical dividend (no
-///      trailing zero limb) BUT the slice itself must have capacity for
-///      one extra high limb (u_len + 1) — the D1 normalize-shift may
-///      overflow into u[u_len], and the scan window references u[j+n]
-///      so we always need one limb past the canonical top.
-///   v: divisor; v[0..v_len], canonical (no trailing zero), v_len ≥ 2.
-///   q: output quotient, capacity ≥ u_len - v_len + 1
-///   r: output remainder, capacity ≥ v_len
-///
-/// The function does NOT mutate the caller's u beyond u_len (it copies
-/// into its own work — but to avoid a separate scratch arg we use the
-/// trailing capacity of u). Actually for clarity: u[0..u_len] is mutated
-/// in place (normalized then progressively reduced to remainder-bytes).
-/// Caller must supply `u` with capacity ≥ u_len + 1 limbs so the D1 shift
-/// has space for the carry-out.
-///
-/// Returns canonical (q_len, r_len). q_len ≤ u_len - v_len + 1; r_len ≤ v_len.
-/// q_len may be 0 (when u < v); r_len may be 0 (when u is exactly divisible).
+/// Knuth Algorithm D over LE magnitude bytes, with temporary 64-bit reads.
+/// Counts and returned lengths are eight-byte chunks. Divisor needs >= 2
+/// chunks, dividend capacity >= (u_len_in + 1) * 8, q capacity >= u_len_in * 8,
+/// and r capacity >= v_len * 8. The buffers need no alignment. Dividend is
+/// mutated for normalization and subtraction; v is read-only.
+/// Quotient estimates use the Möller-Granlund reciprocal.
 pub fn divModKnuthU64(
-	u: []u64, u_len_in: usize,
-	v: []const u64, v_len: usize,
-	q: []u64, r: []u64,
+	u: []u8,
+	u_len_in: usize,
+	v: []const u8,
+	v_len: usize,
+	q: []u8,
+	r: []u8,
 ) struct { q_len: usize, r_len: usize } {
 	std.debug.assert(v_len >= 2);
-	std.debug.assert(v[v_len - 1] != 0);
+	std.debug.assert(byte_chunks.read(v, v_len - 1) != 0);
 
-	// Trim u of trailing zero limbs.
+	// Trim u of trailing zero chunks.
 	var u_len: usize = u_len_in;
-	while (u_len > 0 and u[u_len - 1] == 0) u_len -= 1;
+	while (u_len > 0 and byte_chunks.read(u, u_len - 1) == 0) u_len -= 1;
 
 	// Special case: u < v by length, OR same length but lex less. q=0, r=u.
 	if (u_len < v_len) {
 		var k: usize = 0;
-		while (k < u_len) : (k += 1) r[k] = u[k];
+		while (k < u_len) : (k += 1) byte_chunks.write(r, k, byte_chunks.read(u, k));
 		return .{ .q_len = 0, .r_len = u_len };
 	}
 	if (u_len == v_len) {
@@ -2668,88 +2567,88 @@ pub fn divModKnuthU64(
 		var k: usize = u_len;
 		while (k > 0) {
 			k -= 1;
-			if (u[k] != v[k]) {
-				cmp = if (u[k] > v[k]) 1 else -1;
+			if (byte_chunks.read(u, k) != byte_chunks.read(v, k)) {
+				cmp = if (byte_chunks.read(u, k) > byte_chunks.read(v, k)) 1 else -1;
 				break;
 			}
 		}
 		if (cmp < 0) {
 			var i: usize = 0;
-			while (i < u_len) : (i += 1) r[i] = u[i];
+			while (i < u_len) : (i += 1) byte_chunks.write(r, i, byte_chunks.read(u, i));
 			return .{ .q_len = 0, .r_len = u_len };
 		}
 		if (cmp == 0) {
-			q[0] = 1;
+			byte_chunks.write(q, 0, 1);
 			return .{ .q_len = 1, .r_len = 0 };
 		}
-		// u > v at same length → q is single limb (1..2^64-1), r = u - v.
+		// u > v at same length → q is single chunk (1..2^64-1), r = u - v.
 		// Falls through to main algorithm.
 	}
 
-	std.debug.assert(u.len >= u_len + 1);
+	std.debug.assert((u.len / 8) >= u_len + 1);
 
 	// D1: Normalize. s = clz of v[v_len-1] within a u64 (0..63).
-	const top = v[v_len - 1];
+	const top = byte_chunks.read(v, v_len - 1);
 	const s: u6 = @intCast(@clz(top));
 
 	// Normalized divisor `vn`. When s == 0 (v already normalized — top bit
 	// set in v[v_len-1], ~50% of random divisors), alias v directly: no
 	// scratch needed, no memcpy. Saves v_len * 8 bytes of copying per call.
-	// When s != 0, allocate scratch: stack fast-path for v_len ≤ 1024 limbs
+	// When s != 0, allocate scratch: stack fast-path for v_len ≤ 1024 chunks
 	// (= 64K-bit, covers RSA-32K+); per-thread cached heap fallback
 	// (vn_scratch) for anything larger.
 	const VN_FAST_MAX = 1024;
-	var vn_stack: [VN_FAST_MAX]u64 = undefined;
-	const vn: []const u64 = if (s == 0) v[0..v_len] else blk: {
-		const buf: []u64 = if (v_len <= VN_FAST_MAX) vn_stack[0..v_len] else heap_blk: {
+	var vn_stack: [VN_FAST_MAX * 8]u8 = undefined;
+	const vn: []const u8 = if (s == 0) v[(0) * 8 .. (v_len) * 8] else blk: {
+		const buf: []u8 = if (v_len <= VN_FAST_MAX) vn_stack[(0) * 8 .. (v_len) * 8] else heap_blk: {
 			vn_scratch.ensureCapacity(v_len);
-			break :heap_blk vn_scratch.buf[0..v_len];
+			break :heap_blk vn_scratch.buf[(0) * 8 .. (v_len) * 8];
 		};
-		// Left-shift v by s bits across limbs into buf.
+		// Left-shift v by s bits across chunks into buf.
 		var carry_v: u64 = 0;
 		var i: usize = 0;
 		while (i < v_len) : (i += 1) {
-			const lo = v[i] << s;
-			buf[i] = lo | carry_v;
-			carry_v = v[i] >> @as(u6, @intCast(64 - @as(u7, s)));
+			const lo = byte_chunks.read(v, i) << s;
+			byte_chunks.write(buf, i, lo | carry_v);
+			carry_v = byte_chunks.read(v, i) >> @as(u6, @intCast(64 - @as(u7, s)));
 		}
 		std.debug.assert(carry_v == 0);
 		break :blk buf;
 	};
 
 	if (s == 0) {
-		// u stays as-is; high "extra" limb is set to 0.
-		u[u_len] = 0;
+		// u stays as-is; high "extra" chunk is set to 0.
+		byte_chunks.write(u, u_len, 0);
 	} else {
 		// vn already shifted above. Left-shift u by s bits in place; carry
 		// goes into u[u_len].
 		var carry_u: u64 = 0;
 		var i: usize = 0;
 		while (i < u_len) : (i += 1) {
-			const lo = u[i] << s;
-			const hi = u[i] >> @as(u6, @intCast(64 - @as(u7, s)));
-			u[i] = lo | carry_u;
+			const lo = byte_chunks.read(u, i) << s;
+			const hi = byte_chunks.read(u, i) >> @as(u6, @intCast(64 - @as(u7, s)));
+			byte_chunks.write(u, i, lo | carry_u);
 			carry_u = hi;
 		}
-		u[u_len] = carry_u;
+		byte_chunks.write(u, u_len, carry_u);
 	}
 
 	const n = v_len;
-	const m = u_len - v_len; // q has m+1 limbs.
+	const m = u_len - v_len; // q has m+1 chunks.
 
 	// Initialize q to zero so we can write only non-zero positions.
-	@memset(q[0 .. m + 1], 0);
+	@memset(q[(0) * 8 .. (m + 1) * 8], 0);
 
-	const v_top: u64 = vn[n - 1];
-	const v_second: u64 = vn[n - 2];
+	const v_top: u64 = byte_chunks.read(vn, n - 1);
+	const v_second: u64 = byte_chunks.read(vn, n - 2);
 	// Möller-Granlund 3/2 reciprocal: one udiv-based precompute amortized
 	// across all m+1 quotient digits. The resulting q_hat from `div3by2`
 	// is at most 1 too high vs the true digit (vs Knuth's classical 2 too
 	// high), so the v_second refinement loop is unnecessary — the rare
 	// over-by-one is recovered by the D5 add-back below.
-	const v_inv: u64 = invertLimb2(v_top, v_second);
+	const v_inv: u64 = invertChunk2(v_top, v_second);
 
-	// Main loop D2..D7 — process quotient limbs from high to low.
+	// Main loop D2..D7 — process quotient chunks from high to low.
 	var j_plus_one: usize = m + 1;
 	while (j_plus_one > 0) {
 		j_plus_one -= 1;
@@ -2759,9 +2658,9 @@ pub fn divModKnuthU64(
 		// Precondition for div3by2: (u_top, u_next) < (v_top, v_second).
 		// When this fails, the true q_hat = 2^64 - 1 (capped). Detect with
 		// a single 128-bit lex compare and fall through.
-		const u_top: u64 = u[j + n];
-		const u_next: u64 = u[j + n - 1];
-		const u_third: u64 = u[j + n - 2];
+		const u_top: u64 = byte_chunks.read(u, j + n);
+		const u_next: u64 = byte_chunks.read(u, j + n - 1);
+		const u_third: u64 = byte_chunks.read(u, j + n - 2);
 		var qhat: u64 = undefined;
 		const u_hi128: u128 = (@as(u128, u_top) << 64) | @as(u128, u_next);
 		const v_hi128: u128 = (@as(u128, v_top) << 64) | @as(u128, v_second);
@@ -2775,12 +2674,12 @@ pub fn divModKnuthU64(
 		}
 
 		// D4: Multiply and subtract  u[j..j+n+1] -= qhat * vn[0..n].
-		// Per-limb scheme:
+		// Per-chunk scheme:
 		//   p = qhat * vn[k]              (u128: high64 = mul carry, low64 = digit)
 		//   total_sub = low64 + carry_lo  (u128 to absorb carry)
 		//   diff = u[j+k] - total_sub_lo  (with borrow tracking)
 		//   carry_lo := total_sub_hi + p_hi (next position's pending subtraction lo)
-		//   borrow accumulates across limbs.
+		//   borrow accumulates across chunks.
 		// (Tried collapsing carry_lo + borrow into a single `cl` chain à la
 		// GMP's plain-C mpn_submul_1 — empirically LLVM compiles this two-var
 		// form ~20-30% faster at sizes ≥ 2K-bit because the independent
@@ -2789,27 +2688,27 @@ pub fn divModKnuthU64(
 		var borrow: u64 = 0;
 		var k: usize = 0;
 		while (k < n) : (k += 1) {
-			const p: u128 = @as(u128, qhat) * @as(u128, vn[k]);
+			const p: u128 = @as(u128, qhat) * @as(u128, byte_chunks.read(vn, k));
 			const p_lo: u64 = @truncate(p);
 			const p_hi: u64 = @truncate(p >> 64);
-			// Combine the running carry into this limb's subtrahend.
+			// Combine the running carry into this chunk's subtrahend.
 			const sub_full: u128 = @as(u128, p_lo) + @as(u128, carry_lo);
 			const sub_lo: u64 = @truncate(sub_full);
 			const sub_hi: u64 = @truncate(sub_full >> 64);
 			// Now subtract sub_lo plus the previous borrow from u[j+k].
-			const a = u[j + k];
+			const a = byte_chunks.read(u, j + k);
 			const d1 = @subWithOverflow(a, sub_lo);
 			const d2 = @subWithOverflow(d1[0], borrow);
-			u[j + k] = d2[0];
+			byte_chunks.write(u, j + k, d2[0]);
 			borrow = @as(u64, d1[1]) + @as(u64, d2[1]);
-			// Next limb's "pending subtrahend" = high 64 of p plus any high overflow of sub_full.
+			// Next chunk's "pending subtrahend" = high 64 of p plus any high overflow of sub_full.
 			carry_lo = p_hi + sub_hi;
 		}
-		// Final limb: subtract carry_lo + borrow from u[j+n].
-		const a_top = u[j + n];
+		// Final chunk: subtract carry_lo + borrow from u[j+n].
+		const a_top = byte_chunks.read(u, j + n);
 		const dfin1 = @subWithOverflow(a_top, carry_lo);
 		const dfin2 = @subWithOverflow(dfin1[0], borrow);
-		u[j + n] = dfin2[0];
+		byte_chunks.write(u, j + n, dfin2[0]);
 		const went_negative = (@as(u64, dfin1[1]) + @as(u64, dfin2[1])) != 0;
 
 		// D5: Test remainder. If negative, decrement qhat and add vn back.
@@ -2818,143 +2717,131 @@ pub fn divModKnuthU64(
 			var add_carry: u64 = 0;
 			k = 0;
 			while (k < n) : (k += 1) {
-				const s1 = @addWithOverflow(u[j + k], vn[k]);
+				const s1 = @addWithOverflow(byte_chunks.read(u, j + k), byte_chunks.read(vn, k));
 				const s2 = @addWithOverflow(s1[0], add_carry);
-				u[j + k] = s2[0];
+				byte_chunks.write(u, j + k, s2[0]);
 				add_carry = @as(u64, s1[1]) + @as(u64, s2[1]);
 			}
 			// Final carry into u[j+n] cancels the negative we detected.
-			u[j + n] +%= add_carry;
+			byte_chunks.write(u, j + n, byte_chunks.read(u, j + n) +% (add_carry));
 		}
 
-		q[j] = qhat;
+		byte_chunks.write(q, j, qhat);
 	}
 
 	// D7: Denormalize. Right-shift u[0..n] by s bits into r.
 	if (s == 0) {
 		var i: usize = 0;
-		while (i < n) : (i += 1) r[i] = u[i];
+		while (i < n) : (i += 1) byte_chunks.write(r, i, byte_chunks.read(u, i));
 	} else {
 		var carry: u64 = 0;
 		var i: usize = n;
 		while (i > 0) {
 			i -= 1;
-			const cur = u[i];
-			r[i] = (cur >> s) | (carry << @as(u6, @intCast(64 - @as(u7, s))));
+			const cur = byte_chunks.read(u, i);
+			byte_chunks.write(r, i, (cur >> s) | (carry << @as(u6, @intCast(64 - @as(u7, s)))));
 			carry = cur & ((@as(u64, 1) << s) - 1);
 		}
 	}
 
 	// Canonicalize lengths.
 	var q_len: usize = m + 1;
-	while (q_len > 0 and q[q_len - 1] == 0) q_len -= 1;
+	while (q_len > 0 and byte_chunks.read(q, q_len - 1) == 0) q_len -= 1;
 	var r_len: usize = n;
-	while (r_len > 0 and r[r_len - 1] == 0) r_len -= 1;
+	while (r_len > 0 and byte_chunks.read(r, r_len - 1) == 0) r_len -= 1;
 	return .{ .q_len = q_len, .r_len = r_len };
 }
 
-/// In-place multi-limb two's-complement negate: limbs[..] = (~limbs + 1) over
-/// the full LE limb array. Used by `divModSigned` to flip a negative payload
-/// (sign-extended into limbs) to its magnitude in one chunked pass — avoids
-/// the byte-level `negateInPlace` + `bytesToLimbs` sequence (~8× fewer scalar
+/// In-place multi-chunk two's-complement negate: chunks[..] = (~chunks + 1) over
+/// the full LE magnitude byte buffer. Used by `divModSigned` to flip a negative payload
+/// (sign-extended into chunks) to its magnitude in one chunked pass — avoids
+/// the byte-level `negateInPlace` + `copyMagnitudePadded` sequence (~8× fewer scalar
 /// operations on aarch64 / x86_64). Compiles to a clean ADCS-style chain.
-inline fn negateLimbsInPlace(limbs: []u64) void {
+inline fn negateChunksInPlace(chunks: []u8) void {
 	var carry: u64 = 1;
-	for (limbs) |*p| {
+	for (0..(chunks.len / 8)) |index| {
 		// (~p + carry) — carry propagates only when ~p == 0xFFFF_FFFF_FFFF_FFFF
 		// (i.e. p == 0). Use addWithOverflow to express this without a u128.
-		const inv = ~p.*;
+		const inv = ~byte_chunks.read(chunks, index);
 		const r = @addWithOverflow(inv, carry);
-		p.* = r[0];
+		byte_chunks.write(chunks, index, r[0]);
 		carry = r[1];
 	}
 }
 
-/// Pack a canonical two's-complement BLIP payload directly into a u64 limb
-/// array as a positive magnitude. Returns the canonical (trailing-zero-trimmed)
-/// limb count.
-///
-/// For positive payloads (sign-extension byte 0x00), bytes are read into limbs
-/// LE — high partial limb is zero-extended (matches `bytesToLimbs`). For
-/// negative payloads (sign-extension byte 0xFF), bytes are read with the high
-/// partial limb sign-extended to 0xFF in its unread bytes, then the entire
-/// limb array is negated in place — yielding the positive magnitude.
-///
-/// This collapses the previous `@memcpy(mag_buf, pay) + negateInPlace(mag_buf)
-/// + trim + bytesToLimbs(mag_buf, limbs)` sequence into a single pass. Limbs
-/// must be sized to `(pay.len + 7) / 8` (or larger). Limbs past the input are
-/// zeroed.
-fn payloadToMagLimbs(pay: []const u8, neg: bool, limbs: []u64) usize {
-	@memset(limbs, 0);
+/// Copy signed BLIP payload bytes into magnitude scratch, sign-extending and
+/// negating negative inputs. Return the number of live eight-byte chunks.
+fn payloadToMagnitudeChunks(pay: []const u8, neg: bool, chunks: []u8) usize {
+	@memset(chunks, 0);
 	if (pay.len == 0) return 0;
 	const sign_fill: u8 = if (neg) 0xFF else 0x00;
 	const max_full = pay.len / 8;
 	const tail_start = max_full * 8;
 	// Full 8-byte chunks: direct readInt.
 	var i: usize = 0;
-	while (i < max_full and i < limbs.len) : (i += 1) {
-		limbs[i] = std.mem.readInt(u64, pay[i * 8 ..][0..8], .little);
+	while (i < max_full and i < (chunks.len / 8)) : (i += 1) {
+		byte_chunks.write(chunks, i, std.mem.readInt(u64, pay[i * 8 ..][0..8], .little));
 	}
 	// Tail bytes (< 8): pad upper bytes with sign_fill so negation is correct.
-	if (tail_start < pay.len and i < limbs.len) {
+	if (tail_start < pay.len and i < (chunks.len / 8)) {
 		var tail: [8]u8 = .{sign_fill} ** 8;
 		const remaining = pay.len - tail_start;
 		@memcpy(tail[0..remaining], pay[tail_start..]);
-		limbs[i] = std.mem.readInt(u64, &tail, .little);
+		byte_chunks.write(chunks, i, std.mem.readInt(u64, &tail, .little));
 		i += 1;
 	}
-	// For negative payloads, sign-extend the unused high limbs to 0xFFFF...FF
+	// For negative payloads, sign-extend the unused high chunks to 0xFFFF...FF
 	// before negation so the magnitude comes out correct.
 	if (neg) {
-		while (i < limbs.len) : (i += 1) limbs[i] = std.math.maxInt(u64);
-		negateLimbsInPlace(limbs);
+		while (i < (chunks.len / 8)) : (i += 1) byte_chunks.write(chunks, i, std.math.maxInt(u64));
+		negateChunksInPlace(chunks);
 	}
-	// Canonical limb length = trim trailing zero limbs.
-	var n: usize = limbs.len;
-	while (n > 0 and limbs[n - 1] == 0) n -= 1;
+	// Canonical chunk length = trim trailing zero chunks.
+	var n: usize = (chunks.len / 8);
+	while (n > 0 and byte_chunks.read(chunks, n - 1) == 0) n -= 1;
 	return n;
 }
 
-/// Write a magnitude held in `limbs[0..n_limbs]` as a canonical two's-complement
+/// Write a magnitude held in `chunks[0..n_chunks]` as a canonical two's-complement
 /// LE payload byte sequence into `dst`. Returns the canonical payload length.
 ///
-/// Combines what was previously `limbsToBytes + trim + encodeMagAsTwosComp`
+/// Combines what was previously `copyMagnitudePadded + trim + encodeMagAsTwosComp`
 /// into a single pass:
-///   - Skips writing trailing zero high limbs (only writes "live" magnitude).
+///   - Skips writing trailing zero high chunks (only writes "live" magnitude).
 ///   - For positive output, the magnitude bytes are emitted directly; a 0x00
 ///     sign-extension byte is appended only when the high mag byte has bit 7
 ///     set.
 ///   - For negative output, the magnitude is negated as it is emitted (per-byte
 ///     ~b + carry); a 0xFF sign-extension byte is appended only when the high
 ///     post-negation byte has bit 7 clear.
-///   - Empty input (`n_limbs == 0` or all-zero) emits a single 0x00 byte.
+///   - Empty input (`n_chunks == 0` or all-zero) emits a single 0x00 byte.
 ///
-/// Assumes `dst.len >= n_limbs * 8 + 1` (caller-provided buffer). Always
+/// Assumes `dst.len >= n_chunks * 8 + 1` (caller-provided buffer). Always
 /// returns a length ≥ 1.
-fn writeMagLimbsAsTwosComp(limbs: []const u64, n_limbs_in: usize, neg: bool, dst: []u8) usize {
-	// Trim trailing zero limbs for safety (caller usually pre-trims, but handle).
-	var n_limbs = n_limbs_in;
-	while (n_limbs > 0 and limbs[n_limbs - 1] == 0) n_limbs -= 1;
-	if (n_limbs == 0) {
+fn writeMagnitudeChunksAsTwosComp(chunks: []const u8, n_chunks_in: usize, neg: bool, dst: []u8) usize {
+	// Trim trailing zero chunks for safety (caller usually pre-trims, but handle).
+	var n_chunks = n_chunks_in;
+	while (n_chunks > 0 and byte_chunks.read(chunks, n_chunks - 1) == 0) n_chunks -= 1;
+	if (n_chunks == 0) {
 		dst[0] = 0x00;
 		return 1;
 	}
-	// Compute byte length of the live magnitude (high non-zero limb's MSB).
-	const high = limbs[n_limbs - 1];
+	// Compute byte length of the live magnitude (high non-zero chunk's MSB).
+	const high = byte_chunks.read(chunks, n_chunks - 1);
 	const high_bytes: usize = 8 - (@as(usize, @clz(high)) >> 3);
-	const mag_byte_len = (n_limbs - 1) * 8 + high_bytes;
+	const mag_byte_len = (n_chunks - 1) * 8 + high_bytes;
 	std.debug.assert(dst.len >= mag_byte_len + 1);
 
 	if (!neg) {
-		// Positive: write full limbs as LE bytes.
+		// Positive: write full chunks as LE bytes.
 		var i: usize = 0;
-		while (i + 1 < n_limbs) : (i += 1) {
-			std.mem.writeInt(u64, dst[i * 8 ..][0..8], limbs[i], .little);
+		while (i + 1 < n_chunks) : (i += 1) {
+			std.mem.writeInt(u64, dst[i * 8 ..][0..8], byte_chunks.read(chunks, i), .little);
 		}
-		// High limb: write only the live bytes.
+		// High chunk: write only the live bytes.
 		var tail_buf: [8]u8 = undefined;
 		std.mem.writeInt(u64, &tail_buf, high, .little);
-		@memcpy(dst[(n_limbs - 1) * 8 ..][0..high_bytes], tail_buf[0..high_bytes]);
+		@memcpy(dst[(n_chunks - 1) * 8 ..][0..high_bytes], tail_buf[0..high_bytes]);
 		// Sign-extension byte if MSB of high byte set.
 		if ((dst[mag_byte_len - 1] & 0x80) != 0) {
 			dst[mag_byte_len] = 0x00;
@@ -2962,20 +2849,20 @@ fn writeMagLimbsAsTwosComp(limbs: []const u64, n_limbs_in: usize, neg: bool, dst
 		}
 		return mag_byte_len;
 	}
-	// Negative: negate as we emit. For multi-limb magnitudes, the byte-level
-	// 2's complement is (~m + 1) over the full live range. We emit per-limb
+	// Negative: negate as we emit. For multi-chunk magnitudes, the byte-level
+	// 2's complement is (~m + 1) over the full live range. We emit per-chunk
 	// (NOT~) with proper carry; only write the live byte range of the high
-	// limb. The negation is well-defined because caller guarantees the
+	// chunk. The negation is well-defined because caller guarantees the
 	// magnitude is non-zero.
 	var carry: u64 = 1;
 	var i: usize = 0;
-	while (i + 1 < n_limbs) : (i += 1) {
-		const inv = ~limbs[i];
+	while (i + 1 < n_chunks) : (i += 1) {
+		const inv = ~byte_chunks.read(chunks, i);
 		const r = @addWithOverflow(inv, carry);
 		std.mem.writeInt(u64, dst[i * 8 ..][0..8], r[0], .little);
 		carry = r[1];
 	}
-	// High limb: negate then write only the live byte range. Writing only
+	// High chunk: negate then write only the live byte range. Writing only
 	// `high_bytes` is correct because the bytes above the live range are
 	// always 0xFF post-negation (sign-extension of a negative two's-comp
 	// representation), and we don't include those in the canonical payload.
@@ -2983,7 +2870,7 @@ fn writeMagLimbsAsTwosComp(limbs: []const u64, n_limbs_in: usize, neg: bool, dst
 	const high_neg = @addWithOverflow(high_inv, carry);
 	var tail_buf: [8]u8 = undefined;
 	std.mem.writeInt(u64, &tail_buf, high_neg[0], .little);
-	@memcpy(dst[(n_limbs - 1) * 8 ..][0..high_bytes], tail_buf[0..high_bytes]);
+	@memcpy(dst[(n_chunks - 1) * 8 ..][0..high_bytes], tail_buf[0..high_bytes]);
 	// Apply canonicalization for the negative case:
 	//   - If high mag byte had bit 7 set (which is why the magnitude needed
 	//     `high_bytes` bytes), then post-negation that byte may have its
@@ -3028,8 +2915,10 @@ fn writeMagLimbsAsTwosComp(limbs: []const u64, n_limbs_in: usize, neg: bool, dst
 pub const DivModResult = struct { q_len: usize, r_len: usize };
 
 pub fn divModSigned(
-	a_pay: []const u8, b_pay: []const u8,
-	q_pay: []u8, r_pay: []u8,
+	a_pay: []const u8,
+	b_pay: []const u8,
+	q_pay: []u8,
+	r_pay: []u8,
 	work: []u8,
 ) DivModResult {
 	const a_neg = signExtByte(a_pay) == 0xFF;
@@ -3095,7 +2984,7 @@ pub fn divModSigned(
 		r_mag_len = i;
 		while (r_mag_len > 0 and r_pay[r_mag_len - 1] == 0) r_mag_len -= 1;
 	} else {
-		// b_pay.len ≤ 9 but b_mag_len > 8 → use the limb-direct large path.
+		// b_pay.len ≤ 9 but b_mag_len > 8 → use the chunk-direct large path.
 		return divModSignedLarge(a_pay, b_pay, a_neg, b_neg, q_pay, r_pay, work);
 	}
 
@@ -3113,29 +3002,32 @@ pub fn divModSigned(
 }
 
 /// Multi-byte-divisor path of `divModSigned` that skips the byte-magnitude
-/// scratch buffer entirely. Inputs are read directly into u64 limb slots
-/// (with sign-fill + in-limb negation when negative); outputs are written
+/// scratch buffer entirely. Inputs are read directly into u64 chunk slots
+/// (with sign-fill + in-chunk negation when negative); outputs are written
 /// directly as canonical two's-complement BLIP payload bytes (with negation
-/// fused into the per-limb write loop).
+/// fused into the per-chunk write loop).
 ///
-/// This collapses 6 byte-level passes (memcpy×2, byte-trim×2, bytesToLimbs×2,
-/// limbsToBytes×2, byte-trim×2, encodeMagAsTwosComp×2) into 2 limb-level passes
-/// + 2 limb→byte writes. At 2K-bit / 1K-bit this saves ~150-200 ns of pure
+/// This collapses 6 byte-level passes (memcpy×2, byte-trim×2, copyMagnitudePadded×2,
+/// copyMagnitudePadded×2, byte-trim×2, encodeMagAsTwosComp×2) into 2 chunk-level passes
+/// + 2 chunk→byte writes. At 2K-bit / 1K-bit this saves ~150-200 ns of pure
 /// data shuffling.
 /// Byte-direct variant of divModSignedLarge (M15-2 step 2). Same semantics
 /// but uses `divModKnuthU64Bytes` (byte-buffer Knuth D entry) instead of the
-/// limb-packed `divModKnuthU64`. Takes an allocator for the scratch instead
+/// chunk-packed `divModKnuthU64`. Takes an allocator for the scratch instead
 /// of a flat work buffer.
 pub fn divModSignedLargeBytes(
-	a_pay: []const u8, b_pay: []const u8,
-	a_neg: bool, b_neg: bool,
-	q_pay: []u8, r_pay: []u8,
+	a_pay: []const u8,
+	b_pay: []const u8,
+	a_neg: bool,
+	b_neg: bool,
+	q_pay: []u8,
+	r_pay: []u8,
 	allocator: std.mem.Allocator,
 ) std.mem.Allocator.Error!DivModResult {
 	// Materialize positive byte magnitudes. u needs +8 bytes of slack for the
 	// D1 normalization carry chunk that divModKnuthU64Bytes' Knuth core reads.
 	const u_cap = a_pay.len + 8;
-	const u_buf = try allocator.alignedAlloc(u8, .@"8", u_cap);
+	const u_buf = try allocator.alloc(u8, u_cap);
 	defer allocator.free(u_buf);
 	@memcpy(u_buf[0..a_pay.len], a_pay);
 	@memset(u_buf[a_pay.len..], 0);
@@ -3167,48 +3059,46 @@ pub fn divModSignedLargeBytes(
 }
 
 fn divModSignedLarge(
-	a_pay: []const u8, b_pay: []const u8,
-	a_neg: bool, b_neg: bool,
-	q_pay: []u8, r_pay: []u8,
+	a_pay: []const u8,
+	b_pay: []const u8,
+	a_neg: bool,
+	b_neg: bool,
+	q_pay: []u8,
+	r_pay: []u8,
 	work: []u8,
 ) DivModResult {
-	// Carve aligned u64 work region. We don't need a/b byte scratch on this
-	// path, so the entire `work` budget can be used for limb slots. Step over
-	// any leading misalignment so we can cast as []u64.
-	const align_skip = (8 - (@intFromPtr(work.ptr) % 8)) % 8;
-	const work_aligned = work[align_skip..];
-	std.debug.assert(@intFromPtr(work_aligned.ptr) % 8 == 0);
+	const work_bytes = work;
 
-	// Maximum limb counts we may write into. We use the payload byte length
+	// Maximum chunk counts we may write into. We use the payload byte length
 	// upper bound (canonical magnitude can be slightly less). Knuth needs
-	// u with (a_limbs + 1) slots so the D1 normalisation shift has carry-out
+	// u with (a_chunks + 1) slots so the D1 normalisation shift has carry-out
 	// space.
-	const a_limbs_max = (a_pay.len + 7) / 8;
-	const b_limbs_max = (b_pay.len + 7) / 8;
-	const u_lim_bytes = (a_limbs_max + 1) * 8;
-	const q_lim_bytes = a_limbs_max * 8;
-	const r_lim_bytes = b_limbs_max * 8;
-	const v_lim_bytes = b_limbs_max * 8;
-	std.debug.assert(work_aligned.len >= u_lim_bytes + q_lim_bytes + r_lim_bytes + v_lim_bytes);
+	const a_chunks_max = (a_pay.len + 7) / 8;
+	const b_chunks_max = (b_pay.len + 7) / 8;
+	const u_lim_bytes = (a_chunks_max + 1) * 8;
+	const q_lim_bytes = a_chunks_max * 8;
+	const r_lim_bytes = b_chunks_max * 8;
+	const v_lim_bytes = b_chunks_max * 8;
+	std.debug.assert(work_bytes.len >= u_lim_bytes + q_lim_bytes + r_lim_bytes + v_lim_bytes);
 
-	const u_lim_raw = std.mem.bytesAsSlice(u64, work_aligned[0..u_lim_bytes]);
-	const q_lim_raw = std.mem.bytesAsSlice(u64, work_aligned[u_lim_bytes .. u_lim_bytes + q_lim_bytes]);
-	const r_lim_raw = std.mem.bytesAsSlice(u64, work_aligned[u_lim_bytes + q_lim_bytes .. u_lim_bytes + q_lim_bytes + r_lim_bytes]);
+	const u_lim_raw = work_bytes[0..u_lim_bytes];
+	const q_lim_raw = work_bytes[u_lim_bytes .. u_lim_bytes + q_lim_bytes];
+	const r_lim_raw = work_bytes[u_lim_bytes + q_lim_bytes .. u_lim_bytes + q_lim_bytes + r_lim_bytes];
 	const v_lim_off = u_lim_bytes + q_lim_bytes + r_lim_bytes;
-	const v_lim_raw = std.mem.bytesAsSlice(u64, work_aligned[v_lim_off .. v_lim_off + v_lim_bytes]);
-	const u_lim: []u64 = @alignCast(u_lim_raw);
-	const q_lim: []u64 = @alignCast(q_lim_raw);
-	const r_lim: []u64 = @alignCast(r_lim_raw);
-	const v_lim: []u64 = @alignCast(v_lim_raw);
+	const v_lim_raw = work_bytes[v_lim_off .. v_lim_off + v_lim_bytes];
+	const u_lim: []u8 = u_lim_raw;
+	const q_lim: []u8 = q_lim_raw;
+	const r_lim: []u8 = r_lim_raw;
+	const v_lim: []u8 = v_lim_raw;
 
-	// Pack inputs into limb form as positive magnitudes (sign-fill + negate
-	// in-limb when negative). `u_lim` covers a_limbs_max + 1 slots; we only
-	// pack into the first a_limbs_max — `payloadToMagLimbs` zeros all of its
+	// Pack inputs into chunk form as positive magnitudes (sign-fill + negate
+	// in-chunk when negative). `u_lim` covers a_chunks_max + 1 slots; we only
+	// pack into the first a_chunks_max — `payloadToMagnitudeChunks` zeros all of its
 	// argument, so we slice down to avoid touching the carry-out slot, then
 	// zero it explicitly below.
-	const a_lim = payloadToMagLimbs(a_pay, a_neg, u_lim[0..a_limbs_max]);
-	u_lim[a_limbs_max] = 0; // Knuth needs u[u_len_in] writable for D1 carry.
-	const b_lim = payloadToMagLimbs(b_pay, b_neg, v_lim[0..b_limbs_max]);
+	const a_lim = payloadToMagnitudeChunks(a_pay, a_neg, u_lim[0 .. a_chunks_max * 8]);
+	byte_chunks.write(u_lim, a_chunks_max, 0); // Knuth needs u[u_len_in] writable for D1 carry.
+	const b_lim = payloadToMagnitudeChunks(b_pay, b_neg, v_lim[0 .. b_chunks_max * 8]);
 
 	// Zero dividend → q=0, r=0.
 	if (a_lim == 0) {
@@ -3217,22 +3107,22 @@ fn divModSignedLarge(
 		return .{ .q_len = 1, .r_len = 1 };
 	}
 	// Caller asserts b_pay non-zero, so b_lim > 0. The kernel needs v_len ≥ 2
-	// (multi-byte path guarantee). If b somehow reduced to 1 limb (shouldn't
+	// (multi-byte path guarantee). If b somehow reduced to 1 chunk (shouldn't
 	// happen — caller dispatched here because b_pay.len ≥ 10 OR b_mag > 8
 	// bytes), fall back: we'd hit a kernel assertion. So sanity-guard:
 	std.debug.assert(b_lim >= 2);
 
 	// Determine output signs (computed BEFORE Knuth so we can route directly
-	// into `writeMagLimbsAsTwosComp` without a separate re-encode step).
+	// into `writeMagnitudeChunksAsTwosComp` without a separate re-encode step).
 	const got = divModKnuthU64(u_lim, a_lim, v_lim, b_lim, q_lim, r_lim);
 	const q_is_neg = (a_neg != b_neg) and got.q_len != 0;
 	const r_is_neg = a_neg and got.r_len != 0;
 
 	// Write quotient and remainder directly as canonical 2's-complement BLIP
-	// payload bytes — fuses limb→byte unpack + sign-extension append + canonical
+	// payload bytes — fuses chunk→byte unpack + sign-extension append + canonical
 	// trim into one pass.
-	const q_len = writeMagLimbsAsTwosComp(q_lim, got.q_len, q_is_neg, q_pay);
-	const r_len = writeMagLimbsAsTwosComp(r_lim, got.r_len, r_is_neg, r_pay);
+	const q_len = writeMagnitudeChunksAsTwosComp(q_lim, got.q_len, q_is_neg, q_pay);
+	const r_len = writeMagnitudeChunksAsTwosComp(r_lim, got.r_len, r_is_neg, r_pay);
 
 	return .{ .q_len = q_len, .r_len = r_len };
 }
@@ -3274,8 +3164,8 @@ pub fn encodeMagAsTwosComp(buf: []u8, mag_len: usize, is_negative: bool) usize {
 ///
 /// Layout: [a_mag | b_mag | knuth_work].
 ///
-/// The knuth_work portion now sizes for the u64-base path: u (a_limbs+1),
-/// q (a_limbs), r (b_limbs), v (b_limbs) — all u64 limb slots — plus up to
+/// The knuth_work portion now sizes for the u64-base path: u (a_chunks+1),
+/// q (a_chunks), r (b_chunks), v (b_chunks) — all u64 chunk slots — plus up to
 /// 8 bytes of alignment slack (knuth_work may start mid-u64 because a_mag/b_mag
 /// have arbitrary byte lengths). We take the max of byte-base and u64-base
 /// budgets so callers can use either path interchangeably.
@@ -3411,8 +3301,12 @@ pub const SM = struct { sign: i8, len: usize };
 /// Signed add: r = a + b in sign-magnitude form. r_buf receives magnitude.
 /// Caller guarantees r_buf has capacity ≥ max(a_len, b_len) + 1.
 pub fn smAdd(
-	a_sign: i8, a: []const u8, a_len: usize,
-	b_sign: i8, b: []const u8, b_len: usize,
+	a_sign: i8,
+	a: []const u8,
+	a_len: usize,
+	b_sign: i8,
+	b: []const u8,
+	b_len: usize,
 	r_buf: []u8,
 ) SM {
 	if (a_sign == 0) {
@@ -3857,24 +3751,23 @@ pub fn mulRawBlip(
 // a second multiply-add chain (no division), saving the dominant per-iteration
 // cost in modular exponentiation.
 //
-// Definitions (k_limbs = ceil(m_byte_len / 8)):
-//   R   = 2^(64 * k_limbs)        // R > m, R is a power of 2 aligned to a u64 limb
+// Definitions (k_chunks = ceil(m_byte_len / 8)):
+//   R   = 2^(64 * k_chunks)        // R > m, R is a power of 2 aligned to a u64 chunk
 //   x'  = (x * R) mod m            // Montgomery form of x
 //   montMul(a', b') = a' * b' * R^-1 mod m   // returns Mont form of (a*b mod m)
 //
 // To go in:  a' = montMul(a, R^2 mod m)
 // To go out: a  = montMul(a', 1)
 //
-// All intermediate buffers are u64-limb arrays in little-endian order
-// (limb[0] = least significant). The modulus passed in is also k_limbs of u64.
-// Limb arrays are not exposed to callers — the high-level powm path packs
-// BLIP magnitude bytes into u64 limbs then unpacks at the end.
+// Intermediate values are LE magnitude byte buffers. Each multiply-add
+// reads a temporary register-sized chunk and writes its result back as bytes.
+// No typed integer-array views or byte-order-dependent casts are used.
 
 /// Returns `(-m^(-1)) mod 2^64` for odd `m`. Newton's iteration converges
 /// quadratically for the 2-adic inverse of an odd number; six iterations from
 /// the seed `x = m mod 2^64` give 64 bits of precision (1, 2, 4, 8, 16, 32, 64).
 /// Final negate flips `x = m^-1 mod 2^64` to `-m^-1 mod 2^64` so `t + u*m`'s
-/// low limb cancels in the Montgomery reduction step.
+/// low chunk cancels in the Montgomery reduction step.
 pub fn modInvNeg64(m: u64) u64 {
 	std.debug.assert((m & 1) == 1); // m must be odd for a 2-adic inverse to exist
 	// Initial guess: m has the property that x = m gives 4 correct low bits
@@ -3883,129 +3776,129 @@ pub fn modInvNeg64(m: u64) u64 {
 	// 2^k for odd m is `(3*m) ^ 2` — gives 5 correct bits, then 6 doublings
 	// reach 5 * 2^6 = 320 bits, well past 64. We use a slightly more
 	// conservative starting point that is independently verified.
-	var x: u64 = m;             // ≥ 4 bits correct
-	x = x *% (2 -% m *% x);     // ≥ 8 bits
-	x = x *% (2 -% m *% x);     // ≥ 16 bits
-	x = x *% (2 -% m *% x);     // ≥ 32 bits
-	x = x *% (2 -% m *% x);     // ≥ 64 bits
-	x = x *% (2 -% m *% x);     // double-check (idempotent past 64 bits)
+	var x: u64 = m; // ≥ 4 bits correct
+	x = x *% (2 -% m *% x); // ≥ 8 bits
+	x = x *% (2 -% m *% x); // ≥ 16 bits
+	x = x *% (2 -% m *% x); // ≥ 32 bits
+	x = x *% (2 -% m *% x); // ≥ 64 bits
+	x = x *% (2 -% m *% x); // double-check (idempotent past 64 bits)
 	// Now x == m^-1 mod 2^64. Negate two's-complement to get -m^-1.
 	return 0 -% x;
 }
 
-/// CIOS Montgomery reduction of a wide (2*k_limbs) accumulator into a
-/// k_limbs-wide result `out`. After this call `out` holds `(t * R^-1) mod m`,
+/// CIOS Montgomery reduction of a wide (2*k_chunks) accumulator into a
+/// k_chunks-wide result `out`. After this call `out` holds `(t * R^-1) mod m`,
 /// reduced into `[0, m)`.
 ///
-/// `t` length must be exactly `2 * m.len` (read-write — overwritten with
+/// `t` length must be at least `2 * m.len + 8` (overwritten with
 /// scratch). `out.len == m.len`.
-fn montReduceCios(t: []u64, m: []const u64, m_inv_neg: u64, out: []u64) void {
-	const k = m.len;
-	std.debug.assert(t.len >= 2 * k + 1);
-	std.debug.assert(out.len == k);
+fn montReduceCios(t: []u8, m: []const u8, m_inv_neg: u64, out: []u8) void {
+	const k = (m.len / 8);
+	std.debug.assert((t.len / 8) >= 2 * k + 1);
+	std.debug.assert((out.len / 8) == k);
 
-	// Process k digits — each iteration zeroes one low limb of `t` by adding
+	// Process k digits — each iteration zeroes one low chunk of `t` by adding
 	// u_i * m at offset i, where u_i = t[i] * m_inv_neg mod 2^64.
 	var i: usize = 0;
 	while (i < k) : (i += 1) {
-		const u: u64 = t[i] *% m_inv_neg;
-		// t[i..] += u * m (k+1 limbs touched, last is the carry slot).
+		const u: u64 = byte_chunks.read(t, i) *% m_inv_neg;
+		// t[i..] += u * m (k+1 chunks touched, last is the carry slot).
 		var carry: u64 = 0;
 		var j: usize = 0;
 		while (j < k) : (j += 1) {
 			// product = t[i+j] + u * m[j] + carry
-			const prod: u128 = @as(u128, u) * @as(u128, m[j]) + @as(u128, t[i + j]) + @as(u128, carry);
-			t[i + j] = @truncate(prod);
+			const prod: u128 = @as(u128, u) * @as(u128, byte_chunks.read(m, j)) + @as(u128, byte_chunks.read(t, i + j)) + @as(u128, carry);
+			byte_chunks.write(t, i + j, @truncate(prod));
 			carry = @intCast(prod >> 64);
 		}
 		// Propagate carry up the rest of t. Track an additional carry-out
 		// because the final t[2k] may itself overflow once across the k outer
 		// passes (we collect those into `extra_high`).
 		var pos: usize = i + k;
-		while (carry != 0 and pos < t.len) {
-			const sum: u128 = @as(u128, t[pos]) + @as(u128, carry);
-			t[pos] = @truncate(sum);
+		while (carry != 0 and pos < (t.len / 8)) {
+			const sum: u128 = @as(u128, byte_chunks.read(t, pos)) + @as(u128, carry);
+			byte_chunks.write(t, pos, @truncate(sum));
 			carry = @intCast(sum >> 64);
 			pos += 1;
 		}
 		// By construction t[i] is now zero (the whole point of u).
-		std.debug.assert(t[i] == 0);
+		std.debug.assert(byte_chunks.read(t, i) == 0);
 	}
 	// After k iterations, the answer lives in t[k..2k] (and possibly the
 	// carry slot t[2k]). Copy it down. If extra carry was set or result >= m,
 	// subtract m once.
-	const high_carry: u64 = if (t.len > 2 * k) t[2 * k] else 0;
+	const high_carry: u64 = if ((t.len / 8) > 2 * k) byte_chunks.read(t, 2 * k) else 0;
 
 	// out = t[k..2k]
-	@memcpy(out, t[k .. 2 * k]);
+	@memcpy(out, t[(k) * 8 .. (2 * k) * 8]);
 
 	// Conditional subtraction: if high_carry != 0 OR out >= m, subtract m.
 	// (After CIOS, out is bounded by 2m so a single subtract suffices.)
-	const need_sub = high_carry != 0 or cmpLimbsGE(out, m);
+	const need_sub = high_carry != 0 or chunksGE(out, m);
 	if (need_sub) {
-		subLimbsInPlace(out, m);
+		subtractChunksInPlace(out, m);
 	}
 }
 
-/// Returns true iff a >= b (both same length, LE limb arrays).
-inline fn cmpLimbsGE(a: []const u64, b: []const u64) bool {
-	std.debug.assert(a.len == b.len);
-	var i: usize = a.len;
+/// Returns true iff a >= b (same-length LE magnitude byte buffers).
+inline fn chunksGE(a: []const u8, b: []const u8) bool {
+	std.debug.assert((a.len / 8) == (b.len / 8));
+	var i: usize = (a.len / 8);
 	while (i > 0) {
 		i -= 1;
-		if (a[i] != b[i]) return a[i] > b[i];
+		if (byte_chunks.read(a, i) != byte_chunks.read(b, i)) return byte_chunks.read(a, i) > byte_chunks.read(b, i);
 	}
 	return true; // equal
 }
 
 /// In-place subtraction: `target -= sub` (caller guarantees target >= sub).
-inline fn subLimbsInPlace(target: []u64, sub: []const u64) void {
-	std.debug.assert(target.len == sub.len);
+inline fn subtractChunksInPlace(target: []u8, sub: []const u8) void {
+	std.debug.assert((target.len / 8) == (sub.len / 8));
 	var borrow: u64 = 0;
 	var i: usize = 0;
-	while (i < target.len) : (i += 1) {
-		const a = target[i];
-		const b = sub[i];
+	while (i < (target.len / 8)) : (i += 1) {
+		const a = byte_chunks.read(target, i);
+		const b = byte_chunks.read(sub, i);
 		const d1 = @subWithOverflow(a, b);
 		const d2 = @subWithOverflow(d1[0], borrow);
-		target[i] = d2[0];
+		byte_chunks.write(target, i, d2[0]);
 		borrow = @as(u64, d1[1]) + @as(u64, d2[1]);
 	}
 }
 
-/// Montgomery multiplication: `out = a * b * R^-1 mod m`. All limb arrays are
-/// LE u64 of length `k = m.len`. `scratch` length must be at least `2*k + 1`
-/// (used as the wide intermediate `t`). Caller supplies all buffers.
+/// Montgomery multiplication over LE magnitude byte buffers.
+/// out = a * b * R^-1 mod m; inputs and output have m.len bytes (multiple of 8).
+/// Scratch needs 2 * m.len + 8 bytes. Values are read into registers per step.
 pub fn montMul(
-	a: []const u64,
-	b: []const u64,
-	m: []const u64,
+	a: []const u8,
+	b: []const u8,
+	m: []const u8,
 	m_inv_neg: u64,
-	out: []u64,
-	scratch: []u64,
+	out: []u8,
+	scratch: []u8,
 ) void {
-	const k = m.len;
-	std.debug.assert(a.len == k and b.len == k and out.len == k);
-	std.debug.assert(scratch.len >= 2 * k + 1);
+	const k = (m.len / 8);
+	std.debug.assert((a.len / 8) == k and (b.len / 8) == k and (out.len / 8) == k);
+	std.debug.assert((scratch.len / 8) >= 2 * k + 1);
 
-	// Stage 1: schoolbook multiply a * b → t (2k limbs, plus carry slot).
-	@memset(scratch[0 .. 2 * k + 1], 0);
+	// Stage 1: schoolbook multiply a * b → t (2k chunks, plus carry slot).
+	@memset(scratch[(0) * 8 .. (2 * k + 1) * 8], 0);
 	var i: usize = 0;
 	while (i < k) : (i += 1) {
-		const ai = a[i];
+		const ai = byte_chunks.read(a, i);
 		if (ai == 0) continue;
 		var carry: u64 = 0;
 		var j: usize = 0;
 		while (j < k) : (j += 1) {
-			const prod: u128 = @as(u128, ai) * @as(u128, b[j]) + @as(u128, scratch[i + j]) + @as(u128, carry);
-			scratch[i + j] = @truncate(prod);
+			const prod: u128 = @as(u128, ai) * @as(u128, byte_chunks.read(b, j)) + @as(u128, byte_chunks.read(scratch, i + j)) + @as(u128, carry);
+			byte_chunks.write(scratch, i + j, @truncate(prod));
 			carry = @intCast(prod >> 64);
 		}
 		// Propagate the final carry up.
 		var pos: usize = i + k;
-		while (carry != 0 and pos < scratch.len) {
-			const sum: u128 = @as(u128, scratch[pos]) + @as(u128, carry);
-			scratch[pos] = @truncate(sum);
+		while (carry != 0 and pos < (scratch.len / 8)) {
+			const sum: u128 = @as(u128, byte_chunks.read(scratch, pos)) + @as(u128, carry);
+			byte_chunks.write(scratch, pos, @truncate(sum));
 			carry = @intCast(sum >> 64);
 			pos += 1;
 		}
@@ -4015,53 +3908,22 @@ pub fn montMul(
 	montReduceCios(scratch, m, m_inv_neg, out);
 }
 
-/// Pack a little-endian byte slice into a little-endian u64 limb array of
-/// length `k_limbs`. Bytes past the input are zero-extended; bytes past the
-/// limbs are dropped (caller responsibility to size correctly).
-pub fn bytesToLimbs(bytes: []const u8, limbs: []u64) void {
-	@memset(limbs, 0);
-	const max_full = (bytes.len / 8);
-	var i: usize = 0;
-	while (i < max_full and i < limbs.len) : (i += 1) {
-		limbs[i] = std.mem.readInt(u64, bytes[i * 8 ..][0..8], .little);
-	}
-	// Tail bytes (< 8) of the input.
-	const tail_start = max_full * 8;
-	if (tail_start < bytes.len and i < limbs.len) {
-		var tail: [8]u8 = .{0} ** 8;
-		const remaining = bytes.len - tail_start;
-		@memcpy(tail[0..remaining], bytes[tail_start..]);
-		limbs[i] = std.mem.readInt(u64, &tail, .little);
-	}
-}
-
-/// Unpack a little-endian u64 limb array into a little-endian byte slice.
-/// `bytes.len` may be less than `limbs.len * 8` — extra high bytes dropped.
-pub fn limbsToBytes(limbs: []const u64, bytes: []u8) void {
-	@memset(bytes, 0);
-	const max_full = bytes.len / 8;
-	var i: usize = 0;
-	while (i < max_full and i < limbs.len) : (i += 1) {
-		std.mem.writeInt(u64, bytes[i * 8 ..][0..8], limbs[i], .little);
-	}
-	const tail_start = max_full * 8;
-	if (tail_start < bytes.len and i < limbs.len) {
-		var tail: [8]u8 = undefined;
-		std.mem.writeInt(u64, &tail, limbs[i], .little);
-		const remaining = bytes.len - tail_start;
-		@memcpy(bytes[tail_start..], tail[0..remaining]);
-	}
-}
-
-/// Compute `R^2 mod m` where R = 2^(64*k_limbs), m has length k_limbs.
-/// Algorithm: start with x = 1, then double mod m for `2 * 64 * k_limbs` bits.
-/// O(k_limbs * k_limbs) work — fine because this runs once per powm call.
-/// Result written into `out` (length k_limbs).
-pub fn computeR2ModM(m: []const u64, out: []u64) void {
-	const k = m.len;
-	std.debug.assert(out.len == k);
+/// Copy magnitude bytes with zero extension, truncating to output capacity.
+pub fn copyMagnitudePadded(bytes: []const u8, out: []u8) void {
 	@memset(out, 0);
-	out[0] = 1;
+	const count = @min(bytes.len, out.len);
+	@memcpy(out[0..count], bytes[0..count]);
+}
+
+/// Compute `R^2 mod m` where R = 2^(64*k_chunks), m has length k_chunks.
+/// Algorithm: start with x = 1, then double mod m for `2 * 64 * k_chunks` bits.
+/// O(k_chunks * k_chunks) work — fine because this runs once per powm call.
+/// Result written into `out` (length k_chunks).
+pub fn computeR2ModM(m: []const u8, out: []u8) void {
+	const k = (m.len / 8);
+	std.debug.assert((out.len / 8) == k);
+	@memset(out, 0);
+	byte_chunks.write(out, 0, 1);
 	const total_bits: usize = 2 * 64 * k;
 	var bit: usize = 0;
 	while (bit < total_bits) : (bit += 1) {
@@ -4069,14 +3931,14 @@ pub fn computeR2ModM(m: []const u64, out: []u64) void {
 		var c: u64 = 0;
 		var i: usize = 0;
 		while (i < k) : (i += 1) {
-			const new_top = out[i] >> 63;
-			out[i] = (out[i] << 1) | c;
+			const new_top = byte_chunks.read(out, i) >> 63;
+			byte_chunks.write(out, i, (byte_chunks.read(out, i) << 1) | c);
 			c = new_top;
 		}
 		// Reduce: if c set OR out >= m, subtract m (handles "modulus has top
 		// bit set so out is at most 2m-1 after a single shift").
-		if (c != 0 or cmpLimbsGE(out, m)) {
-			subLimbsInPlace(out, m);
+		if (c != 0 or chunksGE(out, m)) {
+			subtractChunksInPlace(out, m);
 		}
 	}
 }
@@ -4408,137 +4270,137 @@ test "negateInPlace: known multi-limb -1 round-trip" {
 	for (0..16) |i| try testing.expectEqual(@as(u8, 0xFF), p[i]);
 }
 
-test "negateLimbsInPlace: zero stays zero" {
+test "negateChunksInPlace: zero stays zero" {
 	var l = [_]u64{ 0, 0, 0 };
-	negateLimbsInPlace(&l);
+	negateChunksInPlace(std.mem.sliceAsBytes(&l));
 	try testing.expectEqual(@as(u64, 0), l[0]);
 	try testing.expectEqual(@as(u64, 0), l[1]);
 	try testing.expectEqual(@as(u64, 0), l[2]);
 }
 
-test "negateLimbsInPlace: 1 -> -1 (all ones over array)" {
+test "negateChunksInPlace: 1 -> -1 (all ones over array)" {
 	var l = [_]u64{ 1, 0, 0 };
-	negateLimbsInPlace(&l);
+	negateChunksInPlace(std.mem.sliceAsBytes(&l));
 	try testing.expectEqual(@as(u64, std.math.maxInt(u64)), l[0]);
 	try testing.expectEqual(@as(u64, std.math.maxInt(u64)), l[1]);
 	try testing.expectEqual(@as(u64, std.math.maxInt(u64)), l[2]);
 }
 
-test "negateLimbsInPlace: round-trip (negate twice == identity)" {
+test "negateChunksInPlace: round-trip (negate twice == identity)" {
 	const orig = [_]u64{ 0x12345678_9ABCDEF0, 0xCAFEBABE_DEADBEEF, 0x0102_0304_0506_0708, 0 };
 	var l = orig;
-	negateLimbsInPlace(&l);
-	negateLimbsInPlace(&l);
+	negateChunksInPlace(std.mem.sliceAsBytes(&l));
+	negateChunksInPlace(std.mem.sliceAsBytes(&l));
 	for (l, orig) |x, o| try testing.expectEqual(o, x);
 }
 
-test "payloadToMagLimbs: positive aligned (8 bytes = 1 limb)" {
+test "payloadToMagnitudeChunks: positive aligned (8 bytes = 1 limb)" {
 	var limbs = [_]u64{ 0, 0 };
 	const pay = [_]u8{ 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08 };
-	const n = payloadToMagLimbs(&pay, false, &limbs);
+	const n = payloadToMagnitudeChunks(&pay, false, std.mem.sliceAsBytes(&limbs));
 	try testing.expectEqual(@as(usize, 1), n);
 	try testing.expectEqual(@as(u64, 0x0807060504030201), limbs[0]);
 	try testing.expectEqual(@as(u64, 0), limbs[1]);
 }
 
-test "payloadToMagLimbs: positive 9-byte (partial high limb)" {
+test "payloadToMagnitudeChunks: positive 9-byte (partial high limb)" {
 	var limbs = [_]u64{ 0, 0 };
 	const pay = [_]u8{ 0xFF, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x12 };
-	const n = payloadToMagLimbs(&pay, false, &limbs);
+	const n = payloadToMagnitudeChunks(&pay, false, std.mem.sliceAsBytes(&limbs));
 	try testing.expectEqual(@as(usize, 2), n);
 	try testing.expectEqual(@as(u64, 0xFF), limbs[0]);
 	try testing.expectEqual(@as(u64, 0x12), limbs[1]);
 }
 
-test "payloadToMagLimbs: negative -1 (single 0xFF byte)" {
+test "payloadToMagnitudeChunks: negative -1 (single 0xFF byte)" {
 	var limbs = [_]u64{0};
 	const pay = [_]u8{0xFF};
-	const n = payloadToMagLimbs(&pay, true, &limbs);
+	const n = payloadToMagnitudeChunks(&pay, true, std.mem.sliceAsBytes(&limbs));
 	try testing.expectEqual(@as(usize, 1), n);
 	try testing.expectEqual(@as(u64, 1), limbs[0]);
 }
 
-test "payloadToMagLimbs: negative -129 (LE: 7F FF) -> mag 129 in 1 limb" {
+test "payloadToMagnitudeChunks: negative -129 (LE: 7F FF) -> mag 129 in 1 limb" {
 	var limbs = [_]u64{ 0, 0 };
 	const pay = [_]u8{ 0x7F, 0xFF };
-	const n = payloadToMagLimbs(&pay, true, &limbs);
+	const n = payloadToMagnitudeChunks(&pay, true, std.mem.sliceAsBytes(&limbs));
 	try testing.expectEqual(@as(usize, 1), n);
 	try testing.expectEqual(@as(u64, 129), limbs[0]);
 }
 
-test "payloadToMagLimbs: trailing zero limbs trimmed" {
+test "payloadToMagnitudeChunks: trailing zero limbs trimmed" {
 	var limbs = [_]u64{ 0, 0, 0, 0 };
-	const pay = [_]u8{ 0x42 };
-	const n = payloadToMagLimbs(&pay, false, &limbs);
+	const pay = [_]u8{0x42};
+	const n = payloadToMagnitudeChunks(&pay, false, std.mem.sliceAsBytes(&limbs));
 	try testing.expectEqual(@as(usize, 1), n);
 	try testing.expectEqual(@as(u64, 0x42), limbs[0]);
 }
 
-test "writeMagLimbsAsTwosComp: positive single byte (5)" {
+test "writeMagnitudeChunksAsTwosComp: positive single byte (5)" {
 	const limbs = [_]u64{5};
 	var dst: [16]u8 = undefined;
-	const n = writeMagLimbsAsTwosComp(&limbs, 1, false, &dst);
+	const n = writeMagnitudeChunksAsTwosComp(std.mem.sliceAsBytes(&limbs), 1, false, &dst);
 	try testing.expectEqual(@as(usize, 1), n);
 	try testing.expectEqual(@as(u8, 5), dst[0]);
 }
 
-test "writeMagLimbsAsTwosComp: positive 128 (needs 0x00 sign-ext)" {
+test "writeMagnitudeChunksAsTwosComp: positive 128 (needs 0x00 sign-ext)" {
 	const limbs = [_]u64{128};
 	var dst: [16]u8 = undefined;
-	const n = writeMagLimbsAsTwosComp(&limbs, 1, false, &dst);
+	const n = writeMagnitudeChunksAsTwosComp(std.mem.sliceAsBytes(&limbs), 1, false, &dst);
 	try testing.expectEqual(@as(usize, 2), n);
 	try testing.expectEqual(@as(u8, 0x80), dst[0]);
 	try testing.expectEqual(@as(u8, 0x00), dst[1]);
 }
 
-test "writeMagLimbsAsTwosComp: negative -1" {
+test "writeMagnitudeChunksAsTwosComp: negative -1" {
 	const limbs = [_]u64{1};
 	var dst: [16]u8 = undefined;
-	const n = writeMagLimbsAsTwosComp(&limbs, 1, true, &dst);
+	const n = writeMagnitudeChunksAsTwosComp(std.mem.sliceAsBytes(&limbs), 1, true, &dst);
 	try testing.expectEqual(@as(usize, 1), n);
 	try testing.expectEqual(@as(u8, 0xFF), dst[0]);
 }
 
-test "writeMagLimbsAsTwosComp: negative -128 (single byte 0x80)" {
+test "writeMagnitudeChunksAsTwosComp: negative -128 (single byte 0x80)" {
 	const limbs = [_]u64{128};
 	var dst: [16]u8 = undefined;
-	const n = writeMagLimbsAsTwosComp(&limbs, 1, true, &dst);
+	const n = writeMagnitudeChunksAsTwosComp(std.mem.sliceAsBytes(&limbs), 1, true, &dst);
 	try testing.expectEqual(@as(usize, 1), n);
 	try testing.expectEqual(@as(u8, 0x80), dst[0]);
 }
 
-test "writeMagLimbsAsTwosComp: negative -129 (LE: 7F FF)" {
+test "writeMagnitudeChunksAsTwosComp: negative -129 (LE: 7F FF)" {
 	const limbs = [_]u64{129};
 	var dst: [16]u8 = undefined;
-	const n = writeMagLimbsAsTwosComp(&limbs, 1, true, &dst);
+	const n = writeMagnitudeChunksAsTwosComp(std.mem.sliceAsBytes(&limbs), 1, true, &dst);
 	try testing.expectEqual(@as(usize, 2), n);
 	try testing.expectEqual(@as(u8, 0x7F), dst[0]);
 	try testing.expectEqual(@as(u8, 0xFF), dst[1]);
 }
 
-test "writeMagLimbsAsTwosComp: zero magnitude → single 0x00" {
+test "writeMagnitudeChunksAsTwosComp: zero magnitude → single 0x00" {
 	const limbs = [_]u64{ 0, 0 };
 	var dst: [16]u8 = undefined;
-	const n_pos = writeMagLimbsAsTwosComp(&limbs, 2, false, &dst);
+	const n_pos = writeMagnitudeChunksAsTwosComp(std.mem.sliceAsBytes(&limbs), 2, false, &dst);
 	try testing.expectEqual(@as(usize, 1), n_pos);
 	try testing.expectEqual(@as(u8, 0x00), dst[0]);
-	const n_neg = writeMagLimbsAsTwosComp(&limbs, 2, true, &dst);
+	const n_neg = writeMagnitudeChunksAsTwosComp(std.mem.sliceAsBytes(&limbs), 2, true, &dst);
 	try testing.expectEqual(@as(usize, 1), n_neg);
 	try testing.expectEqual(@as(u8, 0x00), dst[0]);
 }
 
-test "writeMagLimbsAsTwosComp: positive multi-limb 9-byte mag" {
+test "writeMagnitudeChunksAsTwosComp: positive multi-limb 9-byte mag" {
 	// magnitude = 0x12 << 64 | 0xFF = LE bytes [FF,00,00,00,00,00,00,00,12]
 	// Positive, high byte 0x12 has bit 7 clear → no sign-ext byte.
 	const limbs = [_]u64{ 0xFF, 0x12 };
 	var dst: [32]u8 = undefined;
-	const n = writeMagLimbsAsTwosComp(&limbs, 2, false, &dst);
+	const n = writeMagnitudeChunksAsTwosComp(std.mem.sliceAsBytes(&limbs), 2, false, &dst);
 	try testing.expectEqual(@as(usize, 9), n);
 	try testing.expectEqual(@as(u8, 0xFF), dst[0]);
 	try testing.expectEqual(@as(u8, 0x12), dst[8]);
 }
 
-test "payloadToMagLimbs ↔ writeMagLimbsAsTwosComp round-trip (random)" {
+test "payloadToMagnitudeChunks ↔ writeMagnitudeChunksAsTwosComp round-trip (random)" {
 	var rng = std.Random.DefaultPrng.init(0xD00D_CAFE);
 	const r = rng.random();
 	var i: usize = 0;
@@ -4556,10 +4418,10 @@ test "payloadToMagLimbs ↔ writeMagLimbsAsTwosComp round-trip (random)" {
 		// Pack to limbs.
 		var limbs: [8]u64 = undefined;
 		const n_lim_storage = (canon_len + 7) / 8;
-		const n_lim = payloadToMagLimbs(pay_canon, neg, limbs[0..n_lim_storage]);
+		const n_lim = payloadToMagnitudeChunks(pay_canon, neg, std.mem.sliceAsBytes(limbs[0..n_lim_storage]));
 		// Write back.
 		var dst: [64]u8 = undefined;
-		const out_len = writeMagLimbsAsTwosComp(&limbs, n_lim, neg, &dst);
+		const out_len = writeMagnitudeChunksAsTwosComp(std.mem.sliceAsBytes(&limbs), n_lim, neg, &dst);
 		// Round-trip should reproduce canonical payload exactly.
 		try testing.expectEqual(canon_len, out_len);
 		try testing.expectEqualSlices(u8, pay_canon, dst[0..out_len]);
@@ -4786,7 +4648,7 @@ test "divExactBy3: round-trip" {
 	const cases = [_][]const u8{
 		&[_]u8{ 0xFF, 0xFF, 0xFF },
 		&[_]u8{ 0x12, 0x34, 0x56, 0x78 },
-		&[_]u8{ 0x55 },
+		&[_]u8{0x55},
 	};
 	for (cases) |a| {
 		// Multiply by 3, then divide by 3, expect identity.
@@ -4801,7 +4663,7 @@ test "divExactBy2: round-trip" {
 	const cases = [_][]const u8{
 		&[_]u8{ 0xFF, 0xFF, 0xFF },
 		&[_]u8{ 0x12, 0x34, 0x56, 0x78 },
-		&[_]u8{ 0x55 },
+		&[_]u8{0x55},
 	};
 	for (cases) |a| {
 		var prod_buf: [16]u8 = undefined;
@@ -5282,38 +5144,20 @@ test "divModKnuth: round-trip large (256-byte dividend, 32-byte divisor)" {
 
 // ── divModKnuthU64 tests (M7-3 u64-base reformulation) ──────────────────────
 
-/// Test helper: schoolbook multiply two u64 limb arrays into `r`.
-/// Used to build u = q*v dividends for round-trip tests.
-fn testMulLimbs(a: []const u64, b: []const u64, r: []u64) usize {
-	@memset(r, 0);
-	var i: usize = 0;
-	while (i < a.len) : (i += 1) {
-		var carry: u64 = 0;
-		var k: usize = 0;
-		while (k < b.len) : (k += 1) {
-			const p: u128 = @as(u128, a[i]) * @as(u128, b[k]);
-			const sum: u128 = @as(u128, r[i + k]) + p + @as(u128, carry);
-			r[i + k] = @truncate(sum);
-			carry = @truncate(sum >> 64);
-		}
-		r[i + b.len] = carry;
-	}
-	var n: usize = a.len + b.len;
-	while (n > 0 and r[n - 1] == 0) n -= 1;
-	return n;
-}
+// Test helper: schoolbook multiply two u64 limb arrays into `r`.
+// Used to build u = q*v dividends for round-trip tests.
 
 test "divModKnuthU64: u < v → q=0, r=u" {
 	const allocator = std.testing.allocator;
 	const v_init = [_]u64{ 0x1111_2222_3333_4444, 0x5555_6666_7777_8888 };
-	const u_init = [_]u64{ 0xDEAD_BEEF_CAFE_F00D };
+	const u_init = [_]u64{0xDEAD_BEEF_CAFE_F00D};
 	const u = try allocator.alloc(u64, u_init.len + 1); // +1 capacity for normalize
 	defer allocator.free(u);
 	u[0] = u_init[0];
 	u[1] = 0;
 	var q: [4]u64 = undefined;
 	var r: [4]u64 = undefined;
-	const got = divModKnuthU64(u, u_init.len, &v_init, v_init.len, &q, &r);
+	const got = divModKnuthU64(std.mem.sliceAsBytes(u), u_init.len, std.mem.sliceAsBytes(&v_init), v_init.len, std.mem.sliceAsBytes(&q), std.mem.sliceAsBytes(&r));
 	try testing.expectEqual(@as(usize, 0), got.q_len);
 	try testing.expectEqual(@as(usize, 1), got.r_len);
 	try testing.expectEqual(u_init[0], r[0]);
@@ -5329,13 +5173,33 @@ test "divModKnuthU64: u == v → q=1, r=0" {
 	u[2] = 0;
 	var q: [4]u64 = undefined;
 	var r: [4]u64 = undefined;
-	const got = divModKnuthU64(u, v_init.len, &v_init, v_init.len, &q, &r);
+	const got = divModKnuthU64(std.mem.sliceAsBytes(u), v_init.len, std.mem.sliceAsBytes(&v_init), v_init.len, std.mem.sliceAsBytes(&q), std.mem.sliceAsBytes(&r));
 	try testing.expectEqual(@as(usize, 1), got.q_len);
 	try testing.expectEqual(@as(u64, 1), q[0]);
 	try testing.expectEqual(@as(usize, 0), got.r_len);
 }
 
 test "divModKnuthU64: round-trip — random q*v dividends recover q exactly" {
+	const oracle = struct {
+		fn multiply(a: []const u64, b: []const u64, r: []u64) usize {
+			@memset(r, 0);
+			var i: usize = 0;
+			while (i < a.len) : (i += 1) {
+				var carry: u64 = 0;
+				var k: usize = 0;
+				while (k < b.len) : (k += 1) {
+					const p: u128 = @as(u128, a[i]) * @as(u128, b[k]);
+					const sum: u128 = @as(u128, r[i + k]) + p + @as(u128, carry);
+					r[i + k] = @truncate(sum);
+					carry = @truncate(sum >> 64);
+				}
+				r[i + b.len] = carry;
+			}
+			var n: usize = a.len + b.len;
+			while (n > 0 and r[n - 1] == 0) n -= 1;
+			return n;
+		}
+	};
 	const allocator = std.testing.allocator;
 	var rng = std.Random.DefaultPrng.init(0xCAFEFACE_DEADBEEF);
 	const r_rng = rng.random();
@@ -5354,13 +5218,13 @@ test "divModKnuthU64: round-trip — random q*v dividends recover q exactly" {
 			if (v_in[v_len - 1] == 0) v_in[v_len - 1] = 1;
 			const u_buf = try allocator.alloc(u64, q_len + v_len + 1); // +1 for normalize headroom
 			defer allocator.free(u_buf);
-			const u_len = testMulLimbs(q_in, v_in, u_buf[0 .. q_len + v_len]);
+			const u_len = oracle.multiply(q_in, v_in, u_buf[0 .. q_len + v_len]);
 
 			const q_out = try allocator.alloc(u64, u_len);
 			defer allocator.free(q_out);
 			const r_out = try allocator.alloc(u64, v_len);
 			defer allocator.free(r_out);
-			const got = divModKnuthU64(u_buf, u_len, v_in, v_len, q_out, r_out);
+			const got = divModKnuthU64(std.mem.sliceAsBytes(u_buf), u_len, std.mem.sliceAsBytes(v_in), v_len, std.mem.sliceAsBytes(q_out), std.mem.sliceAsBytes(r_out));
 
 			testing.expectEqual(q_len, got.q_len) catch |e| {
 				std.debug.print("v_len={d} trial={d}: q_len={d} got.q_len={d}\n", .{ v_len, trial, q_len, got.q_len });
@@ -5399,8 +5263,8 @@ test "divModKnuthU64: cross-check vs byte-base divModKnuth (random small)" {
 		defer allocator.free(v_bytes);
 		const u_bytes = try allocator.alloc(u8, u_limbs * 8);
 		defer allocator.free(u_bytes);
-		limbsToBytes(v_lim, v_bytes);
-		limbsToBytes(u_lim_orig, u_bytes);
+		copyMagnitudePadded(std.mem.sliceAsBytes(v_lim), v_bytes);
+		copyMagnitudePadded(std.mem.sliceAsBytes(u_lim_orig), u_bytes);
 		// Byte-form canonical lengths (trim trailing zero bytes).
 		var v_byte_len: usize = v_bytes.len;
 		while (v_byte_len > 0 and v_bytes[v_byte_len - 1] == 0) v_byte_len -= 1;
@@ -5425,15 +5289,15 @@ test "divModKnuthU64: cross-check vs byte-base divModKnuth (random small)" {
 		defer allocator.free(q_lim);
 		const r_lim = try allocator.alloc(u64, v_limbs);
 		defer allocator.free(r_lim);
-		const got = divModKnuthU64(u_lim, u_limbs, v_lim, v_limbs, q_lim, r_lim);
+		const got = divModKnuthU64(std.mem.sliceAsBytes(u_lim), u_limbs, std.mem.sliceAsBytes(v_lim), v_limbs, std.mem.sliceAsBytes(q_lim), std.mem.sliceAsBytes(r_lim));
 
 		// Convert u64 outputs to bytes for comparison with the byte oracle.
 		const q_lim_bytes = try allocator.alloc(u8, got.q_len * 8);
 		defer allocator.free(q_lim_bytes);
 		const r_lim_bytes = try allocator.alloc(u8, got.r_len * 8);
 		defer allocator.free(r_lim_bytes);
-		limbsToBytes(q_lim[0..got.q_len], q_lim_bytes);
-		limbsToBytes(r_lim[0..got.r_len], r_lim_bytes);
+		copyMagnitudePadded(std.mem.sliceAsBytes(q_lim[0..got.q_len]), q_lim_bytes);
+		copyMagnitudePadded(std.mem.sliceAsBytes(r_lim[0..got.r_len]), r_lim_bytes);
 		// Trim u64-output bytes to canonical length.
 		var q_lim_byte_len: usize = q_lim_bytes.len;
 		while (q_lim_byte_len > 0 and q_lim_bytes[q_lim_byte_len - 1] == 0) q_lim_byte_len -= 1;
@@ -5461,12 +5325,12 @@ test "divModKnuthU64Bytes: cross-check vs divModKnuth (M15-2 byte-direct entry)"
 	var rng = std.Random.DefaultPrng.init(0xB17E_5817_5817_C0DE);
 	const r_rng = rng.random();
 	const sizes = [_]struct { u: usize, v: usize }{
-		.{ .u = 16, .v = 9 },     // 1-byte tail past 1-limb boundary
-		.{ .u = 17, .v = 10 },    // odd lengths
-		.{ .u = 64, .v = 32 },    // clean 8-byte multiples
-		.{ .u = 100, .v = 50 },   // mid-size, odd tail
-		.{ .u = 256, .v = 128 },  // 2K-bit dividend / 1K-bit divisor
-		.{ .u = 512, .v = 256 },  // 4K-bit dividend / 2K-bit divisor
+		.{ .u = 16, .v = 9 }, // 1-byte tail past 1-limb boundary
+		.{ .u = 17, .v = 10 }, // odd lengths
+		.{ .u = 64, .v = 32 }, // clean 8-byte multiples
+		.{ .u = 100, .v = 50 }, // mid-size, odd tail
+		.{ .u = 256, .v = 128 }, // 2K-bit dividend / 1K-bit divisor
+		.{ .u = 512, .v = 256 }, // 4K-bit dividend / 2K-bit divisor
 	};
 	for (sizes) |sz| {
 		var trial: usize = 0;
@@ -5520,13 +5384,13 @@ test "divModKnuthU64: edge — v top-limb already normalized (s=0)" {
 	u[u_init.len] = 0;
 	var q: [4]u64 = undefined;
 	var r: [4]u64 = undefined;
-	const got = divModKnuthU64(u, u_init.len, &v, v.len, &q, &r);
+	const got = divModKnuthU64(std.mem.sliceAsBytes(u), u_init.len, std.mem.sliceAsBytes(&v), v.len, std.mem.sliceAsBytes(&q), std.mem.sliceAsBytes(&r));
 
 	// Cross-check vs byte-base.
 	var v_bytes: [16]u8 = undefined;
 	var u_bytes: [24]u8 = undefined;
-	limbsToBytes(&v, &v_bytes);
-	limbsToBytes(&u_init, &u_bytes);
+	copyMagnitudePadded(std.mem.sliceAsBytes(&v), &v_bytes);
+	copyMagnitudePadded(std.mem.sliceAsBytes(&u_init), &u_bytes);
 	var q_ref_bytes: [25]u8 = undefined;
 	var r_ref_bytes: [16]u8 = undefined;
 	const work = try allocator.alloc(u8, divModKnuthScratchNeed(u_bytes.len, v_bytes.len));
@@ -5535,8 +5399,8 @@ test "divModKnuthU64: edge — v top-limb already normalized (s=0)" {
 
 	var q_got_bytes: [32]u8 = .{0} ** 32;
 	var r_got_bytes: [16]u8 = .{0} ** 16;
-	limbsToBytes(q[0..got.q_len], q_got_bytes[0..@min(got.q_len * 8, q_got_bytes.len)]);
-	limbsToBytes(r[0..got.r_len], r_got_bytes[0..@min(got.r_len * 8, r_got_bytes.len)]);
+	copyMagnitudePadded(std.mem.sliceAsBytes(q[0..got.q_len]), q_got_bytes[0..@min(got.q_len * 8, q_got_bytes.len)]);
+	copyMagnitudePadded(std.mem.sliceAsBytes(r[0..got.r_len]), r_got_bytes[0..@min(got.r_len * 8, r_got_bytes.len)]);
 	var q_got_len: usize = q_got_bytes.len;
 	while (q_got_len > 0 and q_got_bytes[q_got_len - 1] == 0) q_got_len -= 1;
 	var r_got_len: usize = r_got_bytes.len;
@@ -5559,13 +5423,13 @@ test "divModKnuthU64: edge — v top-limb has only bit 0 set (s=63)" {
 	u[u_init.len] = 0;
 	var q: [4]u64 = undefined;
 	var r: [4]u64 = undefined;
-	const got = divModKnuthU64(u, u_init.len, &v, v.len, &q, &r);
+	const got = divModKnuthU64(std.mem.sliceAsBytes(u), u_init.len, std.mem.sliceAsBytes(&v), v.len, std.mem.sliceAsBytes(&q), std.mem.sliceAsBytes(&r));
 
 	// Cross-check vs byte-base.
 	var v_bytes: [16]u8 = undefined;
 	var u_bytes: [24]u8 = undefined;
-	limbsToBytes(&v, &v_bytes);
-	limbsToBytes(&u_init, &u_bytes);
+	copyMagnitudePadded(std.mem.sliceAsBytes(&v), &v_bytes);
+	copyMagnitudePadded(std.mem.sliceAsBytes(&u_init), &u_bytes);
 	var v_byte_len: usize = v_bytes.len;
 	while (v_byte_len > 0 and v_bytes[v_byte_len - 1] == 0) v_byte_len -= 1;
 	var q_ref_bytes: [25]u8 = undefined;
@@ -5576,8 +5440,8 @@ test "divModKnuthU64: edge — v top-limb has only bit 0 set (s=63)" {
 
 	var q_got_bytes: [32]u8 = .{0} ** 32;
 	var r_got_bytes: [16]u8 = .{0} ** 16;
-	limbsToBytes(q[0..got.q_len], q_got_bytes[0..@min(got.q_len * 8, q_got_bytes.len)]);
-	limbsToBytes(r[0..got.r_len], r_got_bytes[0..@min(got.r_len * 8, r_got_bytes.len)]);
+	copyMagnitudePadded(std.mem.sliceAsBytes(q[0..got.q_len]), q_got_bytes[0..@min(got.q_len * 8, q_got_bytes.len)]);
+	copyMagnitudePadded(std.mem.sliceAsBytes(r[0..got.r_len]), r_got_bytes[0..@min(got.r_len * 8, r_got_bytes.len)]);
 	var q_got_len: usize = q_got_bytes.len;
 	while (q_got_len > 0 and q_got_bytes[q_got_len - 1] == 0) q_got_len -= 1;
 	var r_got_len: usize = r_got_bytes.len;
@@ -5700,7 +5564,7 @@ test "bench: divModKnuthU64 at 2048-bit / 1024-bit" {
 	// Warm-up.
 	@memcpy(u_buf[0..u_limbs], u_template);
 	u_buf[u_limbs] = 0;
-	_ = divModKnuthU64(u_buf, u_limbs, v_template, v_limbs, q_buf, r_buf);
+	_ = divModKnuthU64(std.mem.sliceAsBytes(u_buf), u_limbs, std.mem.sliceAsBytes(v_template), v_limbs, std.mem.sliceAsBytes(q_buf), std.mem.sliceAsBytes(r_buf));
 
 	const t_start = monoNanos();
 	{
@@ -5708,7 +5572,7 @@ test "bench: divModKnuthU64 at 2048-bit / 1024-bit" {
 		while (i < iters) : (i += 1) {
 			@memcpy(u_buf[0..u_limbs], u_template);
 			u_buf[u_limbs] = 0;
-			const out = divModKnuthU64(u_buf, u_limbs, v_template, v_limbs, q_buf, r_buf);
+			const out = divModKnuthU64(std.mem.sliceAsBytes(u_buf), u_limbs, std.mem.sliceAsBytes(v_template), v_limbs, std.mem.sliceAsBytes(q_buf), std.mem.sliceAsBytes(r_buf));
 			std.mem.doNotOptimizeAway(&out);
 		}
 	}
@@ -5746,14 +5610,14 @@ test "bench: divModKnuthU64 at 4096-bit / 2048-bit" {
 
 	@memcpy(u_buf[0..u_limbs], u_template);
 	u_buf[u_limbs] = 0;
-	_ = divModKnuthU64(u_buf, u_limbs, v_template, v_limbs, q_buf, r_buf);
+	_ = divModKnuthU64(std.mem.sliceAsBytes(u_buf), u_limbs, std.mem.sliceAsBytes(v_template), v_limbs, std.mem.sliceAsBytes(q_buf), std.mem.sliceAsBytes(r_buf));
 
 	const t_start = monoNanos();
 	var i: usize = 0;
 	while (i < iters) : (i += 1) {
 		@memcpy(u_buf[0..u_limbs], u_template);
 		u_buf[u_limbs] = 0;
-		const out = divModKnuthU64(u_buf, u_limbs, v_template, v_limbs, q_buf, r_buf);
+		const out = divModKnuthU64(std.mem.sliceAsBytes(u_buf), u_limbs, std.mem.sliceAsBytes(v_template), v_limbs, std.mem.sliceAsBytes(q_buf), std.mem.sliceAsBytes(r_buf));
 		std.mem.doNotOptimizeAway(&out);
 	}
 	const t_total = monoNanos() - t_start;
@@ -5787,14 +5651,14 @@ test "bench: divModKnuthU64 at 8192-bit / 4096-bit" {
 
 	@memcpy(u_buf[0..u_limbs], u_template);
 	u_buf[u_limbs] = 0;
-	_ = divModKnuthU64(u_buf, u_limbs, v_template, v_limbs, q_buf, r_buf);
+	_ = divModKnuthU64(std.mem.sliceAsBytes(u_buf), u_limbs, std.mem.sliceAsBytes(v_template), v_limbs, std.mem.sliceAsBytes(q_buf), std.mem.sliceAsBytes(r_buf));
 
 	const t_start = monoNanos();
 	var i: usize = 0;
 	while (i < iters) : (i += 1) {
 		@memcpy(u_buf[0..u_limbs], u_template);
 		u_buf[u_limbs] = 0;
-		const out = divModKnuthU64(u_buf, u_limbs, v_template, v_limbs, q_buf, r_buf);
+		const out = divModKnuthU64(std.mem.sliceAsBytes(u_buf), u_limbs, std.mem.sliceAsBytes(v_template), v_limbs, std.mem.sliceAsBytes(q_buf), std.mem.sliceAsBytes(r_buf));
 		std.mem.doNotOptimizeAway(&out);
 	}
 	const t_total = monoNanos() - t_start;
@@ -5861,7 +5725,7 @@ test "bench: divModSingleByte vs divModSingleU64 at 2048-bit" {
 
 test "modInvNeg64: m * modInvNeg64(m) +% 1 == 0 mod 2^64 for many odd m" {
 	const cases = [_]u64{
-		1, 3, 5, 7, 9, 11, 13, 15, 17,
+		1,     3,           5,           7,                     9, 11, 13, 15, 17,
 		0x123, 0xDEAD_BEEF, 0xFFFF_FFFF, 0xFFFF_FFFF_FFFF_FFFD,
 		0x9E37_79B9_7F4A_7C15, // golden-ratio-derived odd
 		0x123_4567_89AB_CDEF, // arbitrary
@@ -5885,15 +5749,15 @@ test "modInvNeg64: random odd values" {
 	}
 }
 
-test "bytesToLimbs / limbsToBytes round-trip" {
+test "copyMagnitudePadded / copyMagnitudePadded round-trip" {
 	const bytes = [_]u8{ 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A };
 	var limbs: [2]u64 = undefined;
-	bytesToLimbs(&bytes, &limbs);
+	copyMagnitudePadded(&bytes, std.mem.sliceAsBytes(&limbs));
 	try testing.expectEqual(@as(u64, 0x0807_0605_0403_0201), limbs[0]);
 	try testing.expectEqual(@as(u64, 0x0000_0000_0000_0A09), limbs[1]);
 
 	var roundtrip: [10]u8 = undefined;
-	limbsToBytes(&limbs, &roundtrip);
+	copyMagnitudePadded(std.mem.sliceAsBytes(&limbs), &roundtrip);
 	try testing.expectEqualSlices(u8, &bytes, &roundtrip);
 }
 
@@ -5917,17 +5781,17 @@ test "montMul: tiny case (m=17) — verify (a*b mod m) == from_mont(montMul(to_m
 	var b_mont: [1]u64 = undefined;
 	const a_arr: [1]u64 = .{a_val};
 	const b_arr: [1]u64 = .{b_val};
-	montMul(&a_arr, &r2, &m, m_inv_neg, &a_mont, &scratch);
-	montMul(&b_arr, &r2, &m, m_inv_neg, &b_mont, &scratch);
+	montMul(std.mem.sliceAsBytes(&a_arr), std.mem.sliceAsBytes(&r2), std.mem.sliceAsBytes(&m), m_inv_neg, std.mem.sliceAsBytes(&a_mont), std.mem.sliceAsBytes(&scratch));
+	montMul(std.mem.sliceAsBytes(&b_arr), std.mem.sliceAsBytes(&r2), std.mem.sliceAsBytes(&m), m_inv_neg, std.mem.sliceAsBytes(&b_mont), std.mem.sliceAsBytes(&scratch));
 
 	// c_mont = montMul(a_mont, b_mont) — should be (a*b) in Mont form
 	var c_mont: [1]u64 = undefined;
-	montMul(&a_mont, &b_mont, &m, m_inv_neg, &c_mont, &scratch);
+	montMul(std.mem.sliceAsBytes(&a_mont), std.mem.sliceAsBytes(&b_mont), std.mem.sliceAsBytes(&m), m_inv_neg, std.mem.sliceAsBytes(&c_mont), std.mem.sliceAsBytes(&scratch));
 
 	// from_mont(c_mont) = montMul(c_mont, 1)
 	const one: [1]u64 = .{1};
 	var c: [1]u64 = undefined;
-	montMul(&c_mont, &one, &m, m_inv_neg, &c, &scratch);
+	montMul(std.mem.sliceAsBytes(&c_mont), std.mem.sliceAsBytes(&one), std.mem.sliceAsBytes(&m), m_inv_neg, std.mem.sliceAsBytes(&c), std.mem.sliceAsBytes(&scratch));
 
 	const expected = (a_val * b_val) % m_val;
 	try testing.expectEqual(expected, c[0]);
@@ -5961,15 +5825,15 @@ test "montMul: random small odd modulus equivalence to (a*b) mod m" {
 		const b_arr: [1]u64 = .{b_val};
 		var a_mont: [1]u64 = undefined;
 		var b_mont: [1]u64 = undefined;
-		montMul(&a_arr, &r2, &m, m_inv_neg, &a_mont, &scratch);
-		montMul(&b_arr, &r2, &m, m_inv_neg, &b_mont, &scratch);
+		montMul(std.mem.sliceAsBytes(&a_arr), std.mem.sliceAsBytes(&r2), std.mem.sliceAsBytes(&m), m_inv_neg, std.mem.sliceAsBytes(&a_mont), std.mem.sliceAsBytes(&scratch));
+		montMul(std.mem.sliceAsBytes(&b_arr), std.mem.sliceAsBytes(&r2), std.mem.sliceAsBytes(&m), m_inv_neg, std.mem.sliceAsBytes(&b_mont), std.mem.sliceAsBytes(&scratch));
 
 		var c_mont: [1]u64 = undefined;
-		montMul(&a_mont, &b_mont, &m, m_inv_neg, &c_mont, &scratch);
+		montMul(std.mem.sliceAsBytes(&a_mont), std.mem.sliceAsBytes(&b_mont), std.mem.sliceAsBytes(&m), m_inv_neg, std.mem.sliceAsBytes(&c_mont), std.mem.sliceAsBytes(&scratch));
 
 		const one: [1]u64 = .{1};
 		var c: [1]u64 = undefined;
-		montMul(&c_mont, &one, &m, m_inv_neg, &c, &scratch);
+		montMul(std.mem.sliceAsBytes(&c_mont), std.mem.sliceAsBytes(&one), std.mem.sliceAsBytes(&m), m_inv_neg, std.mem.sliceAsBytes(&c), std.mem.sliceAsBytes(&scratch));
 
 		const expected: u64 = @truncate((@as(u128, a_val) * @as(u128, b_val)) % @as(u128, m_val));
 		try testing.expectEqual(expected, c[0]);
@@ -6012,15 +5876,15 @@ test "montMul: 2-limb random equivalence to schoolbook+mod" {
 		var scratch: [16]u64 = undefined;
 		var a_mont: [2]u64 = undefined;
 		var b_mont: [2]u64 = undefined;
-		montMul(&a, &r2, &m, m_inv_neg, &a_mont, &scratch);
-		montMul(&b, &r2, &m, m_inv_neg, &b_mont, &scratch);
+		montMul(std.mem.sliceAsBytes(&a), std.mem.sliceAsBytes(&r2), std.mem.sliceAsBytes(&m), m_inv_neg, std.mem.sliceAsBytes(&a_mont), std.mem.sliceAsBytes(&scratch));
+		montMul(std.mem.sliceAsBytes(&b), std.mem.sliceAsBytes(&r2), std.mem.sliceAsBytes(&m), m_inv_neg, std.mem.sliceAsBytes(&b_mont), std.mem.sliceAsBytes(&scratch));
 
 		var c_mont: [2]u64 = undefined;
-		montMul(&a_mont, &b_mont, &m, m_inv_neg, &c_mont, &scratch);
+		montMul(std.mem.sliceAsBytes(&a_mont), std.mem.sliceAsBytes(&b_mont), std.mem.sliceAsBytes(&m), m_inv_neg, std.mem.sliceAsBytes(&c_mont), std.mem.sliceAsBytes(&scratch));
 
 		const one: [2]u64 = .{ 1, 0 };
 		var c: [2]u64 = undefined;
-		montMul(&c_mont, &one, &m, m_inv_neg, &c, &scratch);
+		montMul(std.mem.sliceAsBytes(&c_mont), std.mem.sliceAsBytes(&one), std.mem.sliceAsBytes(&m), m_inv_neg, std.mem.sliceAsBytes(&c), std.mem.sliceAsBytes(&scratch));
 
 		const expected_u512 = (a_u512 * b_u512) % m_u512;
 		const got_u512 = @as(u512, c[0]) | (@as(u512, c[1]) << 64);
@@ -6039,8 +5903,8 @@ test "montMul: 8-limb (512-bit) random equivalence to schoolbook + Knuth div" {
 	while (iter < 8) : (iter += 1) {
 		var m: [8]u64 = undefined;
 		for (&m) |*x| x.* = r.int(u64);
-		m[0] |= 1;                                    // odd
-		m[k - 1] |= 0x8000_0000_0000_0000;           // top bit set (truly k=8)
+		m[0] |= 1; // odd
+		m[k - 1] |= 0x8000_0000_0000_0000; // top bit set (truly k=8)
 
 		var a: [8]u64 = undefined;
 		var b: [8]u64 = undefined;
@@ -6049,8 +5913,8 @@ test "montMul: 8-limb (512-bit) random equivalence to schoolbook + Knuth div" {
 			bx.* = r.int(u64);
 		}
 		// Reduce a, b mod m via subtraction if needed (cheap since high limb dominates).
-		while (cmpLimbsGE(&a, &m)) subLimbsInPlace(&a, &m);
-		while (cmpLimbsGE(&b, &m)) subLimbsInPlace(&b, &m);
+		while (chunksGE(std.mem.sliceAsBytes(&a), std.mem.sliceAsBytes(&m))) subtractChunksInPlace(std.mem.sliceAsBytes(&a), std.mem.sliceAsBytes(&m));
+		while (chunksGE(std.mem.sliceAsBytes(&b), std.mem.sliceAsBytes(&m))) subtractChunksInPlace(std.mem.sliceAsBytes(&b), std.mem.sliceAsBytes(&m));
 
 		const m_inv_neg = modInvNeg64(m[0]);
 
@@ -6121,8 +5985,8 @@ test "montMul: 8-limb (512-bit) random equivalence to schoolbook + Knuth div" {
 				c = new_top;
 			}
 			// If c set OR x >= m, subtract m.
-			if (c != 0 or cmpLimbsGE(&x, &m)) {
-				subLimbsInPlace(&x, &m);
+			if (c != 0 or chunksGE(std.mem.sliceAsBytes(&x), std.mem.sliceAsBytes(&m))) {
+				subtractChunksInPlace(std.mem.sliceAsBytes(&x), std.mem.sliceAsBytes(&m));
 			}
 		}
 		const r2 = x; // R^2 mod m
@@ -6130,15 +5994,15 @@ test "montMul: 8-limb (512-bit) random equivalence to schoolbook + Knuth div" {
 		var scratch: [32]u64 = undefined;
 		var a_mont: [8]u64 = undefined;
 		var b_mont: [8]u64 = undefined;
-		montMul(&a, &r2, &m, m_inv_neg, &a_mont, &scratch);
-		montMul(&b, &r2, &m, m_inv_neg, &b_mont, &scratch);
+		montMul(std.mem.sliceAsBytes(&a), std.mem.sliceAsBytes(&r2), std.mem.sliceAsBytes(&m), m_inv_neg, std.mem.sliceAsBytes(&a_mont), std.mem.sliceAsBytes(&scratch));
+		montMul(std.mem.sliceAsBytes(&b), std.mem.sliceAsBytes(&r2), std.mem.sliceAsBytes(&m), m_inv_neg, std.mem.sliceAsBytes(&b_mont), std.mem.sliceAsBytes(&scratch));
 
 		var c_mont: [8]u64 = undefined;
-		montMul(&a_mont, &b_mont, &m, m_inv_neg, &c_mont, &scratch);
+		montMul(std.mem.sliceAsBytes(&a_mont), std.mem.sliceAsBytes(&b_mont), std.mem.sliceAsBytes(&m), m_inv_neg, std.mem.sliceAsBytes(&c_mont), std.mem.sliceAsBytes(&scratch));
 
 		const one: [8]u64 = .{ 1, 0, 0, 0, 0, 0, 0, 0 };
 		var c: [8]u64 = undefined;
-		montMul(&c_mont, &one, &m, m_inv_neg, &c, &scratch);
+		montMul(std.mem.sliceAsBytes(&c_mont), std.mem.sliceAsBytes(&one), std.mem.sliceAsBytes(&m), m_inv_neg, std.mem.sliceAsBytes(&c), std.mem.sliceAsBytes(&scratch));
 
 		// Reference: schoolbook a*b → 16 limbs, then reduce by repeated subtract
 		// of (m << shift). Use the same shift-and-reduce loop as for R^2.
@@ -6181,8 +6045,8 @@ test "montMul: 8-limb (512-bit) random equivalence to schoolbook + Knuth div" {
 			const bit_val: u64 = (ref_buf[limb_idx] >> bit_in_limb) & 1;
 			acc[0] |= bit_val;
 			// Reduce
-			if (cc != 0 or cmpLimbsGE(&acc, &m)) {
-				subLimbsInPlace(&acc, &m);
+			if (cc != 0 or chunksGE(std.mem.sliceAsBytes(&acc), std.mem.sliceAsBytes(&m))) {
+				subtractChunksInPlace(std.mem.sliceAsBytes(&acc), std.mem.sliceAsBytes(&m));
 			}
 		}
 		try testing.expectEqualSlices(u64, &acc, &c);
@@ -6478,7 +6342,7 @@ test "divModBurnikelZiegler: single-byte divisor degenerate case (256 / 3)" {
 	// 256 = 85*3 + 1; checks the v_len == 1 branch.
 	const allocator = std.testing.allocator;
 	const u = [_]u8{ 0x00, 0x01 };
-	const v = [_]u8{ 0x03 };
+	const v = [_]u8{0x03};
 	var q: [4]u8 = undefined;
 	var r: [4]u8 = undefined;
 	const got = try divModBurnikelZiegler(&u, u.len, &v, v.len, &q, &r, allocator);
@@ -6532,4 +6396,56 @@ test "divModBurnikelZiegler: cross-check vs divModKnuth on 200 random pairs" {
 		try testing.expectEqual(got_ref.r_len, got_bz.r_len);
 		try testing.expectEqualSlices(u8, r_ref[0..got_ref.r_len], r_bz[0..got_bz.r_len]);
 	}
+}
+
+test "Knuth chunk division accepts unaligned byte storage" {
+	// (2^128 + 7) / (2^64 + 1) = (2^64 - 1), remainder 8.
+	var u_storage: [33]u8 = @splat(0);
+	var v_storage: [17]u8 = @splat(0);
+	var q_storage: [33]u8 = @splat(0);
+	var r_storage: [17]u8 = @splat(0);
+	const u = u_storage[1..];
+	const v = v_storage[1..];
+	u[0] = 7;
+	u[16] = 1;
+	v[0] = 1;
+	v[8] = 1;
+	const got = divModKnuthU64(u, 3, v, 2, q_storage[1..], r_storage[1..]);
+	try testing.expectEqual(@as(usize, 1), got.q_len);
+	try testing.expectEqual(@as(usize, 1), got.r_len);
+	try testing.expectEqual(std.math.maxInt(u64), std.mem.readInt(u64, q_storage[1..9], .little));
+	try testing.expectEqual(@as(u64, 8), std.mem.readInt(u64, r_storage[1..9], .little));
+}
+
+test "byte division spans partial chunks and every normalization shift" {
+	const allocator = testing.allocator;
+	for (1..25) |v_len| {
+		for (0..8) |high_bit| {
+			var dividend: [32]u8 = @splat(0xA5);
+			var divisor: [32]u8 = @splat(0);
+			@memset(divisor[0..v_len], 0x73);
+			divisor[v_len - 1] = @as(u8, 1) << @intCast(high_bit);
+			var q: [33]u8 = @splat(0);
+			var r: [33]u8 = @splat(0);
+			const got = try divModKnuthU64Bytes(&dividend, 32, &divisor, v_len, &q, &r, allocator);
+			const a = std.mem.readInt(u256, &dividend, .little);
+			const b = std.mem.readInt(u256, &divisor, .little);
+			try testing.expectEqual(a / b, std.mem.readInt(u256, q[0..32], .little));
+			try testing.expectEqual(a % b, std.mem.readInt(u256, r[0..32], .little));
+			try testing.expectEqual(trimLen(q[0..32]), got.q_len);
+			try testing.expectEqual(trimLen(r[0..32]), got.r_len);
+		}
+	}
+}
+
+test "FFT scratch growth remains releasable after allocation failure" {
+	const Case = struct {
+		fn run(allocator: std.mem.Allocator) !void {
+			var cache: FftScratch = .{};
+			defer cache.releaseUnsafe();
+			try cache.ensureCapacity(allocator, 16);
+			try cache.ensureCapacity(allocator, 32);
+		}
+	};
+	try std.testing.checkAllAllocationFailures(std.testing.allocator, Case.run, .{});
 }

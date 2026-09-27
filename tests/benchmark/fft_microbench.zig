@@ -16,6 +16,7 @@
 
 const std = @import("std");
 const fft = @import("blip_mp").fft;
+const residue = fft.residue;
 
 // Monotonic timing — std.time.Timer was removed in Zig 0.16. Use libc
 // clock_gettime directly (we already link libc for c_allocator parity).
@@ -239,7 +240,7 @@ fn benchMontMul_x2(pool_a: *const [POOL_SIZE]@Vector(2, u64), pool_b: *const [PO
 const NTT_N: usize = 8192;
 const NTT_ITERS: usize = 200;
 
-fn benchNttScalar(orig: *const [NTT_N]u64, work: *[NTT_N]u64, tw: *const [NTT_N / 2]u64) f64 {
+fn benchNttScalar(orig: *const [NTT_N * residue.slot_bytes]u8, work: *[NTT_N * residue.slot_bytes]u8, tw: *const [NTT_N / 2 * residue.slot_bytes]u8) f64 {
 	var elapsed: u64 = 0;
 	var i: usize = 0;
 	while (i < NTT_ITERS) : (i += 1) {
@@ -252,7 +253,7 @@ fn benchNttScalar(orig: *const [NTT_N]u64, work: *[NTT_N]u64, tw: *const [NTT_N 
 	return @as(f64, @floatFromInt(elapsed)) / @as(f64, @floatFromInt(NTT_ITERS));
 }
 
-fn benchNttVec(orig: *const [NTT_N]u64, work: *[NTT_N]u64, tw: *const [NTT_N / 2]u64) f64 {
+fn benchNttVec(orig: *const [NTT_N * residue.slot_bytes]u8, work: *[NTT_N * residue.slot_bytes]u8, tw: *const [NTT_N / 2 * residue.slot_bytes]u8) f64 {
 	var elapsed: u64 = 0;
 	var i: usize = 0;
 	while (i < NTT_ITERS) : (i += 1) {
@@ -266,7 +267,7 @@ fn benchNttVec(orig: *const [NTT_N]u64, work: *[NTT_N]u64, tw: *const [NTT_N / 2
 }
 
 // Mont-form NTT: orig and tw_m must be in Mont form before the call.
-fn benchNttMontVec(orig_m: *const [NTT_N]u64, work: *[NTT_N]u64, tw_m: *const [NTT_N / 2]u64) f64 {
+fn benchNttMontVec(orig_m: *const [NTT_N * residue.slot_bytes]u8, work: *[NTT_N * residue.slot_bytes]u8, tw_m: *const [NTT_N / 2 * residue.slot_bytes]u8) f64 {
 	var elapsed: u64 = 0;
 	var i: usize = 0;
 	while (i < NTT_ITERS) : (i += 1) {
@@ -280,7 +281,7 @@ fn benchNttMontVec(orig_m: *const [NTT_N]u64, work: *[NTT_N]u64, tw_m: *const [N
 }
 
 // Stockham auto-sort vec NTT — needs scratch ping-pong buffer.
-fn benchNttStockhamVec(orig: *const [NTT_N]u64, work: *[NTT_N]u64, scratch: *[NTT_N]u64, tw: *const [NTT_N / 2]u64) f64 {
+fn benchNttStockhamVec(orig: *const [NTT_N * residue.slot_bytes]u8, work: *[NTT_N * residue.slot_bytes]u8, scratch: *[NTT_N * residue.slot_bytes]u8, tw: *const [NTT_N / 2 * residue.slot_bytes]u8) f64 {
 	var elapsed: u64 = 0;
 	var i: usize = 0;
 	while (i < NTT_ITERS) : (i += 1) {
@@ -294,7 +295,7 @@ fn benchNttStockhamVec(orig: *const [NTT_N]u64, work: *[NTT_N]u64, scratch: *[NT
 }
 
 // Stockham unrolled-by-4 (M6-4-E.3 attempt C). 8 butterflies per iter.
-fn benchNttStockhamVecU8(orig: *const [NTT_N]u64, work: *[NTT_N]u64, scratch: *[NTT_N]u64, tw: *const [NTT_N / 2]u64) f64 {
+fn benchNttStockhamVecU8(orig: *const [NTT_N * residue.slot_bytes]u8, work: *[NTT_N * residue.slot_bytes]u8, scratch: *[NTT_N * residue.slot_bytes]u8, tw: *const [NTT_N / 2 * residue.slot_bytes]u8) f64 {
 	var elapsed: u64 = 0;
 	var i: usize = 0;
 	while (i < NTT_ITERS) : (i += 1) {
@@ -311,7 +312,7 @@ fn benchNttStockhamVecU8(orig: *const [NTT_N]u64, work: *[NTT_N]u64, scratch: *[
 // nttStockhamVec but the inner loop processes 4 butterflies per iteration
 // instead of 2 — more independent work in flight to hide mul/umulh/msub
 // dep-chain latency.
-fn benchNttStockhamVecU4(orig: *const [NTT_N]u64, work: *[NTT_N]u64, scratch: *[NTT_N]u64, tw: *const [NTT_N / 2]u64) f64 {
+fn benchNttStockhamVecU4(orig: *const [NTT_N * residue.slot_bytes]u8, work: *[NTT_N * residue.slot_bytes]u8, scratch: *[NTT_N * residue.slot_bytes]u8, tw: *const [NTT_N / 2 * residue.slot_bytes]u8) f64 {
 	var elapsed: u64 = 0;
 	var i: usize = 0;
 	while (i < NTT_ITERS) : (i += 1) {
@@ -326,7 +327,7 @@ fn benchNttStockhamVecU4(orig: *const [NTT_N]u64, work: *[NTT_N]u64, scratch: *[
 
 // Stockham + Mont hybrid (M6-4-E.3). Same shape as nttStockhamVec but with
 // Mont-form data and twiddles + montMul_x2 inner mul.
-fn benchNttStockhamMontVec(orig_m: *const [NTT_N]u64, work: *[NTT_N]u64, scratch: *[NTT_N]u64, tw_m: *const [NTT_N / 2]u64) f64 {
+fn benchNttStockhamMontVec(orig_m: *const [NTT_N * residue.slot_bytes]u8, work: *[NTT_N * residue.slot_bytes]u8, scratch: *[NTT_N * residue.slot_bytes]u8, tw_m: *const [NTT_N / 2 * residue.slot_bytes]u8) f64 {
 	var elapsed: u64 = 0;
 	var i: usize = 0;
 	while (i < NTT_ITERS) : (i += 1) {
@@ -342,7 +343,7 @@ fn benchNttStockhamMontVec(orig_m: *const [NTT_N]u64, work: *[NTT_N]u64, scratch
 // Radix-4 NTT (M6-4-D): mixed-radix at N=8192 (one initial radix-2 pass +
 // 6 radix-4 passes). Same in-place, bit-reversal-based call shape as
 // nttWithTwiddlesVec.
-fn benchNttRadix4Vec(orig: *const [NTT_N]u64, work: *[NTT_N]u64, tw: *const [NTT_N / 2]u64) f64 {
+fn benchNttRadix4Vec(orig: *const [NTT_N * residue.slot_bytes]u8, work: *[NTT_N * residue.slot_bytes]u8, tw: *const [NTT_N / 2 * residue.slot_bytes]u8) f64 {
 	var elapsed: u64 = 0;
 	var i: usize = 0;
 	while (i < NTT_ITERS) : (i += 1) {
@@ -458,20 +459,20 @@ pub fn main() !void {
 	// ── Full NTT bench at N=8192 ─────────────────────────────────────────
 	std.debug.print("\n--- full NTT pass at N={d} (iters={d}) ---\n", .{ NTT_N, NTT_ITERS });
 
-	var orig: [NTT_N]u64 = undefined;
+	var orig: [NTT_N * residue.slot_bytes]u8 = undefined;
 	var prng = std.Random.DefaultPrng.init(0xCAFE_F00D_BEEF_BABE);
 	const r = prng.random();
-	for (&orig) |*x| x.* = r.uintLessThan(u64, fft.P);
+	for (0..NTT_N) |i| residue.write(&orig, i, r.uintLessThan(u64, fft.P));
 
-	var tw: [NTT_N / 2]u64 = undefined;
+	var tw: [NTT_N / 2 * residue.slot_bytes]u8 = undefined;
 	const omega_n = fft.nthRootOfUnity(NTT_N);
-	tw[0] = 1;
+	residue.write(&tw, 0, 1);
 	{
 		var j: usize = 1;
-		while (j < NTT_N / 2) : (j += 1) tw[j] = fft.mulModP(tw[j - 1], omega_n);
+		while (j < NTT_N / 2) : (j += 1) residue.write(&tw, j, fft.mulModP(residue.read(&tw, j - 1), omega_n));
 	}
 
-	var work: [NTT_N]u64 = undefined;
+	var work: [NTT_N * residue.slot_bytes]u8 = undefined;
 
 	// Warm-up pass (cache prime, branch predictor warm).
 	_ = benchNttScalar(&orig, &work, &tw);
@@ -485,10 +486,10 @@ pub fn main() !void {
 	std.debug.print("NTT speedup (vec vs scalar): {d:.2}x\n", .{ns_ntt_scalar / ns_ntt_vec});
 
 	// Mont-form NTT: orig_m + tw_m built from `orig` and `tw` via toMont.
-	var orig_m: [NTT_N]u64 = undefined;
-	var tw_m: [NTT_N / 2]u64 = undefined;
-	for (orig_m[0..], orig[0..]) |*xm, x| xm.* = fft.toMont(x);
-	for (tw_m[0..], tw[0..]) |*xm, x| xm.* = fft.toMont(x);
+	var orig_m: [NTT_N * residue.slot_bytes]u8 = undefined;
+	var tw_m: [NTT_N / 2 * residue.slot_bytes]u8 = undefined;
+	for (0..NTT_N) |i| residue.write(&orig_m, i, fft.toMont(residue.read(&orig, i)));
+	for (0..NTT_N / 2) |i| residue.write(&tw_m, i, fft.toMont(residue.read(&tw, i)));
 
 	_ = benchNttMontVec(&orig_m, &work, &tw_m); // warm-up
 	const ns_ntt_mont_vec = benchNttMontVec(&orig_m, &work, &tw_m);
@@ -498,7 +499,7 @@ pub fn main() !void {
 
 	// Stockham auto-sort vec NTT — eliminates the bit-reversal pass at the
 	// cost of a second N-element buffer for ping-ponging.
-	var st_scratch: [NTT_N]u64 = undefined;
+	var st_scratch: [NTT_N * residue.slot_bytes]u8 = undefined;
 	_ = benchNttStockhamVec(&orig, &work, &st_scratch, &tw); // warm-up
 	const ns_ntt_stockham_vec = benchNttStockhamVec(&orig, &work, &st_scratch, &tw);
 	std.debug.print("RESULT impl=nttStockhamVec n={d} ns_per_pass={d:.0}\n", .{ NTT_N, ns_ntt_stockham_vec });

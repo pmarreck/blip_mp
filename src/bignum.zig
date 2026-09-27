@@ -40,6 +40,7 @@
 // chain that previously dominated 128-512 bit tier-3 add (~5-7 ns/op saved).
 
 const std = @import("std");
+const byte_chunks = @import("chunks.zig");
 const encoding = @import("encoding.zig");
 const tier3 = @import("tier3.zig");
 
@@ -288,8 +289,7 @@ pub const Mp = struct {
 		// the full tier3MulOp scratch+dispatch chain with a single u128 × u128
 		// → u256 widening multiply. Result may need heap (max 35 bytes encoded
 		// > INLINE_CAP=24), but we avoid the 80-KB stack frame of tier3MulOp.
-		if (a.inline_len != SENTINEL_HEAP and b.inline_len != SENTINEL_HEAP
-			and a.cached_pay_len <= 16 and b.cached_pay_len <= 16
+		if (a.inline_len != SENTINEL_HEAP and b.inline_len != SENTINEL_HEAP and a.cached_pay_len <= 16 and b.cached_pay_len <= 16
 			// Aliasing safety: smallInlineTier3Mul reads a.inline_buf/b.inline_buf
 			// (struct fields, not heap) into u128 locals BEFORE writing r — so
 			// r aliasing a or b is fine.
@@ -893,9 +893,12 @@ pub const Mp = struct {
 	/// using the multi-limb (s0, s1) since they may still be huge.
 	/// Loops until r1 == 0.
 	fn lehmerFinishSinglePrecision(
-		r0: *Mp, r1: *Mp,
-		s0: *Mp, s1: *Mp,
-		t_scratch1: *Mp, t_scratch2: *Mp,
+		r0: *Mp,
+		r1: *Mp,
+		s0: *Mp,
+		s1: *Mp,
+		t_scratch1: *Mp,
+		t_scratch2: *Mp,
 	) ArithError!void {
 		var u: u64 = try mpToU64Mag(r0);
 		var v: u64 = try mpToU64Mag(r1);
@@ -1748,11 +1751,11 @@ pub const Mp = struct {
 				//   q_lo = (u-A)/(v+C),  q_hi = (u+B)/(v-D)
 				if (parity_even) {
 					if (cc < v_top) {
-						const denom_hi = v_top - cc;       // v - C
-						const denom_lo = v_top + dd;       // v + D
+						const denom_hi = v_top - cc; // v - C
+						const denom_lo = v_top + dd; // v + D
 						if (bb <= u_top and denom_hi != 0) {
-							const num_lo = u_top - bb;     // u - B
-							const num_hi = u_top + aa;     // u + A
+							const num_lo = u_top - bb; // u - B
+							const num_hi = u_top + aa; // u + A
 							q_lo = num_lo / denom_lo;
 							q_hi = num_hi / denom_hi;
 							ok = true;
@@ -1760,11 +1763,11 @@ pub const Mp = struct {
 					}
 				} else {
 					if (dd < v_top) {
-						const denom_hi = v_top - dd;       // v - D
-						const denom_lo = v_top + cc;       // v + C
+						const denom_hi = v_top - dd; // v - D
+						const denom_lo = v_top + cc; // v + C
 						if (aa <= u_top and denom_hi != 0) {
-							const num_lo = u_top - aa;     // u - A
-							const num_hi = u_top + bb;     // u + B
+							const num_lo = u_top - aa; // u - A
+							const num_hi = u_top + bb; // u + B
 							q_lo = num_lo / denom_lo;
 							q_hi = num_hi / denom_hi;
 							ok = true;
@@ -1912,13 +1915,19 @@ pub const Mp = struct {
 	/// Set this Mp's value to the unsigned u128 magnitude `value`.
 	/// Used by HGCD to materialise multi-precision matrix coefficients.
 	fn setU128(self: *Mp, value: u128) ArithError!void {
-		if (value == 0) { try self.setI64(0); return; }
+		if (value == 0) {
+			try self.setI64(0);
+			return;
+		}
 		// Compose 16-byte LE magnitude, find canonical L, then prepend
 		// a 0x00 if the high bit would otherwise look "signed".
 		var le: [16]u8 = undefined;
 		var v = value;
 		var k: usize = 0;
-		while (k < 16) : (k += 1) { le[k] = @intCast(v & 0xFF); v >>= 8; }
+		while (k < 16) : (k += 1) {
+			le[k] = @intCast(v & 0xFF);
+			v >>= 8;
+		}
 		var L: usize = 16;
 		while (L > 1 and le[L - 1] == 0) L -= 1;
 		const need_pad = (le[L - 1] & 0x80) != 0;
@@ -2415,11 +2424,7 @@ pub const Mp = struct {
 			// If hgcdRecursive returned identity (no reduction), fall back
 			// to one classical EEA step to ensure forward progress.
 			const M_is_identity =
-				M.parity_even
-				and M.a.cached_pay_len == 1 and M.a.bytes()[0] == 1
-				and M.b.cached_sign == 0
-				and M.c.cached_sign == 0
-				and M.d.cached_pay_len == 1 and M.d.bytes()[0] == 1;
+				M.parity_even and M.a.cached_pay_len == 1 and M.a.bytes()[0] == 1 and M.b.cached_sign == 0 and M.c.cached_sign == 0 and M.d.cached_pay_len == 1 and M.d.bytes()[0] == 1;
 			if (M_is_identity) {
 				try Mp.divMod(&q_mp, &rem_mp, &r0, &r1);
 				try t0.setBytes(r1.bytes());
@@ -2976,16 +2981,16 @@ pub const Mp = struct {
 		const Apply = struct {
 			fn tryApply(
 				inner_: *HGCDMatrix,
-				r0_: *Mp, r1_: *Mp,
-				r0_try_: *Mp, r1_try_: *Mp,
+				r0_: *Mp,
+				r1_: *Mp,
+				r0_try_: *Mp,
+				r1_try_: *Mp,
 				out_: *HGCDMatrix,
 			) ArithError!bool {
 				try r0_try_.setBytes(r0_.bytes());
 				try r1_try_.setBytes(r1_.bytes());
 				try inner_.applyToPair(r0_try_, r1_try_);
-				const ok = r0_try_.cached_sign >= 0 and r1_try_.cached_sign >= 0
-					and Mp.cmp(r0_try_, r1_try_) != .lt
-					and r0_try_.bitLen() < r0_.bitLen();
+				const ok = r0_try_.cached_sign >= 0 and r1_try_.cached_sign >= 0 and Mp.cmp(r0_try_, r1_try_) != .lt and r0_try_.bitLen() < r0_.bitLen();
 				if (!ok) return false;
 				try r0_.setBytes(r0_try_.bytes());
 				try r1_.setBytes(r1_try_.bytes());
@@ -2994,9 +2999,13 @@ pub const Mp = struct {
 			}
 
 			fn classicalStep(
-				r0_: *Mp, r1_: *Mp,
-				q_mp_: *Mp, rem_mp_: *Mp, tmp_: *Mp,
-				inner_: *HGCDMatrix, out_: *HGCDMatrix,
+				r0_: *Mp,
+				r1_: *Mp,
+				q_mp_: *Mp,
+				rem_mp_: *Mp,
+				tmp_: *Mp,
+				inner_: *HGCDMatrix,
+				out_: *HGCDMatrix,
 			) ArithError!void {
 				try Mp.divMod(q_mp_, rem_mp_, r0_, r1_);
 				try tmp_.setBytes(r1_.bytes());
@@ -3285,7 +3294,7 @@ fn powmSlidingWindow(r: *Mp, base_red: *const Mp, exp: *const Mp, m: *const Mp, 
 ///
 /// Replaces every `mul + mod` step in the sliding-window loop with a single
 /// `montMul`, which fuses multiply + Montgomery reduction into one O(k^2)
-/// pass over u64 limbs (no Knuth division). Setup cost (one R^2 mod m
+/// pass over magnitude bytes with temporary u64 reads (no Knuth division). Setup cost (one R^2 mod m
 /// computation, then base/result conversion via two extra montMuls)
 /// amortises across the ~bits squarings + ~bits/w multiplications.
 ///
@@ -3296,45 +3305,45 @@ fn powmMontgomery(r: *Mp, base_red: *const Mp, exp: *const Mp, m: *const Mp, w: 
 	const allocator = r.allocator;
 	std.debug.assert(w >= 2 and w <= 8);
 
-	// Determine k_limbs from the modulus magnitude byte length.
+	// Determine chunk_count from the modulus magnitude byte length.
 	const m_pay = m.payload();
 	var m_mag_byte_len: usize = m_pay.len;
 	while (m_mag_byte_len > 0 and m_pay[m_mag_byte_len - 1] == 0) m_mag_byte_len -= 1;
 	std.debug.assert(m_mag_byte_len >= 8);
-	const k_limbs: usize = (m_mag_byte_len + 7) / 8;
+	const chunk_count: usize = (m_mag_byte_len + 7) / 8;
 
-	// Allocate the working limb arrays. All sized k_limbs except scratch
+	// Allocate the working byte buffers. All sized chunk_count except scratch
 	// which needs 2*k+1 for the wide accumulator.
-	const m_lim = try allocator.alloc(u64, k_limbs);
-	defer allocator.free(m_lim);
-	const r2 = try allocator.alloc(u64, k_limbs);
+	const m_bytes = try allocator.alloc(u8, (chunk_count) * 8);
+	defer allocator.free(m_bytes);
+	const r2 = try allocator.alloc(u8, (chunk_count) * 8);
 	defer allocator.free(r2);
-	const base_mont = try allocator.alloc(u64, k_limbs);
+	const base_mont = try allocator.alloc(u8, (chunk_count) * 8);
 	defer allocator.free(base_mont);
-	const result_mont = try allocator.alloc(u64, k_limbs);
+	const result_mont = try allocator.alloc(u8, (chunk_count) * 8);
 	defer allocator.free(result_mont);
-	const tmp_lim = try allocator.alloc(u64, k_limbs);
-	defer allocator.free(tmp_lim);
-	const sq_mont = try allocator.alloc(u64, k_limbs);
+	const tmp_bytes = try allocator.alloc(u8, (chunk_count) * 8);
+	defer allocator.free(tmp_bytes);
+	const sq_mont = try allocator.alloc(u8, (chunk_count) * 8);
 	defer allocator.free(sq_mont);
-	const scratch = try allocator.alloc(u64, 2 * k_limbs + 1);
+	const scratch = try allocator.alloc(u8, (2 * chunk_count + 1) * 8);
 	defer allocator.free(scratch);
 
 	// Window table: 2^(w-1) odd-power Mont-form base values.
 	const tbl_count: usize = @as(usize, 1) << @intCast(w - 1);
-	const table = try allocator.alloc([]u64, tbl_count);
+	const table = try allocator.alloc([]u8, tbl_count);
 	defer {
 		for (table) |t| if (t.len > 0) allocator.free(t);
 		allocator.free(table);
 	}
 	for (table) |*t| t.* = &.{};
-	for (table) |*t| t.* = try allocator.alloc(u64, k_limbs);
+	for (table) |*t| t.* = try allocator.alloc(u8, (chunk_count) * 8);
 
-	// Pack m into limb array. For positive payloads, the magnitude bytes are
+	// Pack m into byte buffer. For positive payloads, the magnitude bytes are
 	// payload[0..m_mag_byte_len].
-	tier3.bytesToLimbs(m_pay[0..m_mag_byte_len], m_lim);
+	tier3.copyMagnitudePadded(m_pay[0..m_mag_byte_len], m_bytes);
 
-	// Pack base into limb array (zero-extended to m_mag_byte_len width).
+	// Pack base into byte buffer (zero-extended to m_mag_byte_len width).
 	const base_pay = base_red.payload();
 	var base_mag_len: usize = base_pay.len;
 	while (base_mag_len > 0 and base_pay[base_mag_len - 1] == 0) base_mag_len -= 1;
@@ -3342,26 +3351,26 @@ fn powmMontgomery(r: *Mp, base_red: *const Mp, exp: *const Mp, m: *const Mp, w: 
 	defer allocator.free(base_padded);
 	@memset(base_padded, 0);
 	if (base_mag_len > 0) @memcpy(base_padded[0..base_mag_len], base_pay[0..base_mag_len]);
-	tier3.bytesToLimbs(base_padded, tmp_lim);
+	tier3.copyMagnitudePadded(base_padded, tmp_bytes);
 
 	// Setup: m_inv_neg, R^2 mod m.
-	const m_inv_neg = tier3.modInvNeg64(m_lim[0]);
-	tier3.computeR2ModM(m_lim, r2);
+	const m_inv_neg = tier3.modInvNeg64(byte_chunks.read(m_bytes, 0));
+	tier3.computeR2ModM(m_bytes, r2);
 
 	// to_mont(base) = montMul(base, R^2)
-	tier3.montMul(tmp_lim, r2, m_lim, m_inv_neg, base_mont, scratch);
-	// to_mont(1) = montMul(1, R^2) = R mod m. Build "1" in tmp_lim.
-	@memset(tmp_lim, 0);
-	tmp_lim[0] = 1;
-	tier3.montMul(tmp_lim, r2, m_lim, m_inv_neg, result_mont, scratch);
+	tier3.montMul(tmp_bytes, r2, m_bytes, m_inv_neg, base_mont, scratch);
+	// to_mont(1) = montMul(1, R^2) = R mod m. Build "1" in tmp_bytes.
+	@memset(tmp_bytes, 0);
+	byte_chunks.write(tmp_bytes, 0, 1);
+	tier3.montMul(tmp_bytes, r2, m_bytes, m_inv_neg, result_mont, scratch);
 
 	// table[0] = base_mont; sq_mont = base_mont^2 (Mont form).
 	@memcpy(table[0], base_mont);
-	tier3.montMul(base_mont, base_mont, m_lim, m_inv_neg, sq_mont, scratch);
+	tier3.montMul(base_mont, base_mont, m_bytes, m_inv_neg, sq_mont, scratch);
 	// table[k] = table[k-1] * sq_mont (Mont form).
 	var k_idx: usize = 1;
 	while (k_idx < tbl_count) : (k_idx += 1) {
-		tier3.montMul(table[k_idx - 1], sq_mont, m_lim, m_inv_neg, table[k_idx], scratch);
+		tier3.montMul(table[k_idx - 1], sq_mont, m_bytes, m_inv_neg, table[k_idx], scratch);
 	}
 
 	// Sliding-window loop, in Mont form.
@@ -3370,8 +3379,8 @@ fn powmMontgomery(r: *Mp, base_red: *const Mp, exp: *const Mp, m: *const Mp, w: 
 	while (i >= 0) {
 		if (exp.bitAt(@intCast(i)) == 0) {
 			// Single squaring; advance by 1 bit. result = result^2 (Mont).
-			tier3.montMul(result_mont, result_mont, m_lim, m_inv_neg, tmp_lim, scratch);
-			@memcpy(result_mont, tmp_lim);
+			tier3.montMul(result_mont, result_mont, m_bytes, m_inv_neg, tmp_bytes, scratch);
+			@memcpy(result_mont, tmp_bytes);
 			i -= 1;
 		} else {
 			const w_isz: isize = @intCast(w);
@@ -3387,29 +3396,29 @@ fn powmMontgomery(r: *Mp, base_red: *const Mp, exp: *const Mp, m: *const Mp, w: 
 			// Square `win_width` times.
 			var sq_iter: usize = 0;
 			while (sq_iter < win_width) : (sq_iter += 1) {
-				tier3.montMul(result_mont, result_mont, m_lim, m_inv_neg, tmp_lim, scratch);
-				@memcpy(result_mont, tmp_lim);
+				tier3.montMul(result_mont, result_mont, m_bytes, m_inv_neg, tmp_bytes, scratch);
+				@memcpy(result_mont, tmp_bytes);
 			}
 			// Multiply by table[(win_val - 1) / 2].
 			const tbl_idx: usize = (@as(usize, @intCast(win_val)) - 1) / 2;
-			tier3.montMul(result_mont, table[tbl_idx], m_lim, m_inv_neg, tmp_lim, scratch);
-			@memcpy(result_mont, tmp_lim);
+			tier3.montMul(result_mont, table[tbl_idx], m_bytes, m_inv_neg, tmp_bytes, scratch);
+			@memcpy(result_mont, tmp_bytes);
 			i = j - 1;
 		}
 	}
 
 	// from_mont(result_mont) = montMul(result_mont, 1).
-	@memset(tmp_lim, 0);
-	tmp_lim[0] = 1;
-	const out_lim = try allocator.alloc(u64, k_limbs);
-	defer allocator.free(out_lim);
-	tier3.montMul(result_mont, tmp_lim, m_lim, m_inv_neg, out_lim, scratch);
+	@memset(tmp_bytes, 0);
+	byte_chunks.write(tmp_bytes, 0, 1);
+	const out_buffer = try allocator.alloc(u8, (chunk_count) * 8);
+	defer allocator.free(out_buffer);
+	tier3.montMul(result_mont, tmp_bytes, m_bytes, m_inv_neg, out_buffer, scratch);
 
-	// Pack out_lim back to bytes. Result is in [0, m), so its magnitude byte
+	// Copy the live output bytes. Result is in [0, m), so its magnitude byte
 	// length is <= m_mag_byte_len.
 	const out_bytes = try allocator.alloc(u8, m_mag_byte_len);
 	defer allocator.free(out_bytes);
-	tier3.limbsToBytes(out_lim, out_bytes);
+	tier3.copyMagnitudePadded(out_buffer, out_bytes);
 	// Trim leading-zero high bytes (canonical magnitude length).
 	var canon_len: usize = m_mag_byte_len;
 	while (canon_len > 0 and out_bytes[canon_len - 1] == 0) canon_len -= 1;
@@ -3829,9 +3838,12 @@ fn tier3Op(r: *Mp, a: *const Mp, b: *const Mp, comptime op: TierOp) ArithError!v
 inline fn sameSizeTier3Add(
 	comptime N: comptime_int,
 	r: *Mp,
-	a_bytes: []const u8, b_bytes: []const u8,
-	a_pay_off: usize, b_pay_off: usize,
-	a_sign: i8, b_sign: i8,
+	a_bytes: []const u8,
+	b_bytes: []const u8,
+	a_pay_off: usize,
+	b_pay_off: usize,
+	a_sign: i8,
+	b_sign: i8,
 	comptime op: TierOp,
 ) ArithError!void {
 	const T = std.meta.Int(.unsigned, N * 8);
@@ -3912,7 +3924,10 @@ inline fn sameSizeTier3Add(
 			r.cached_sign = 1;
 		} else {
 			var any_nonzero: bool = false;
-			for (snapshot[0..canon]) |bb| if (bb != 0) { any_nonzero = true; break; };
+			for (snapshot[0..canon]) |bb| if (bb != 0) {
+				any_nonzero = true;
+				break;
+			};
 			r.cached_sign = if (any_nonzero) 1 else 0;
 		}
 		return;
@@ -3941,7 +3956,10 @@ inline fn sameSizeTier3Add(
 		r.cached_sign = 1;
 	} else {
 		var any_nonzero: bool = false;
-		for (pay_slice[0..canon]) |bb| if (bb != 0) { any_nonzero = true; break; };
+		for (pay_slice[0..canon]) |bb| if (bb != 0) {
+			any_nonzero = true;
+			break;
+		};
 		r.cached_sign = if (any_nonzero) 1 else 0;
 	}
 }
@@ -4060,7 +4078,10 @@ inline fn smallInlineTier3Add(r: *Mp, a: *const Mp, b: *const Mp, comptime op: T
 		r.cached_sign = 1;
 	} else {
 		var any_nonzero: bool = false;
-		for (pay_buf[0..canon]) |bb| if (bb != 0) { any_nonzero = true; break; };
+		for (pay_buf[0..canon]) |bb| if (bb != 0) {
+			any_nonzero = true;
+			break;
+		};
 		r.cached_sign = if (any_nonzero) 1 else 0;
 	}
 }
@@ -4372,9 +4393,12 @@ inline fn canonicalLenSmall(payload: []const u8) usize {
 /// input. Snapshot input payloads to stack scratch first.
 fn tier3OpCold(
 	r: *Mp,
-	a_bytes: []const u8, b_bytes: []const u8,
-	a_pay_off: usize, a_pay_len: usize,
-	b_pay_off: usize, b_pay_len: usize,
+	a_bytes: []const u8,
+	b_bytes: []const u8,
+	a_pay_off: usize,
+	a_pay_len: usize,
+	b_pay_off: usize,
+	b_pay_len: usize,
 	out_need: usize,
 	comptime op: TierOp,
 ) ArithError!void {
@@ -4453,7 +4477,6 @@ inline fn applyTier3Op(r: *Mp, a_pay: []const u8, b_pay: []const u8, comptime op
 	r.cached_pay_len = @intCast(canon);
 	r.cached_sign = signFromPayload(r.heap_buf[hdr_start + hdr_len .. hdr_start + hdr_len + canon]);
 }
-
 
 /// How many header bytes does a length-prefixed BLIP value occupy?
 /// Reads only from the buffer — uses the lookup table for the first byte
@@ -4619,7 +4642,11 @@ test "Mp.cmp: tier-3 same-sign comparison (was: getI64-based regression)" {
 	// Both > i64.max, so getI64 would error; but a > b should hold.
 	try a.setI64(std.math.maxInt(i64));
 	try b.setI64(std.math.maxInt(i64));
-	try a.add(&a, &one); try a.add(&a, &one); try a.add(&a, &one); try a.add(&a, &one); try a.add(&a, &one);
+	try a.add(&a, &one);
+	try a.add(&a, &one);
+	try a.add(&a, &one);
+	try a.add(&a, &one);
+	try a.add(&a, &one);
 	try b.add(&b, &one);
 	try testing.expectEqual(std.math.Order.gt, a.cmp(&b));
 	try testing.expectEqual(std.math.Order.lt, b.cmp(&a));
@@ -4629,7 +4656,11 @@ test "Mp.cmp: tier-3 same-sign comparison (was: getI64-based regression)" {
 	var a2 = Mp.init(testing.allocator);
 	defer a2.deinit();
 	try a2.setI64(std.math.maxInt(i64));
-	try a2.add(&a2, &one); try a2.add(&a2, &one); try a2.add(&a2, &one); try a2.add(&a2, &one); try a2.add(&a2, &one);
+	try a2.add(&a2, &one);
+	try a2.add(&a2, &one);
+	try a2.add(&a2, &one);
+	try a2.add(&a2, &one);
+	try a2.add(&a2, &one);
 	try testing.expectEqual(std.math.Order.eq, a.cmp(&a2));
 
 	// Two tier-3 negatives: a_neg = i64.min - 5, b_neg = i64.min - 1.
@@ -4640,7 +4671,11 @@ test "Mp.cmp: tier-3 same-sign comparison (was: getI64-based regression)" {
 	defer b_neg.deinit();
 	try a_neg.setI64(std.math.minInt(i64));
 	try b_neg.setI64(std.math.minInt(i64));
-	try a_neg.sub(&a_neg, &one); try a_neg.sub(&a_neg, &one); try a_neg.sub(&a_neg, &one); try a_neg.sub(&a_neg, &one); try a_neg.sub(&a_neg, &one);
+	try a_neg.sub(&a_neg, &one);
+	try a_neg.sub(&a_neg, &one);
+	try a_neg.sub(&a_neg, &one);
+	try a_neg.sub(&a_neg, &one);
+	try a_neg.sub(&a_neg, &one);
 	try b_neg.sub(&b_neg, &one);
 	try testing.expectEqual(std.math.Order.lt, a_neg.cmp(&b_neg));
 	try testing.expectEqual(std.math.Order.gt, b_neg.cmp(&a_neg));
@@ -6153,7 +6188,8 @@ test "bench: invModLehmer vs invModHGCD across bit-widths" {
 /// HGCD's matrix applied to (a, b) must yield the same (r0, r1) as this
 /// classical step-by-step reduction down to the same threshold.
 fn classicalReduceToTarget(
-	r0: *Mp, r1: *Mp,
+	r0: *Mp,
+	r1: *Mp,
 	target_bits: usize,
 	allocator: std.mem.Allocator,
 ) ArithError!void {

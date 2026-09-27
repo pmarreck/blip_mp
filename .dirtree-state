@@ -3,5 +3,10 @@ ver=1.2
 annotate=[
 	INTENT.md = Project purpose, scope and evidence required for success
 	TERMINOLOGY.md = BLIP arithmetic and byte-storage terminology
+	docs/REPRESENTATION.md = Storage contract and verification for byte arithmetic and BLIP residues
 	docs/plan_context/legacy-roadmap.md = Preserved roadmap decisions, experiments and unresolved tasks
+	src/chunks.zig = Unaligned scalar access to LE magnitude byte buffers
+	src/fft_residue.zig = Canonical BLIP residues in fixed-capacity FFT byte slots
+	src/fft_test_support.zig = Test-only numerical fixtures for encoded FFT storage
+	src/storage_audit.zig = AST storage guard and classifier tests
 ]

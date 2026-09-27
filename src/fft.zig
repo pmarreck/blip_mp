@@ -1,39 +1,16 @@
 // FFT-based multiplication for very large bignums via Number-Theoretic
 // Transform (NTT) over a prime field.
 //
-// Algorithm (Schönhage-Strassen variant):
-//   1. Treat each operand as a sequence of "digits" in base B (here B = 256,
-//      i.e., one byte per digit).
-//   2. Pad both digit sequences to a power-of-2 length N where
-//      N ≥ a_digits + b_digits (so the cyclic convolution equals the
-//      acyclic convolution we actually want).
-//   3. Forward NTT both digit sequences.
-//   4. Pointwise multiply the transformed sequences (mod p).
-//   5. Inverse NTT.
-//   6. Carry-propagate the resulting digit sequence back to bytes.
-//
-// Asymptotic O(n log n log log n) — beats Karatsuba's O(n^1.58) and
-// Toom-3's O(n^1.46) at large operand sizes.
-//
-// **Limb-independent BLIP-paradigm note:** the NTT array IS a u64 array
-// internally, but it's algorithm-internal scratch (the transformed digit
-// values), NOT a parallel storage of the operand. We read bytes from BLIP
-// encodings as digits at the entry boundary; we write the carry-propagated
-// result back to BLIP bytes at the exit. The bytes remain canonical
-// throughout — same paradigm as Karatsuba's u64 chunked reads.
-//
-// **Single-prime variant:** uses p = 998244353 (= 119·2^23 + 1, a "Fermat-
-// friendly" prime supporting transforms up to length 2^23). With byte-
-// digits this covers operand sizes up to ~7.5K bytes (60K-bit) before
-// risking pointwise-product overflow. Beyond that we'd need a second prime
-// + CRT (future work, see M6-3.14).
-//
-// References:
-//   - Cooley & Tukey, "An algorithm for the machine calculation of
-//     complex Fourier series" (1965)
-//   - Schönhage & Strassen, "Schnelle Multiplikation großer Zahlen" (1971)
+// Byte-digit convolution uses radix-2/radix-4 NTTs. Every stored coefficient,
+// twiddle and transformed residue is a canonical positive signed-BLIP encoding
+// in a fixed-capacity slot (see fft_residue.zig). Arithmetic scalars and SIMD
+// lanes exist only temporarily between reads and encoded writes.
+// Single-prime, two-prime CRT and Goldilocks implementations are provided.
+// Their applicability depends on transform length and coefficient bounds.
+// References: Cooley & Tukey (1965), Schönhage & Strassen (1971).
 
 const std = @import("std");
+pub const residue = @import("fft_residue.zig");
 
 // ── Field parameters (single-prime variant) ──────────────────────────────────
 
@@ -125,8 +102,8 @@ pub inline fn invModP(x: u64) u64 {
 /// In-place bit-reversal permutation. For each index i, swap a[i] with
 /// a[bitreverse(i, log2(n))]. Used by iterative Cooley-Tukey NTT to put
 /// inputs in the order the radix-2 butterfly expects.
-pub fn bitReversePermute(a: []u64) void {
-	const n = a.len;
+pub fn bitReversePermute(a: []u8) void {
+	const n = (a.len / residue.slot_bytes);
 	if (n <= 1) return;
 	std.debug.assert(n & (n - 1) == 0); // power of 2
 	var j: usize = 0;
@@ -139,7 +116,11 @@ pub fn bitReversePermute(a: []u64) void {
 			bit >>= 1;
 		}
 		j ^= bit;
-		if (i < j) std.mem.swap(u64, &a[i], &a[j]);
+		if (i < j) {
+			const swap_value = residue.read(a, i);
+			residue.write(a, i, residue.read(a, j));
+			residue.write(a, j, swap_value);
+		}
 	}
 }
 
@@ -155,11 +136,11 @@ pub fn bitReversePermute(a: []u64) void {
 /// stride into the same precomputed table rather than recomputing per-level.
 /// This collapses 1 mulModP per butterfly vs. the naive
 /// "running w = w * w_len" form.
-pub fn nttWithTwiddles(a: []u64, twiddles: []const u64) void {
-	const n = a.len;
+pub fn nttWithTwiddles(a: []u8, twiddles: []const u8) void {
+	const n = (a.len / residue.slot_bytes);
 	if (n <= 1) return;
 	std.debug.assert(n & (n - 1) == 0);
-	std.debug.assert(twiddles.len >= n / 2);
+	std.debug.assert((twiddles.len / residue.slot_bytes) >= n / 2);
 
 	bitReversePermute(a);
 
@@ -171,11 +152,11 @@ pub fn nttWithTwiddles(a: []u64, twiddles: []const u64) void {
 		while (i < n) : (i += len) {
 			var k: usize = 0;
 			while (k < half) : (k += 1) {
-				const w = twiddles[k * stride];
-				const u = a[i + k];
-				const t = mulModP(a[i + k + half], w);
-				a[i + k] = addModP(u, t);
-				a[i + k + half] = subModP(u, t);
+				const w = residue.read(twiddles, k * stride);
+				const u = residue.read(a, i + k);
+				const t = mulModP(residue.read(a, i + k + half), w);
+				residue.write(a, i + k, addModP(u, t));
+				residue.write(a, i + k + half, subModP(u, t));
 			}
 		}
 	}
@@ -183,30 +164,30 @@ pub fn nttWithTwiddles(a: []u64, twiddles: []const u64) void {
 
 /// Convenience wrapper that builds the twiddle table on the stack and runs
 /// `nttWithTwiddles`, then scales by N⁻¹ on inverse. For test/use up to
-/// n = 8192 (twiddle table = 32 KB on the stack). Production path
+/// n = 8192 (twiddle table = 64 KB on the stack). Production path
 /// (`mulMagnitudes`) computes twiddles once on the heap and shares them
 /// across the three NTT calls (forward A, forward B, inverse).
-pub fn ntt(a: []u64, invert: bool) void {
-	const n = a.len;
+pub fn ntt(a: []u8, invert: bool) void {
+	const n = (a.len / residue.slot_bytes);
 	if (n <= 1) return;
 	std.debug.assert(n & (n - 1) == 0);
 	std.debug.assert(n <= 8192); // stack twiddles cap
 
-	var tw_buf: [4096]u64 = undefined;
-	const tw = tw_buf[0 .. n / 2];
+	var tw_buf: [4096 * residue.slot_bytes]u8 = undefined;
+	const tw = tw_buf[(0) * residue.slot_bytes .. (n / 2) * residue.slot_bytes];
 	const omega_n = blk: {
 		const root = nthRootOfUnity(n);
 		break :blk if (invert) invModP(root) else root;
 	};
-	tw[0] = 1;
+	residue.write(tw, 0, 1);
 	var j: usize = 1;
-	while (j < n / 2) : (j += 1) tw[j] = mulModP(tw[j - 1], omega_n);
+	while (j < n / 2) : (j += 1) residue.write(tw, j, mulModP(residue.read(tw, j - 1), omega_n));
 
 	nttWithTwiddles(a, tw);
 
 	if (invert) {
 		const n_inv = invModP(@intCast(n));
-		for (a) |*x| x.* = mulModP(x.*, n_inv);
+		for (0..(a.len / residue.slot_bytes)) |element| residue.write(a, element, mulModP(residue.read(a, element), n_inv));
 	}
 }
 
@@ -239,15 +220,15 @@ pub fn mulMagnitudes(allocator: std.mem.Allocator, a: []const u8, b: []const u8,
 	var N: usize = 1;
 	while (N < need_len) N <<= 1;
 
-	const pa = try allocator.alloc(u64, N);
+	const pa = try allocator.alloc(u8, (N) * residue.slot_bytes);
 	defer allocator.free(pa);
-	const pb = try allocator.alloc(u64, N);
+	const pb = try allocator.alloc(u8, (N) * residue.slot_bytes);
 	defer allocator.free(pb);
-	const tw_fwd = try allocator.alloc(u64, N / 2);
+	const tw_fwd = try allocator.alloc(u8, (N / 2) * residue.slot_bytes);
 	defer allocator.free(tw_fwd);
-	const tw_inv = try allocator.alloc(u64, N / 2);
+	const tw_inv = try allocator.alloc(u8, (N / 2) * residue.slot_bytes);
 	defer allocator.free(tw_inv);
-	const stockham_scratch = try allocator.alloc(u64, N);
+	const stockham_scratch = try allocator.alloc(u8, (N) * residue.slot_bytes);
 	defer allocator.free(stockham_scratch);
 
 	return mulMagnitudesWithScratch(a, b, out, pa, pb, tw_fwd, tw_inv, stockham_scratch);
@@ -273,11 +254,11 @@ pub fn mulMagnitudesWithScratch(
 	a: []const u8,
 	b: []const u8,
 	out: []u8,
-	pa: []u64,
-	pb: []u64,
-	tw_fwd: []u64,
-	tw_inv: []u64,
-	stockham_scratch: []u64,
+	pa: []u8,
+	pb: []u8,
+	tw_fwd: []u8,
+	tw_inv: []u8,
+	stockham_scratch: []u8,
 ) usize {
 	if (a.len == 0 or b.len == 0) return 0;
 	const need_len = a.len + b.len;
@@ -286,49 +267,49 @@ pub fn mulMagnitudesWithScratch(
 
 	var N: usize = 1;
 	while (N < need_len) N <<= 1;
-	std.debug.assert(pa.len >= N);
-	std.debug.assert(pb.len >= N);
-	std.debug.assert(tw_fwd.len >= N / 2);
-	std.debug.assert(tw_inv.len >= N / 2);
-	std.debug.assert(stockham_scratch.len >= N);
+	std.debug.assert((pa.len / residue.slot_bytes) >= N);
+	std.debug.assert((pb.len / residue.slot_bytes) >= N);
+	std.debug.assert((tw_fwd.len / residue.slot_bytes) >= N / 2);
+	std.debug.assert((tw_inv.len / residue.slot_bytes) >= N / 2);
+	std.debug.assert((stockham_scratch.len / residue.slot_bytes) >= N);
 
-	const pa_n = pa[0..N];
-	const pb_n = pb[0..N];
-	const tw_fwd_n = tw_fwd[0 .. N / 2];
-	const tw_inv_n = tw_inv[0 .. N / 2];
-	const sc_n = stockham_scratch[0..N];
+	const pa_n = pa[(0) * residue.slot_bytes .. (N) * residue.slot_bytes];
+	const pb_n = pb[(0) * residue.slot_bytes .. (N) * residue.slot_bytes];
+	const tw_fwd_n = tw_fwd[(0) * residue.slot_bytes .. (N / 2) * residue.slot_bytes];
+	const tw_inv_n = tw_inv[(0) * residue.slot_bytes .. (N / 2) * residue.slot_bytes];
+	const sc_n = stockham_scratch[(0) * residue.slot_bytes .. (N) * residue.slot_bytes];
 
 	// Precompute twiddles once, reuse across 3 NTT calls (forward A,
 	// forward B, inverse). Cuts per-call mulModP count nearly in half.
 	const omega_n = nthRootOfUnity(N);
 	const omega_n_inv = invModP(omega_n);
-	tw_fwd_n[0] = 1;
-	tw_inv_n[0] = 1;
+	residue.write(tw_fwd_n, 0, 1);
+	residue.write(tw_inv_n, 0, 1);
 	{
 		var j: usize = 1;
 		while (j < N / 2) : (j += 1) {
-			tw_fwd_n[j] = mulModP(tw_fwd_n[j - 1], omega_n);
-			tw_inv_n[j] = mulModP(tw_inv_n[j - 1], omega_n_inv);
+			residue.write(tw_fwd_n, j, mulModP(residue.read(tw_fwd_n, j - 1), omega_n));
+			residue.write(tw_inv_n, j, mulModP(residue.read(tw_inv_n, j - 1), omega_n_inv));
 		}
 	}
 
 	@memset(pa_n, 0);
 	@memset(pb_n, 0);
-	for (a, 0..) |byte, i| pa_n[i] = byte;
-	for (b, 0..) |byte, i| pb_n[i] = byte;
+	for (a, 0..) |byte, i| residue.write(pa_n, i, byte);
+	for (b, 0..) |byte, i| residue.write(pb_n, i, byte);
 
 	nttStockhamVecU4(pa_n, sc_n, tw_fwd_n);
 	nttStockhamVecU4(pb_n, sc_n, tw_fwd_n);
-	for (0..N) |i| pa_n[i] = mulModP(pa_n[i], pb_n[i]);
+	for (0..N) |i| residue.write(pa_n, i, mulModP(residue.read(pa_n, i), residue.read(pb_n, i)));
 	nttStockhamVecU4(pa_n, sc_n, tw_inv_n);
 	const n_inv = invModP(@intCast(N));
-	for (pa_n) |*x| x.* = mulModP(x.*, n_inv);
+	for (0..(pa_n.len / residue.slot_bytes)) |element| residue.write(pa_n, element, mulModP(residue.read(pa_n, element), n_inv));
 
 	// Carry propagation through the byte-output buffer.
 	var carry: u64 = 0;
 	var i: usize = 0;
 	while (i < need_len) : (i += 1) {
-		const val = pa_n[i] + carry;
+		const val = residue.read(pa_n, i) + carry;
 		out[i] = @truncate(val & 0xFF);
 		carry = val >> 8;
 	}
@@ -421,11 +402,11 @@ pub const F1_INV_MOD_F2: u64 = F2.invMod(F1.p % F2.p);
 
 /// Generic iterative radix-2 Cooley-Tukey NTT. Same algorithm as
 /// `nttWithTwiddles` but parameterized by a comptime field.
-pub fn nttGeneric(comptime field: Field, a: []u64, twiddles: []const u64) void {
-	const n = a.len;
+pub fn nttGeneric(comptime field: Field, a: []u8, twiddles: []const u8) void {
+	const n = (a.len / residue.slot_bytes);
 	if (n <= 1) return;
 	std.debug.assert(n & (n - 1) == 0);
-	std.debug.assert(twiddles.len >= n / 2);
+	std.debug.assert((twiddles.len / residue.slot_bytes) >= n / 2);
 
 	bitReversePermute(a);
 
@@ -437,11 +418,11 @@ pub fn nttGeneric(comptime field: Field, a: []u64, twiddles: []const u64) void {
 		while (i < n) : (i += len) {
 			var k: usize = 0;
 			while (k < half) : (k += 1) {
-				const w = twiddles[k * stride];
-				const u = a[i + k];
-				const t = field.mulMod(a[i + k + half], w);
-				a[i + k] = field.addMod(u, t);
-				a[i + k + half] = field.subMod(u, t);
+				const w = residue.read(twiddles, k * stride);
+				const u = residue.read(a, i + k);
+				const t = field.mulMod(residue.read(a, i + k + half), w);
+				residue.write(a, i + k, field.addMod(u, t));
+				residue.write(a, i + k + half, field.subMod(u, t));
 			}
 		}
 	}
@@ -455,43 +436,43 @@ fn convolveOnce(
 	a: []const u8,
 	b: []const u8,
 	N: usize,
-	out: []u64,
+	out: []u8,
 ) !void {
-	std.debug.assert(out.len == N);
+	std.debug.assert((out.len / residue.slot_bytes) == N);
 	std.debug.assert(N <= field.max_ntt_len);
 
-	const pa = try allocator.alloc(u64, N);
+	const pa = try allocator.alloc(u8, (N) * residue.slot_bytes);
 	defer allocator.free(pa);
-	const pb = try allocator.alloc(u64, N);
+	const pb = try allocator.alloc(u8, (N) * residue.slot_bytes);
 	defer allocator.free(pb);
-	const tw_fwd = try allocator.alloc(u64, N / 2);
+	const tw_fwd = try allocator.alloc(u8, (N / 2) * residue.slot_bytes);
 	defer allocator.free(tw_fwd);
-	const tw_inv = try allocator.alloc(u64, N / 2);
+	const tw_inv = try allocator.alloc(u8, (N / 2) * residue.slot_bytes);
 	defer allocator.free(tw_inv);
 
 	const omega_n = field.nthRootOfUnity(N);
 	const omega_n_inv = field.invMod(omega_n);
-	tw_fwd[0] = 1;
-	tw_inv[0] = 1;
+	residue.write(tw_fwd, 0, 1);
+	residue.write(tw_inv, 0, 1);
 	{
 		var j: usize = 1;
 		while (j < N / 2) : (j += 1) {
-			tw_fwd[j] = field.mulMod(tw_fwd[j - 1], omega_n);
-			tw_inv[j] = field.mulMod(tw_inv[j - 1], omega_n_inv);
+			residue.write(tw_fwd, j, field.mulMod(residue.read(tw_fwd, j - 1), omega_n));
+			residue.write(tw_inv, j, field.mulMod(residue.read(tw_inv, j - 1), omega_n_inv));
 		}
 	}
 
 	@memset(pa, 0);
 	@memset(pb, 0);
-	for (a, 0..) |byte, i| pa[i] = byte;
-	for (b, 0..) |byte, i| pb[i] = byte;
+	for (a, 0..) |byte, i| residue.write(pa, i, byte);
+	for (b, 0..) |byte, i| residue.write(pb, i, byte);
 
 	nttGeneric(field, pa, tw_fwd);
 	nttGeneric(field, pb, tw_fwd);
-	for (0..N) |i| pa[i] = field.mulMod(pa[i], pb[i]);
+	for (0..N) |i| residue.write(pa, i, field.mulMod(residue.read(pa, i), residue.read(pb, i)));
 	nttGeneric(field, pa, tw_inv);
 	const n_inv = field.invMod(@intCast(N));
-	for (pa, 0..) |x, i| out[i] = field.mulMod(x, n_inv);
+	for (0..(pa.len / residue.slot_bytes)) |i| residue.write(out, i, field.mulMod(residue.read(pa, i), n_inv));
 }
 
 /// CRT combine using Garner's form. Given r1 ≡ x (mod p1) and r2 ≡ x (mod p2)
@@ -534,9 +515,9 @@ pub fn mulMagnitudesCRT(
 	std.debug.assert(N <= F1.max_ntt_len);
 	std.debug.assert(N <= F2.max_ntt_len);
 
-	const c1 = try allocator.alloc(u64, N);
+	const c1 = try allocator.alloc(u8, (N) * residue.slot_bytes);
 	defer allocator.free(c1);
-	const c2 = try allocator.alloc(u64, N);
+	const c2 = try allocator.alloc(u8, (N) * residue.slot_bytes);
 	defer allocator.free(c2);
 
 	try convolveOnce(F1, allocator, a, b, N, c1);
@@ -544,12 +525,12 @@ pub fn mulMagnitudesCRT(
 
 	// CRT-merge each digit, then carry-propagate to bytes. We reuse `c1`
 	// as the merged digit buffer to avoid another N-element allocation.
-	for (0..N) |i| c1[i] = crtCombine(c1[i], c2[i]);
+	for (0..N) |i| residue.write(c1, i, crtCombine(residue.read(c1, i), residue.read(c2, i)));
 
 	var carry: u64 = 0;
 	var i: usize = 0;
 	while (i < need_len) : (i += 1) {
-		const val = c1[i] + carry;
+		const val = residue.read(c1, i) + carry;
 		out[i] = @truncate(val & 0xFF);
 		carry = val >> 8;
 	}
@@ -732,11 +713,11 @@ pub inline fn montMul_x2(a_m: @Vector(2, u64), b_m: @Vector(2, u64)) @Vector(2, 
 /// operations are unchanged (Mont form is linear: `Mont(a+b) = Mont(a)+Mont(b)`),
 /// only the multiplication switches to `montMul_x2`. This is the routine that
 /// gives the FFT path its real win — Mp.mul drops materially at 32K+ bit.
-pub fn nttWithTwiddlesMontVec(a: []u64, twiddles_m: []const u64) void {
-	const n = a.len;
+pub fn nttWithTwiddlesMontVec(a: []u8, twiddles_m: []const u8) void {
+	const n = (a.len / residue.slot_bytes);
 	if (n <= 1) return;
 	std.debug.assert(n & (n - 1) == 0);
-	std.debug.assert(twiddles_m.len >= n / 2);
+	std.debug.assert((twiddles_m.len / residue.slot_bytes) >= n / 2);
 
 	bitReversePermute(a);
 
@@ -748,29 +729,29 @@ pub fn nttWithTwiddlesMontVec(a: []u64, twiddles_m: []const u64) void {
 		if (half == 1) {
 			// Scalar fallback for the smallest level (no pair to vectorize).
 			while (i < n) : (i += len) {
-				const w = twiddles_m[0]; // Mont(1) = ONE_MOD_P
-				const u = a[i];
-				const t = montMul(a[i + 1], w);
-				a[i] = addModP(u, t);
-				a[i + 1] = subModP(u, t);
+				const w = residue.read(twiddles_m, 0); // Mont(1) = ONE_MOD_P
+				const u = residue.read(a, i);
+				const t = montMul(residue.read(a, i + 1), w);
+				residue.write(a, i, addModP(u, t));
+				residue.write(a, i + 1, subModP(u, t));
 			}
 		} else {
 			while (i < n) : (i += len) {
 				var k: usize = 0;
 				while (k < half) : (k += 2) {
 					const w_pair: @Vector(2, u64) = .{
-						twiddles_m[k * stride],
-						twiddles_m[(k + 1) * stride],
+						residue.read(twiddles_m, k * stride),
+						residue.read(twiddles_m, (k + 1) * stride),
 					};
-					const a_lo: @Vector(2, u64) = .{ a[i + k], a[i + k + 1] };
-					const a_hi: @Vector(2, u64) = .{ a[i + k + half], a[i + k + 1 + half] };
+					const a_lo: @Vector(2, u64) = .{ residue.read(a, i + k), residue.read(a, i + k + 1) };
+					const a_hi: @Vector(2, u64) = .{ residue.read(a, i + k + half), residue.read(a, i + k + 1 + half) };
 					const t_pair = montMul_x2(a_hi, w_pair);
 					const new_lo = addModP_x2(a_lo, t_pair);
 					const new_hi = subModP_x2(a_lo, t_pair);
-					a[i + k] = new_lo[0];
-					a[i + k + 1] = new_lo[1];
-					a[i + k + half] = new_hi[0];
-					a[i + k + 1 + half] = new_hi[1];
+					residue.write(a, i + k, new_lo[0]);
+					residue.write(a, i + k + 1, new_lo[1]);
+					residue.write(a, i + k + half, new_hi[0]);
+					residue.write(a, i + k + 1 + half, new_hi[1]);
 				}
 			}
 		}
@@ -789,11 +770,11 @@ pub fn nttWithTwiddlesMontVec(a: []u64, twiddles_m: []const u64) void {
 // so the loads/stores compress to two contiguous u64 pairs per butterfly pair.
 // Twiddle indices `k*stride` and `(k+1)*stride` are NOT adjacent (they're
 // stride apart), so we materialize the twiddle pair via two scalar reads.
-pub fn nttWithTwiddlesVec(a: []u64, twiddles: []const u64) void {
-	const n = a.len;
+pub fn nttWithTwiddlesVec(a: []u8, twiddles: []const u8) void {
+	const n = (a.len / residue.slot_bytes);
 	if (n <= 1) return;
 	std.debug.assert(n & (n - 1) == 0);
-	std.debug.assert(twiddles.len >= n / 2);
+	std.debug.assert((twiddles.len / residue.slot_bytes) >= n / 2);
 
 	bitReversePermute(a);
 
@@ -805,11 +786,11 @@ pub fn nttWithTwiddlesVec(a: []u64, twiddles: []const u64) void {
 		if (half == 1) {
 			// Scalar fallback for the smallest level — no pair to vectorize.
 			while (i < n) : (i += len) {
-				const w = twiddles[0]; // == 1, but we read for symmetry
-				const u = a[i];
-				const t = mulModP(a[i + 1], w);
-				a[i] = addModP(u, t);
-				a[i + 1] = subModP(u, t);
+				const w = residue.read(twiddles, 0); // == 1, but we read for symmetry
+				const u = residue.read(a, i);
+				const t = mulModP(residue.read(a, i + 1), w);
+				residue.write(a, i, addModP(u, t));
+				residue.write(a, i + 1, subModP(u, t));
 			}
 		} else {
 			// half >= 2 and is even (always — half = len/2, len pow2 >= 4).
@@ -817,18 +798,18 @@ pub fn nttWithTwiddlesVec(a: []u64, twiddles: []const u64) void {
 				var k: usize = 0;
 				while (k < half) : (k += 2) {
 					const w_pair: @Vector(2, u64) = .{
-						twiddles[k * stride],
-						twiddles[(k + 1) * stride],
+						residue.read(twiddles, k * stride),
+						residue.read(twiddles, (k + 1) * stride),
 					};
-					const a_lo: @Vector(2, u64) = .{ a[i + k], a[i + k + 1] };
-					const a_hi: @Vector(2, u64) = .{ a[i + k + half], a[i + k + 1 + half] };
+					const a_lo: @Vector(2, u64) = .{ residue.read(a, i + k), residue.read(a, i + k + 1) };
+					const a_hi: @Vector(2, u64) = .{ residue.read(a, i + k + half), residue.read(a, i + k + 1 + half) };
 					const t_pair = mulModP_x2(a_hi, w_pair);
 					const new_lo = addModP_x2(a_lo, t_pair);
 					const new_hi = subModP_x2(a_lo, t_pair);
-					a[i + k] = new_lo[0];
-					a[i + k + 1] = new_lo[1];
-					a[i + k + half] = new_hi[0];
-					a[i + k + 1 + half] = new_hi[1];
+					residue.write(a, i + k, new_lo[0]);
+					residue.write(a, i + k + 1, new_lo[1]);
+					residue.write(a, i + k + half, new_hi[0]);
+					residue.write(a, i + k + 1 + half, new_hi[1]);
 				}
 			}
 		}
@@ -870,16 +851,16 @@ pub fn nttWithTwiddlesVec(a: []u64, twiddles: []const u64) void {
 /// (a power of 2). `twiddles[j] = omega_n^j` for j in 0..n/2 (same convention
 /// as `nttWithTwiddles`). On return, the natural-order transform lives in `a`;
 /// `scratch` is clobbered.
-pub fn nttStockham(a: []u64, scratch: []u64, twiddles: []const u64) void {
-	const n = a.len;
+pub fn nttStockham(a: []u8, scratch: []u8, twiddles: []const u8) void {
+	const n = (a.len / residue.slot_bytes);
 	if (n <= 1) return;
 	std.debug.assert(n & (n - 1) == 0);
-	std.debug.assert(scratch.len == n);
-	std.debug.assert(twiddles.len >= n / 2);
+	std.debug.assert((scratch.len / residue.slot_bytes) == n);
+	std.debug.assert((twiddles.len / residue.slot_bytes) >= n / 2);
 
 	const half_n = n >> 1;
-	var src: []u64 = a;
-	var dst: []u64 = scratch;
+	var src: []u8 = a;
+	var dst: []u8 = scratch;
 
 	var m: usize = 2;
 	while (m <= n) : (m <<= 1) {
@@ -895,12 +876,12 @@ pub fn nttStockham(a: []u64, scratch: []u64, twiddles: []const u64) void {
 			const src_base = q_idx * m2;
 			var j: usize = 0;
 			while (j < m2) : (j += 1) {
-				const w = twiddles[j * stride];
-				const x = src[src_base + j];
-				const y = src[src_base + j + half_n];
+				const w = residue.read(twiddles, j * stride);
+				const x = residue.read(src, src_base + j);
+				const y = residue.read(src, src_base + j + half_n);
 				const t = mulModP(y, w);
-				dst[q + j] = addModP(x, t);
-				dst[q + j + m2] = subModP(x, t);
+				residue.write(dst, q + j, addModP(x, t));
+				residue.write(dst, q + j + m2, subModP(x, t));
 			}
 		}
 		// Ping-pong.
@@ -930,16 +911,16 @@ pub fn nttStockham(a: []u64, scratch: []u64, twiddles: []const u64) void {
 /// `j+1` (which are adjacent in `dst` for both halves), exactly as the
 /// Cooley-Tukey vec form does. Source loads at `src_base + j` and
 /// `src_base + j + 1` are also adjacent.
-pub fn nttStockhamVec(a: []u64, scratch: []u64, twiddles: []const u64) void {
-	const n = a.len;
+pub fn nttStockhamVec(a: []u8, scratch: []u8, twiddles: []const u8) void {
+	const n = (a.len / residue.slot_bytes);
 	if (n <= 1) return;
 	std.debug.assert(n & (n - 1) == 0);
-	std.debug.assert(scratch.len == n);
-	std.debug.assert(twiddles.len >= n / 2);
+	std.debug.assert((scratch.len / residue.slot_bytes) == n);
+	std.debug.assert((twiddles.len / residue.slot_bytes) >= n / 2);
 
 	const half_n = n >> 1;
-	var src: []u64 = a;
-	var dst: []u64 = scratch;
+	var src: []u8 = a;
+	var dst: []u8 = scratch;
 
 	var m: usize = 2;
 	while (m <= n) : (m <<= 1) {
@@ -951,12 +932,12 @@ pub fn nttStockhamVec(a: []u64, scratch: []u64, twiddles: []const u64) void {
 			while (q < n) : (q += m) {
 				const q_idx = q / m;
 				const src_base = q_idx * m2;
-				const w = twiddles[0]; // == 1
-				const x = src[src_base];
-				const y = src[src_base + half_n];
+				const w = residue.read(twiddles, 0); // == 1
+				const x = residue.read(src, src_base);
+				const y = residue.read(src, src_base + half_n);
 				const t = mulModP(y, w);
-				dst[q] = addModP(x, t);
-				dst[q + 1] = subModP(x, t);
+				residue.write(dst, q, addModP(x, t));
+				residue.write(dst, q + 1, subModP(x, t));
 			}
 		} else {
 			// m2 >= 2 (and is a power of 2) so we can step j by 2.
@@ -967,24 +948,24 @@ pub fn nttStockhamVec(a: []u64, scratch: []u64, twiddles: []const u64) void {
 				var j: usize = 0;
 				while (j < m2) : (j += 2) {
 					const w_pair: @Vector(2, u64) = .{
-						twiddles[j * stride],
-						twiddles[(j + 1) * stride],
+						residue.read(twiddles, j * stride),
+						residue.read(twiddles, (j + 1) * stride),
 					};
 					const x_pair: @Vector(2, u64) = .{
-						src[src_base + j],
-						src[src_base + j + 1],
+						residue.read(src, src_base + j),
+						residue.read(src, src_base + j + 1),
 					};
 					const y_pair: @Vector(2, u64) = .{
-						src[src_base + j + half_n],
-						src[src_base + j + 1 + half_n],
+						residue.read(src, src_base + j + half_n),
+						residue.read(src, src_base + j + 1 + half_n),
 					};
 					const t_pair = mulModP_x2(y_pair, w_pair);
 					const new_lo = addModP_x2(x_pair, t_pair);
 					const new_hi = subModP_x2(x_pair, t_pair);
-					dst[q + j] = new_lo[0];
-					dst[q + j + 1] = new_lo[1];
-					dst[q + j + m2] = new_hi[0];
-					dst[q + j + 1 + m2] = new_hi[1];
+					residue.write(dst, q + j, new_lo[0]);
+					residue.write(dst, q + j + 1, new_lo[1]);
+					residue.write(dst, q + j + m2, new_hi[0]);
+					residue.write(dst, q + j + 1 + m2, new_hi[1]);
 				}
 			}
 		}
@@ -1032,16 +1013,16 @@ pub fn nttStockhamVec(a: []u64, scratch: []u64, twiddles: []const u64) void {
 /// inner mul switches from scalar `% P` to `montMul_x2`. add/sub are linear
 /// under Montgomery (Mont(a+b) = Mont(a) + Mont(b)) so addModP_x2 / subModP_x2
 /// are unchanged.
-pub fn nttStockhamMontVec(a: []u64, scratch: []u64, twiddles_m: []const u64) void {
-	const n = a.len;
+pub fn nttStockhamMontVec(a: []u8, scratch: []u8, twiddles_m: []const u8) void {
+	const n = (a.len / residue.slot_bytes);
 	if (n <= 1) return;
 	std.debug.assert(n & (n - 1) == 0);
-	std.debug.assert(scratch.len == n);
-	std.debug.assert(twiddles_m.len >= n / 2);
+	std.debug.assert((scratch.len / residue.slot_bytes) == n);
+	std.debug.assert((twiddles_m.len / residue.slot_bytes) >= n / 2);
 
 	const half_n = n >> 1;
-	var src: []u64 = a;
-	var dst: []u64 = scratch;
+	var src: []u8 = a;
+	var dst: []u8 = scratch;
 
 	var m: usize = 2;
 	while (m <= n) : (m <<= 1) {
@@ -1053,12 +1034,12 @@ pub fn nttStockhamMontVec(a: []u64, scratch: []u64, twiddles_m: []const u64) voi
 			while (q < n) : (q += m) {
 				const q_idx = q / m;
 				const src_base = q_idx * m2;
-				const w = twiddles_m[0]; // Mont(1) = ONE_MOD_P
-				const x = src[src_base];
-				const y = src[src_base + half_n];
+				const w = residue.read(twiddles_m, 0); // Mont(1) = ONE_MOD_P
+				const x = residue.read(src, src_base);
+				const y = residue.read(src, src_base + half_n);
 				const t = montMul(y, w);
-				dst[q] = addModP(x, t);
-				dst[q + 1] = subModP(x, t);
+				residue.write(dst, q, addModP(x, t));
+				residue.write(dst, q + 1, subModP(x, t));
 			}
 		} else {
 			var q: usize = 0;
@@ -1068,24 +1049,24 @@ pub fn nttStockhamMontVec(a: []u64, scratch: []u64, twiddles_m: []const u64) voi
 				var j: usize = 0;
 				while (j < m2) : (j += 2) {
 					const w_pair: @Vector(2, u64) = .{
-						twiddles_m[j * stride],
-						twiddles_m[(j + 1) * stride],
+						residue.read(twiddles_m, j * stride),
+						residue.read(twiddles_m, (j + 1) * stride),
 					};
 					const x_pair: @Vector(2, u64) = .{
-						src[src_base + j],
-						src[src_base + j + 1],
+						residue.read(src, src_base + j),
+						residue.read(src, src_base + j + 1),
 					};
 					const y_pair: @Vector(2, u64) = .{
-						src[src_base + j + half_n],
-						src[src_base + j + 1 + half_n],
+						residue.read(src, src_base + j + half_n),
+						residue.read(src, src_base + j + 1 + half_n),
 					};
 					const t_pair = montMul_x2(y_pair, w_pair);
 					const new_lo = addModP_x2(x_pair, t_pair);
 					const new_hi = subModP_x2(x_pair, t_pair);
-					dst[q + j] = new_lo[0];
-					dst[q + j + 1] = new_lo[1];
-					dst[q + j + m2] = new_hi[0];
-					dst[q + j + 1 + m2] = new_hi[1];
+					residue.write(dst, q + j, new_lo[0]);
+					residue.write(dst, q + j + 1, new_lo[1]);
+					residue.write(dst, q + j + m2, new_hi[0]);
+					residue.write(dst, q + j + 1 + m2, new_hi[1]);
 				}
 			}
 		}
@@ -1109,16 +1090,16 @@ pub fn nttStockhamMontVec(a: []u64, scratch: []u64, twiddles_m: []const u64) voi
 /// at m2 == 1 we fall back to the existing scalar path. For m2 ≥ 4 we run
 /// the unrolled body, then a tail-fixup for any odd remainder pair (since
 /// m2 is always a power of 2 ≥ 2, m2 % 4 ∈ {0, 2}; the tail handles m2=2).
-pub fn nttStockhamVecU4(a: []u64, scratch: []u64, twiddles: []const u64) void {
-	const n = a.len;
+pub fn nttStockhamVecU4(a: []u8, scratch: []u8, twiddles: []const u8) void {
+	const n = (a.len / residue.slot_bytes);
 	if (n <= 1) return;
 	std.debug.assert(n & (n - 1) == 0);
-	std.debug.assert(scratch.len == n);
-	std.debug.assert(twiddles.len >= n / 2);
+	std.debug.assert((scratch.len / residue.slot_bytes) == n);
+	std.debug.assert((twiddles.len / residue.slot_bytes) >= n / 2);
 
 	const half_n = n >> 1;
-	var src: []u64 = a;
-	var dst: []u64 = scratch;
+	var src: []u8 = a;
+	var dst: []u8 = scratch;
 
 	var m: usize = 2;
 	while (m <= n) : (m <<= 1) {
@@ -1130,12 +1111,12 @@ pub fn nttStockhamVecU4(a: []u64, scratch: []u64, twiddles: []const u64) void {
 			while (q < n) : (q += m) {
 				const q_idx = q / m;
 				const src_base = q_idx * m2;
-				const w = twiddles[0];
-				const x = src[src_base];
-				const y = src[src_base + half_n];
+				const w = residue.read(twiddles, 0);
+				const x = residue.read(src, src_base);
+				const y = residue.read(src, src_base + half_n);
 				const t = mulModP(y, w);
-				dst[q] = addModP(x, t);
-				dst[q + 1] = subModP(x, t);
+				residue.write(dst, q, addModP(x, t));
+				residue.write(dst, q + 1, subModP(x, t));
 			}
 		} else if (m2 == 2) {
 			// Single pair per group (no unroll possible — m2 == 2 means j ∈ {0}).
@@ -1143,16 +1124,16 @@ pub fn nttStockhamVecU4(a: []u64, scratch: []u64, twiddles: []const u64) void {
 			while (q < n) : (q += m) {
 				const q_idx = q / m;
 				const src_base = q_idx * m2;
-				const w_pair: @Vector(2, u64) = .{ twiddles[0], twiddles[stride] };
-				const x_pair: @Vector(2, u64) = .{ src[src_base], src[src_base + 1] };
-				const y_pair: @Vector(2, u64) = .{ src[src_base + half_n], src[src_base + 1 + half_n] };
+				const w_pair: @Vector(2, u64) = .{ residue.read(twiddles, 0), residue.read(twiddles, stride) };
+				const x_pair: @Vector(2, u64) = .{ residue.read(src, src_base), residue.read(src, src_base + 1) };
+				const y_pair: @Vector(2, u64) = .{ residue.read(src, src_base + half_n), residue.read(src, src_base + 1 + half_n) };
 				const t_pair = mulModP_x2(y_pair, w_pair);
 				const new_lo = addModP_x2(x_pair, t_pair);
 				const new_hi = subModP_x2(x_pair, t_pair);
-				dst[q] = new_lo[0];
-				dst[q + 1] = new_lo[1];
-				dst[q + m2] = new_hi[0];
-				dst[q + m2 + 1] = new_hi[1];
+				residue.write(dst, q, new_lo[0]);
+				residue.write(dst, q + 1, new_lo[1]);
+				residue.write(dst, q + m2, new_hi[0]);
+				residue.write(dst, q + m2 + 1, new_hi[1]);
 			}
 		} else {
 			// m2 ≥ 4 — unroll body by 2 (= 4 butterflies per iteration).
@@ -1164,29 +1145,29 @@ pub fn nttStockhamVecU4(a: []u64, scratch: []u64, twiddles: []const u64) void {
 				while (j < m2) : (j += 4) {
 					// Pair 0: butterflies j, j+1.
 					const w0: @Vector(2, u64) = .{
-						twiddles[j * stride],
-						twiddles[(j + 1) * stride],
+						residue.read(twiddles, j * stride),
+						residue.read(twiddles, (j + 1) * stride),
 					};
 					const x0: @Vector(2, u64) = .{
-						src[src_base + j],
-						src[src_base + j + 1],
+						residue.read(src, src_base + j),
+						residue.read(src, src_base + j + 1),
 					};
 					const y0: @Vector(2, u64) = .{
-						src[src_base + j + half_n],
-						src[src_base + j + 1 + half_n],
+						residue.read(src, src_base + j + half_n),
+						residue.read(src, src_base + j + 1 + half_n),
 					};
 					// Pair 1: butterflies j+2, j+3.
 					const w1: @Vector(2, u64) = .{
-						twiddles[(j + 2) * stride],
-						twiddles[(j + 3) * stride],
+						residue.read(twiddles, (j + 2) * stride),
+						residue.read(twiddles, (j + 3) * stride),
 					};
 					const x1: @Vector(2, u64) = .{
-						src[src_base + j + 2],
-						src[src_base + j + 3],
+						residue.read(src, src_base + j + 2),
+						residue.read(src, src_base + j + 3),
 					};
 					const y1: @Vector(2, u64) = .{
-						src[src_base + j + 2 + half_n],
-						src[src_base + j + 3 + half_n],
+						residue.read(src, src_base + j + 2 + half_n),
+						residue.read(src, src_base + j + 3 + half_n),
 					};
 					// Compute both pairs' mods in immediate succession so the
 					// scheduler can interleave the dependency chains.
@@ -1196,14 +1177,14 @@ pub fn nttStockhamVecU4(a: []u64, scratch: []u64, twiddles: []const u64) void {
 					const lo1 = addModP_x2(x1, t1);
 					const hi0 = subModP_x2(x0, t0);
 					const hi1 = subModP_x2(x1, t1);
-					dst[q + j]            = lo0[0];
-					dst[q + j + 1]        = lo0[1];
-					dst[q + j + 2]        = lo1[0];
-					dst[q + j + 3]        = lo1[1];
-					dst[q + j + m2]       = hi0[0];
-					dst[q + j + m2 + 1]   = hi0[1];
-					dst[q + j + m2 + 2]   = hi1[0];
-					dst[q + j + m2 + 3]   = hi1[1];
+					residue.write(dst, q + j, lo0[0]);
+					residue.write(dst, q + j + 1, lo0[1]);
+					residue.write(dst, q + j + 2, lo1[0]);
+					residue.write(dst, q + j + 3, lo1[1]);
+					residue.write(dst, q + j + m2, hi0[0]);
+					residue.write(dst, q + j + m2 + 1, hi0[1]);
+					residue.write(dst, q + j + m2 + 2, hi1[0]);
+					residue.write(dst, q + j + m2 + 3, hi1[1]);
 				}
 			}
 		}
@@ -1236,16 +1217,16 @@ pub fn nttStockhamVecU4(a: []u64, scratch: []u64, twiddles: []const u64) void {
 /// cache-tile-blocked variant that operates on 8 butterflies' worth of
 /// data with explicit prefetch / re-use patterns). NOT wired into the
 /// mulMagnitudes production path — U4 remains the winner.
-pub fn nttStockhamVecU8(a: []u64, scratch: []u64, twiddles: []const u64) void {
-	const n = a.len;
+pub fn nttStockhamVecU8(a: []u8, scratch: []u8, twiddles: []const u8) void {
+	const n = (a.len / residue.slot_bytes);
 	if (n <= 1) return;
 	std.debug.assert(n & (n - 1) == 0);
-	std.debug.assert(scratch.len == n);
-	std.debug.assert(twiddles.len >= n / 2);
+	std.debug.assert((scratch.len / residue.slot_bytes) == n);
+	std.debug.assert((twiddles.len / residue.slot_bytes) >= n / 2);
 
 	const half_n = n >> 1;
-	var src: []u64 = a;
-	var dst: []u64 = scratch;
+	var src: []u8 = a;
+	var dst: []u8 = scratch;
 
 	var m: usize = 2;
 	while (m <= n) : (m <<= 1) {
@@ -1263,18 +1244,18 @@ pub fn nttStockhamVecU8(a: []u64, scratch: []u64, twiddles: []const u64) void {
 				const src_base = q_idx * m2;
 				var j: usize = 0;
 				while (j < m2) : (j += 8) {
-					const w0: @Vector(2, u64) = .{ twiddles[(j + 0) * stride], twiddles[(j + 1) * stride] };
-					const w1: @Vector(2, u64) = .{ twiddles[(j + 2) * stride], twiddles[(j + 3) * stride] };
-					const w2: @Vector(2, u64) = .{ twiddles[(j + 4) * stride], twiddles[(j + 5) * stride] };
-					const w3: @Vector(2, u64) = .{ twiddles[(j + 6) * stride], twiddles[(j + 7) * stride] };
-					const x0: @Vector(2, u64) = .{ src[src_base + j + 0], src[src_base + j + 1] };
-					const x1: @Vector(2, u64) = .{ src[src_base + j + 2], src[src_base + j + 3] };
-					const x2: @Vector(2, u64) = .{ src[src_base + j + 4], src[src_base + j + 5] };
-					const x3: @Vector(2, u64) = .{ src[src_base + j + 6], src[src_base + j + 7] };
-					const y0: @Vector(2, u64) = .{ src[src_base + j + 0 + half_n], src[src_base + j + 1 + half_n] };
-					const y1: @Vector(2, u64) = .{ src[src_base + j + 2 + half_n], src[src_base + j + 3 + half_n] };
-					const y2: @Vector(2, u64) = .{ src[src_base + j + 4 + half_n], src[src_base + j + 5 + half_n] };
-					const y3: @Vector(2, u64) = .{ src[src_base + j + 6 + half_n], src[src_base + j + 7 + half_n] };
+					const w0: @Vector(2, u64) = .{ residue.read(twiddles, (j + 0) * stride), residue.read(twiddles, (j + 1) * stride) };
+					const w1: @Vector(2, u64) = .{ residue.read(twiddles, (j + 2) * stride), residue.read(twiddles, (j + 3) * stride) };
+					const w2: @Vector(2, u64) = .{ residue.read(twiddles, (j + 4) * stride), residue.read(twiddles, (j + 5) * stride) };
+					const w3: @Vector(2, u64) = .{ residue.read(twiddles, (j + 6) * stride), residue.read(twiddles, (j + 7) * stride) };
+					const x0: @Vector(2, u64) = .{ residue.read(src, src_base + j + 0), residue.read(src, src_base + j + 1) };
+					const x1: @Vector(2, u64) = .{ residue.read(src, src_base + j + 2), residue.read(src, src_base + j + 3) };
+					const x2: @Vector(2, u64) = .{ residue.read(src, src_base + j + 4), residue.read(src, src_base + j + 5) };
+					const x3: @Vector(2, u64) = .{ residue.read(src, src_base + j + 6), residue.read(src, src_base + j + 7) };
+					const y0: @Vector(2, u64) = .{ residue.read(src, src_base + j + 0 + half_n), residue.read(src, src_base + j + 1 + half_n) };
+					const y1: @Vector(2, u64) = .{ residue.read(src, src_base + j + 2 + half_n), residue.read(src, src_base + j + 3 + half_n) };
+					const y2: @Vector(2, u64) = .{ residue.read(src, src_base + j + 4 + half_n), residue.read(src, src_base + j + 5 + half_n) };
+					const y3: @Vector(2, u64) = .{ residue.read(src, src_base + j + 6 + half_n), residue.read(src, src_base + j + 7 + half_n) };
 					const t0 = mulModP_x2(y0, w0);
 					const t1 = mulModP_x2(y1, w1);
 					const t2 = mulModP_x2(y2, w2);
@@ -1287,22 +1268,22 @@ pub fn nttStockhamVecU8(a: []u64, scratch: []u64, twiddles: []const u64) void {
 					const hi1 = subModP_x2(x1, t1);
 					const hi2 = subModP_x2(x2, t2);
 					const hi3 = subModP_x2(x3, t3);
-					dst[q + j + 0] = lo0[0];
-					dst[q + j + 1] = lo0[1];
-					dst[q + j + 2] = lo1[0];
-					dst[q + j + 3] = lo1[1];
-					dst[q + j + 4] = lo2[0];
-					dst[q + j + 5] = lo2[1];
-					dst[q + j + 6] = lo3[0];
-					dst[q + j + 7] = lo3[1];
-					dst[q + j + m2 + 0] = hi0[0];
-					dst[q + j + m2 + 1] = hi0[1];
-					dst[q + j + m2 + 2] = hi1[0];
-					dst[q + j + m2 + 3] = hi1[1];
-					dst[q + j + m2 + 4] = hi2[0];
-					dst[q + j + m2 + 5] = hi2[1];
-					dst[q + j + m2 + 6] = hi3[0];
-					dst[q + j + m2 + 7] = hi3[1];
+					residue.write(dst, q + j + 0, lo0[0]);
+					residue.write(dst, q + j + 1, lo0[1]);
+					residue.write(dst, q + j + 2, lo1[0]);
+					residue.write(dst, q + j + 3, lo1[1]);
+					residue.write(dst, q + j + 4, lo2[0]);
+					residue.write(dst, q + j + 5, lo2[1]);
+					residue.write(dst, q + j + 6, lo3[0]);
+					residue.write(dst, q + j + 7, lo3[1]);
+					residue.write(dst, q + j + m2 + 0, hi0[0]);
+					residue.write(dst, q + j + m2 + 1, hi0[1]);
+					residue.write(dst, q + j + m2 + 2, hi1[0]);
+					residue.write(dst, q + j + m2 + 3, hi1[1]);
+					residue.write(dst, q + j + m2 + 4, hi2[0]);
+					residue.write(dst, q + j + m2 + 5, hi2[1]);
+					residue.write(dst, q + j + m2 + 6, hi3[0]);
+					residue.write(dst, q + j + m2 + 7, hi3[1]);
 				}
 			}
 		}
@@ -1320,36 +1301,42 @@ pub fn nttStockhamVecU8(a: []u64, scratch: []u64, twiddles: []const u64) void {
 /// of the U4 algorithm. Exists so the U8 path can delegate without
 /// re-implementing the small-m2 branches.
 fn nttStockhamVecU4Body(
-	src: []u64, dst: []u64, twiddles: []const u64,
-	m: usize, m2: usize, stride: usize, half_n: usize, n: usize,
+	src: []u8,
+	dst: []u8,
+	twiddles: []const u8,
+	m: usize,
+	m2: usize,
+	stride: usize,
+	half_n: usize,
+	n: usize,
 ) void {
 	if (m2 == 1) {
 		var q: usize = 0;
 		while (q < n) : (q += m) {
 			const q_idx = q / m;
 			const src_base = q_idx * m2;
-			const w = twiddles[0];
-			const x = src[src_base];
-			const y = src[src_base + half_n];
+			const w = residue.read(twiddles, 0);
+			const x = residue.read(src, src_base);
+			const y = residue.read(src, src_base + half_n);
 			const t = mulModP(y, w);
-			dst[q] = addModP(x, t);
-			dst[q + 1] = subModP(x, t);
+			residue.write(dst, q, addModP(x, t));
+			residue.write(dst, q + 1, subModP(x, t));
 		}
 	} else if (m2 == 2) {
 		var q: usize = 0;
 		while (q < n) : (q += m) {
 			const q_idx = q / m;
 			const src_base = q_idx * m2;
-			const w_pair: @Vector(2, u64) = .{ twiddles[0], twiddles[stride] };
-			const x_pair: @Vector(2, u64) = .{ src[src_base], src[src_base + 1] };
-			const y_pair: @Vector(2, u64) = .{ src[src_base + half_n], src[src_base + 1 + half_n] };
+			const w_pair: @Vector(2, u64) = .{ residue.read(twiddles, 0), residue.read(twiddles, stride) };
+			const x_pair: @Vector(2, u64) = .{ residue.read(src, src_base), residue.read(src, src_base + 1) };
+			const y_pair: @Vector(2, u64) = .{ residue.read(src, src_base + half_n), residue.read(src, src_base + 1 + half_n) };
 			const t_pair = mulModP_x2(y_pair, w_pair);
 			const new_lo = addModP_x2(x_pair, t_pair);
 			const new_hi = subModP_x2(x_pair, t_pair);
-			dst[q] = new_lo[0];
-			dst[q + 1] = new_lo[1];
-			dst[q + m2] = new_hi[0];
-			dst[q + m2 + 1] = new_hi[1];
+			residue.write(dst, q, new_lo[0]);
+			residue.write(dst, q + 1, new_lo[1]);
+			residue.write(dst, q + m2, new_hi[0]);
+			residue.write(dst, q + m2 + 1, new_hi[1]);
 		}
 	} else {
 		// m2 == 4 — single U4 pass per group.
@@ -1357,26 +1344,26 @@ fn nttStockhamVecU4Body(
 		while (q < n) : (q += m) {
 			const q_idx = q / m;
 			const src_base = q_idx * m2;
-			const w0: @Vector(2, u64) = .{ twiddles[0], twiddles[stride] };
-			const w1: @Vector(2, u64) = .{ twiddles[2 * stride], twiddles[3 * stride] };
-			const x0: @Vector(2, u64) = .{ src[src_base + 0], src[src_base + 1] };
-			const x1: @Vector(2, u64) = .{ src[src_base + 2], src[src_base + 3] };
-			const y0: @Vector(2, u64) = .{ src[src_base + 0 + half_n], src[src_base + 1 + half_n] };
-			const y1: @Vector(2, u64) = .{ src[src_base + 2 + half_n], src[src_base + 3 + half_n] };
+			const w0: @Vector(2, u64) = .{ residue.read(twiddles, 0), residue.read(twiddles, stride) };
+			const w1: @Vector(2, u64) = .{ residue.read(twiddles, 2 * stride), residue.read(twiddles, 3 * stride) };
+			const x0: @Vector(2, u64) = .{ residue.read(src, src_base + 0), residue.read(src, src_base + 1) };
+			const x1: @Vector(2, u64) = .{ residue.read(src, src_base + 2), residue.read(src, src_base + 3) };
+			const y0: @Vector(2, u64) = .{ residue.read(src, src_base + 0 + half_n), residue.read(src, src_base + 1 + half_n) };
+			const y1: @Vector(2, u64) = .{ residue.read(src, src_base + 2 + half_n), residue.read(src, src_base + 3 + half_n) };
 			const t0 = mulModP_x2(y0, w0);
 			const t1 = mulModP_x2(y1, w1);
 			const lo0 = addModP_x2(x0, t0);
 			const lo1 = addModP_x2(x1, t1);
 			const hi0 = subModP_x2(x0, t0);
 			const hi1 = subModP_x2(x1, t1);
-			dst[q + 0] = lo0[0];
-			dst[q + 1] = lo0[1];
-			dst[q + 2] = lo1[0];
-			dst[q + 3] = lo1[1];
-			dst[q + m2 + 0] = hi0[0];
-			dst[q + m2 + 1] = hi0[1];
-			dst[q + m2 + 2] = hi1[0];
-			dst[q + m2 + 3] = hi1[1];
+			residue.write(dst, q + 0, lo0[0]);
+			residue.write(dst, q + 1, lo0[1]);
+			residue.write(dst, q + 2, lo1[0]);
+			residue.write(dst, q + 3, lo1[1]);
+			residue.write(dst, q + m2 + 0, hi0[0]);
+			residue.write(dst, q + m2 + 1, hi0[1]);
+			residue.write(dst, q + m2 + 2, hi1[0]);
+			residue.write(dst, q + m2 + 3, hi1[1]);
 		}
 	}
 }
@@ -1422,11 +1409,11 @@ fn nttStockhamVecU4Body(
 // (i, i+1, i+2, i+3) per group with i stepping by 4 — so we vectorize
 // across pairs of groups within an L-block, falling back to scalar when
 // only 1 group fits.
-pub fn nttRadix4Vec(a: []u64, twiddles: []const u64) void {
-	const n = a.len;
+pub fn nttRadix4Vec(a: []u8, twiddles: []const u8) void {
+	const n = (a.len / residue.slot_bytes);
 	if (n <= 1) return;
 	std.debug.assert(n & (n - 1) == 0);
-	std.debug.assert(twiddles.len >= n / 2);
+	std.debug.assert((twiddles.len / residue.slot_bytes) >= n / 2);
 
 	bitReversePermute(a);
 
@@ -1438,10 +1425,10 @@ pub fn nttRadix4Vec(a: []u64, twiddles: []const u64) void {
 	if (log2_n & 1 == 1) {
 		var i: usize = 0;
 		while (i < n) : (i += 2) {
-			const u = a[i];
-			const t = a[i + 1]; // twiddle = 1
-			a[i] = addModP(u, t);
-			a[i + 1] = subModP(u, t);
+			const u = residue.read(a, i);
+			const t = residue.read(a, i + 1); // twiddle = 1
+			residue.write(a, i, addModP(u, t));
+			residue.write(a, i + 1, subModP(u, t));
 		}
 		cur_L = 2;
 	}
@@ -1462,13 +1449,13 @@ pub fn nttRadix4Vec(a: []u64, twiddles: []const u64) void {
 			// shifted by 1, so their loads/stores compress to vector pairs.
 			if (M == 1) {
 				// Only one group per L-block — no pair to vectorize.
-				const a_v = a[i];
-				const b_v = a[i + 1];
-				const c_v = a[i + 2];
-				const d_v = a[i + 3];
-				const w_k = twiddles[0];   // = 1
-				const w_2k = twiddles[0];  // = 1
-				const w_kM = twiddles[i_off]; // ω_4
+				const a_v = residue.read(a, i);
+				const b_v = residue.read(a, i + 1);
+				const c_v = residue.read(a, i + 2);
+				const d_v = residue.read(a, i + 3);
+				const w_k = residue.read(twiddles, 0); // = 1
+				const w_2k = residue.read(twiddles, 0); // = 1
+				const w_kM = residue.read(twiddles, i_off); // ω_4
 				// Stage 2M butterflies (twiddle = 1, so multiply skipped here
 				// by virtue of identity — but we keep the form for clarity).
 				const tb = mulModP(b_v, w_2k);
@@ -1484,10 +1471,10 @@ pub fn nttRadix4Vec(a: []u64, twiddles: []const u64) void {
 				const tD = mulModP(D, w_kM);
 				const out_b = addModP(B, tD);
 				const out_d = subModP(B, tD);
-				a[i] = out_a;
-				a[i + 1] = out_b;
-				a[i + 2] = out_c;
-				a[i + 3] = out_d;
+				residue.write(a, i, out_a);
+				residue.write(a, i + 1, out_b);
+				residue.write(a, i + 2, out_c);
+				residue.write(a, i + 3, out_d);
 			} else {
 				// M >= 2 (and a power of 2): vectorize two adjacent groups.
 				var k: usize = 0;
@@ -1495,23 +1482,23 @@ pub fn nttRadix4Vec(a: []u64, twiddles: []const u64) void {
 					// Twiddle pairs: w_k for (k, k+1); w_2k for (2k, 2k+2);
 					// w_kM for (k+M, k+1+M).
 					const w_k_pair: @Vector(2, u64) = .{
-						twiddles[k * stride],
-						twiddles[(k + 1) * stride],
+						residue.read(twiddles, k * stride),
+						residue.read(twiddles, (k + 1) * stride),
 					};
 					const w_2k_pair: @Vector(2, u64) = .{
-						twiddles[(2 * k) * stride],
-						twiddles[(2 * (k + 1)) * stride],
+						residue.read(twiddles, (2 * k) * stride),
+						residue.read(twiddles, (2 * (k + 1)) * stride),
 					};
 					const w_kM_pair: @Vector(2, u64) = .{
-						twiddles[k * stride + i_off],
-						twiddles[(k + 1) * stride + i_off],
+						residue.read(twiddles, k * stride + i_off),
+						residue.read(twiddles, (k + 1) * stride + i_off),
 					};
 
 					// Load 4-element group for k and k+1, packed into pairs.
-					const av: @Vector(2, u64) = .{ a[i + k], a[i + k + 1] };
-					const bv: @Vector(2, u64) = .{ a[i + k + M], a[i + k + 1 + M] };
-					const cv: @Vector(2, u64) = .{ a[i + k + 2 * M], a[i + k + 1 + 2 * M] };
-					const dv: @Vector(2, u64) = .{ a[i + k + 3 * M], a[i + k + 1 + 3 * M] };
+					const av: @Vector(2, u64) = .{ residue.read(a, i + k), residue.read(a, i + k + 1) };
+					const bv: @Vector(2, u64) = .{ residue.read(a, i + k + M), residue.read(a, i + k + 1 + M) };
+					const cv: @Vector(2, u64) = .{ residue.read(a, i + k + 2 * M), residue.read(a, i + k + 1 + 2 * M) };
+					const dv: @Vector(2, u64) = .{ residue.read(a, i + k + 3 * M), residue.read(a, i + k + 1 + 3 * M) };
 
 					// Stage 2M butterflies (twiddle w_2k for both (a,b) and (c,d)).
 					const tb = mulModP_x2(bv, w_2k_pair);
@@ -1530,14 +1517,14 @@ pub fn nttRadix4Vec(a: []u64, twiddles: []const u64) void {
 					const out_d = subModP_x2(B, tD);
 
 					// Store back into the same 4-element-per-group layout.
-					a[i + k] = out_a[0];
-					a[i + k + 1] = out_a[1];
-					a[i + k + M] = out_b[0];
-					a[i + k + 1 + M] = out_b[1];
-					a[i + k + 2 * M] = out_c[0];
-					a[i + k + 1 + 2 * M] = out_c[1];
-					a[i + k + 3 * M] = out_d[0];
-					a[i + k + 1 + 3 * M] = out_d[1];
+					residue.write(a, i + k, out_a[0]);
+					residue.write(a, i + k + 1, out_a[1]);
+					residue.write(a, i + k + M, out_b[0]);
+					residue.write(a, i + k + 1 + M, out_b[1]);
+					residue.write(a, i + k + 2 * M, out_c[0]);
+					residue.write(a, i + k + 1 + 2 * M, out_c[1]);
+					residue.write(a, i + k + 3 * M, out_d[0]);
+					residue.write(a, i + k + 1 + 3 * M, out_d[1]);
 				}
 			}
 		}
@@ -1625,8 +1612,8 @@ test "bitReversePermute: involution (applying twice = identity)" {
 		const orig = try testing.allocator.alloc(u64, n);
 		defer testing.allocator.free(orig);
 		@memcpy(orig, a);
-		bitReversePermute(a);
-		bitReversePermute(a);
+		try @import("fft_test_support.zig").permute(bitReversePermute, a);
+		try @import("fft_test_support.zig").permute(bitReversePermute, a);
 		try testing.expectEqualSlices(u64, orig, a);
 	}
 }
@@ -1634,7 +1621,7 @@ test "bitReversePermute: involution (applying twice = identity)" {
 test "bitReversePermute: known small case" {
 	// n=8: bit-reverse of {0,1,2,3,4,5,6,7} = {0,4,2,6,1,5,3,7}.
 	var a = [_]u64{ 0, 1, 2, 3, 4, 5, 6, 7 };
-	bitReversePermute(&a);
+	try @import("fft_test_support.zig").permute(bitReversePermute, &a);
 	try testing.expectEqualSlices(u64, &.{ 0, 4, 2, 6, 1, 5, 3, 7 }, &a);
 }
 
@@ -1649,8 +1636,8 @@ test "ntt round-trip: invNtt(ntt(a)) == a" {
 		const rand = prng.random();
 		for (a) |*x| x.* = rand.uintLessThan(u64, P);
 		@memcpy(orig, a);
-		ntt(a, false);
-		ntt(a, true);
+		try @import("fft_test_support.zig").roundTrip(ntt, a, false);
+		try @import("fft_test_support.zig").roundTrip(ntt, a, true);
 		try testing.expectEqualSlices(u64, orig, a);
 	}
 }
@@ -1691,15 +1678,15 @@ test "mulMagnitudesWithScratch: caller-supplied scratch matches schoolbook" {
 		const need_len = c.a.len + c.b.len;
 		var N: usize = 1;
 		while (N < need_len) N <<= 1;
-		const pa = try testing.allocator.alloc(u64, N);
+		const pa = try testing.allocator.alloc(u8, (N) * residue.slot_bytes);
 		defer testing.allocator.free(pa);
-		const pb = try testing.allocator.alloc(u64, N);
+		const pb = try testing.allocator.alloc(u8, (N) * residue.slot_bytes);
 		defer testing.allocator.free(pb);
-		const tw_fwd = try testing.allocator.alloc(u64, N / 2);
+		const tw_fwd = try testing.allocator.alloc(u8, (N / 2) * residue.slot_bytes);
 		defer testing.allocator.free(tw_fwd);
-		const tw_inv = try testing.allocator.alloc(u64, N / 2);
+		const tw_inv = try testing.allocator.alloc(u8, (N / 2) * residue.slot_bytes);
 		defer testing.allocator.free(tw_inv);
-		const stockham_scratch = try testing.allocator.alloc(u64, N);
+		const stockham_scratch = try testing.allocator.alloc(u8, (N) * residue.slot_bytes);
 		defer testing.allocator.free(stockham_scratch);
 
 		const ref_len = schoolbookMul(c.a, c.b, &ref_buf);
@@ -1798,11 +1785,11 @@ test "ntt convolution theorem: invNtt(ntt(a) * ntt(b)) = a ⊛ b (acyclic via ze
 	for (a_in, 0..) |v, i| a[i] = v;
 	for (b_in, 0..) |v, i| b[i] = v;
 
-	ntt(&a, false);
-	ntt(&b, false);
+	try @import("fft_test_support.zig").roundTrip(ntt, &a, false);
+	try @import("fft_test_support.zig").roundTrip(ntt, &b, false);
 	var c: [M]u64 = undefined;
 	for (0..M) |i| c[i] = mulModP(a[i], b[i]);
-	ntt(&c, true);
+	try @import("fft_test_support.zig").roundTrip(ntt, &c, true);
 
 	// Schoolbook reference.
 	var ref = [_]u64{0} ** M;
@@ -1920,9 +1907,9 @@ test "mulMagnitudesCRT: 100-iter random fuzz at sizes 4096..16384 bytes" {
 test "addModP_x2 / subModP_x2: edge cases (0, P-1, mid)" {
 	// Hand-picked corners that exercise wrap (sum>=P, a<b) on both lanes.
 	const corners = [_]struct { a0: u64, a1: u64, b0: u64, b1: u64 }{
-		.{ .a0 = 0, .a1 = P - 1, .b0 = 0, .b1 = 1 },     // lane1 wraps add
+		.{ .a0 = 0, .a1 = P - 1, .b0 = 0, .b1 = 1 }, // lane1 wraps add
 		.{ .a0 = P - 1, .a1 = 5, .b0 = P - 1, .b1 = 7 }, // lane0 wraps add
-		.{ .a0 = 0, .a1 = 0, .b0 = 1, .b1 = P - 1 },     // both wrap sub
+		.{ .a0 = 0, .a1 = 0, .b0 = 1, .b1 = P - 1 }, // both wrap sub
 		.{ .a0 = 5, .a1 = P / 2, .b0 = 7, .b1 = P / 2 }, // mixed
 	};
 	for (corners) |c| {
@@ -1994,8 +1981,8 @@ test "nttWithTwiddlesVec: matches nttWithTwiddles on random inputs across sizes"
 		var j: usize = 1;
 		while (j < tw.len) : (j += 1) tw[j] = mulModP(tw[j - 1], omega_n);
 
-		nttWithTwiddles(a_scalar, tw);
-		nttWithTwiddlesVec(a_vec, tw);
+		try @import("fft_test_support.zig").transform(nttWithTwiddles, a_scalar, tw);
+		try @import("fft_test_support.zig").transform(nttWithTwiddlesVec, a_vec, tw);
 
 		try testing.expectEqualSlices(u64, a_scalar, a_vec);
 	}
@@ -2029,8 +2016,8 @@ test "nttWithTwiddlesVec: round-trip with inverse equals identity" {
 			tw_inv[j] = mulModP(tw_inv[j - 1], omega_n_inv);
 		}
 
-		nttWithTwiddlesVec(a, tw_fwd);
-		nttWithTwiddlesVec(a, tw_inv);
+		try @import("fft_test_support.zig").transform(nttWithTwiddlesVec, a, tw_fwd);
+		try @import("fft_test_support.zig").transform(nttWithTwiddlesVec, a, tw_inv);
 		const n_inv = invModP(@intCast(n));
 		for (a) |*x| x.* = mulModP(x.*, n_inv);
 
@@ -2167,8 +2154,8 @@ test "nttWithTwiddlesMontVec: matches nttWithTwiddles after Mont conversion acro
 			tw_m[j] = toMont(tw[j]);
 		}
 
-		nttWithTwiddles(a_scalar, tw);
-		nttWithTwiddlesMontVec(a_vec, tw_m);
+		try @import("fft_test_support.zig").transform(nttWithTwiddles, a_scalar, tw);
+		try @import("fft_test_support.zig").transform(nttWithTwiddlesMontVec, a_vec, tw_m);
 
 		// Convert vec output back from Mont and compare lanewise.
 		for (a_vec, a_scalar) |xm, x_expected| {
@@ -2198,8 +2185,8 @@ test "nttStockhamVecU8: bit-exact match vs nttStockhamVec across sizes" {
 		if (tw.len > 0) tw[0] = 1;
 		var j: usize = 1;
 		while (j < tw.len) : (j += 1) tw[j] = mulModP(tw[j - 1], omega_n);
-		nttStockhamVec(a_ref, sc_ref, tw);
-		nttStockhamVecU8(a_u8, sc_u8, tw);
+		try @import("fft_test_support.zig").stockham(nttStockhamVec, a_ref, sc_ref, tw);
+		try @import("fft_test_support.zig").stockham(nttStockhamVecU8, a_u8, sc_u8, tw);
 		try testing.expectEqualSlices(u64, a_ref, a_u8);
 	}
 }
@@ -2227,8 +2214,8 @@ test "nttStockhamVecU4: bit-exact match vs nttStockhamVec across sizes" {
 		if (tw.len > 0) tw[0] = 1;
 		var j: usize = 1;
 		while (j < tw.len) : (j += 1) tw[j] = mulModP(tw[j - 1], omega_n);
-		nttStockhamVec(a_ref, sc_ref, tw);
-		nttStockhamVecU4(a_u4, sc_u4, tw);
+		try @import("fft_test_support.zig").stockham(nttStockhamVec, a_ref, sc_ref, tw);
+		try @import("fft_test_support.zig").stockham(nttStockhamVecU4, a_u4, sc_u4, tw);
 		try testing.expectEqualSlices(u64, a_ref, a_u4);
 	}
 }
@@ -2268,8 +2255,8 @@ test "nttStockhamMontVec: matches nttStockham after Mont conversion across sizes
 			tw_m[j] = toMont(tw[j]);
 		}
 
-		nttStockham(a_scalar, sc_scalar, tw);
-		nttStockhamMontVec(a_vec, sc_vec, tw_m);
+		try @import("fft_test_support.zig").stockham(nttStockham, a_scalar, sc_scalar, tw);
+		try @import("fft_test_support.zig").stockham(nttStockhamMontVec, a_vec, sc_vec, tw_m);
 
 		for (a_vec, a_scalar) |xm, x_expected| {
 			try testing.expectEqual(x_expected, fromMont(xm));
@@ -2304,8 +2291,8 @@ test "nttStockham: bit-exact match vs nttWithTwiddles across sizes" {
 		var j: usize = 1;
 		while (j < tw.len) : (j += 1) tw[j] = mulModP(tw[j - 1], omega_n);
 
-		nttWithTwiddles(a_ref, tw);
-		nttStockham(a_st, scratch, tw);
+		try @import("fft_test_support.zig").transform(nttWithTwiddles, a_ref, tw);
+		try @import("fft_test_support.zig").stockham(nttStockham, a_st, scratch, tw);
 
 		try testing.expectEqualSlices(u64, a_ref, a_st);
 	}
@@ -2333,8 +2320,8 @@ test "nttStockhamVec: bit-exact match vs nttWithTwiddlesVec across sizes" {
 		var j: usize = 1;
 		while (j < tw.len) : (j += 1) tw[j] = mulModP(tw[j - 1], omega_n);
 
-		nttWithTwiddlesVec(a_ref, tw);
-		nttStockhamVec(a_st, scratch, tw);
+		try @import("fft_test_support.zig").transform(nttWithTwiddlesVec, a_ref, tw);
+		try @import("fft_test_support.zig").stockham(nttStockhamVec, a_st, scratch, tw);
 
 		try testing.expectEqualSlices(u64, a_ref, a_st);
 	}
@@ -2373,15 +2360,15 @@ test "nttStockham[Vec]: round-trip with inverse equals identity" {
 		}
 
 		// Scalar Stockham round-trip.
-		nttStockham(a, scratch, tw_fwd);
-		nttStockham(a, scratch, tw_inv);
+		try @import("fft_test_support.zig").stockham(nttStockham, a, scratch, tw_fwd);
+		try @import("fft_test_support.zig").stockham(nttStockham, a, scratch, tw_inv);
 		const n_inv = invModP(@intCast(n));
 		for (a) |*x| x.* = mulModP(x.*, n_inv);
 		try testing.expectEqualSlices(u64, orig, a);
 
 		// Vec Stockham round-trip.
-		nttStockhamVec(a_v, scratch, tw_fwd);
-		nttStockhamVec(a_v, scratch, tw_inv);
+		try @import("fft_test_support.zig").stockham(nttStockhamVec, a_v, scratch, tw_fwd);
+		try @import("fft_test_support.zig").stockham(nttStockhamVec, a_v, scratch, tw_inv);
 		for (a_v) |*x| x.* = mulModP(x.*, n_inv);
 		try testing.expectEqualSlices(u64, orig, a_v);
 	}
@@ -2411,11 +2398,11 @@ test "nttStockham convolution theorem: invStockham(stockham(a) * stockham(b)) = 
 		tw_inv[j] = mulModP(tw_inv[j - 1], omega_inv);
 	}
 
-	nttStockham(&a, &scratch, &tw_fwd);
-	nttStockham(&b, &scratch, &tw_fwd);
+	try @import("fft_test_support.zig").stockham(nttStockham, &a, &scratch, &tw_fwd);
+	try @import("fft_test_support.zig").stockham(nttStockham, &b, &scratch, &tw_fwd);
 	var c: [M]u64 = undefined;
 	for (0..M) |i| c[i] = mulModP(a[i], b[i]);
-	nttStockham(&c, &scratch, &tw_inv);
+	try @import("fft_test_support.zig").stockham(nttStockham, &c, &scratch, &tw_inv);
 	const n_inv = invModP(@intCast(M));
 	for (&c) |*x| x.* = mulModP(x.*, n_inv);
 
@@ -2452,8 +2439,8 @@ test "nttRadix4Vec: bit-exact match vs nttWithTwiddlesVec across pure-radix-4 si
 		var j: usize = 1;
 		while (j < tw.len) : (j += 1) tw[j] = mulModP(tw[j - 1], omega_n);
 
-		nttWithTwiddlesVec(a_ref, tw);
-		nttRadix4Vec(a_r4, tw);
+		try @import("fft_test_support.zig").transform(nttWithTwiddlesVec, a_ref, tw);
+		try @import("fft_test_support.zig").transform(nttRadix4Vec, a_r4, tw);
 
 		try testing.expectEqualSlices(u64, a_ref, a_r4);
 	}
@@ -2480,8 +2467,8 @@ test "nttRadix4Vec: bit-exact match vs nttWithTwiddlesVec across mixed-radix siz
 		var j: usize = 1;
 		while (j < tw.len) : (j += 1) tw[j] = mulModP(tw[j - 1], omega_n);
 
-		nttWithTwiddlesVec(a_ref, tw);
-		nttRadix4Vec(a_r4, tw);
+		try @import("fft_test_support.zig").transform(nttWithTwiddlesVec, a_ref, tw);
+		try @import("fft_test_support.zig").transform(nttRadix4Vec, a_r4, tw);
 
 		try testing.expectEqualSlices(u64, a_ref, a_r4);
 	}
@@ -2514,8 +2501,8 @@ test "nttRadix4Vec: round-trip with inverse equals identity" {
 			tw_inv[j] = mulModP(tw_inv[j - 1], omega_n_inv);
 		}
 
-		nttRadix4Vec(a, tw_fwd);
-		nttRadix4Vec(a, tw_inv);
+		try @import("fft_test_support.zig").transform(nttRadix4Vec, a, tw_fwd);
+		try @import("fft_test_support.zig").transform(nttRadix4Vec, a, tw_inv);
 		const n_inv = invModP(@intCast(n));
 		for (a) |*x| x.* = mulModP(x.*, n_inv);
 
@@ -2545,11 +2532,11 @@ test "nttRadix4Vec convolution theorem: invR4(R4(a) * R4(b)) = a ⊛ b" {
 		tw_inv[j] = mulModP(tw_inv[j - 1], omega_inv);
 	}
 
-	nttRadix4Vec(&a, &tw_fwd);
-	nttRadix4Vec(&b, &tw_fwd);
+	try @import("fft_test_support.zig").transform(nttRadix4Vec, &a, &tw_fwd);
+	try @import("fft_test_support.zig").transform(nttRadix4Vec, &b, &tw_fwd);
 	var c: [M]u64 = undefined;
 	for (0..M) |i| c[i] = mulModP(a[i], b[i]);
-	nttRadix4Vec(&c, &tw_inv);
+	try @import("fft_test_support.zig").transform(nttRadix4Vec, &c, &tw_inv);
 	const n_inv = invModP(@intCast(M));
 	for (&c) |*x| x.* = mulModP(x.*, n_inv);
 
@@ -2709,8 +2696,8 @@ pub fn goldNthRootOfUnity(N: usize) u64 {
 // ── Goldilocks NTT (Cooley-Tukey radix-2, in-place, bit-reversed input) ────
 
 /// Bit-reverse permutation of a length-N array (N a power of 2).
-fn goldBitReverse(a: []u64) void {
-	const N = a.len;
+fn goldBitReverse(a: []u8) void {
+	const N = (a.len / residue.slot_bytes);
 	var j: usize = 0;
 	var i: usize = 1;
 	while (i < N) : (i += 1) {
@@ -2720,15 +2707,19 @@ fn goldBitReverse(a: []u64) void {
 			bit >>= 1;
 		}
 		j ^= bit;
-		if (i < j) std.mem.swap(u64, &a[i], &a[j]);
+		if (i < j) {
+			const swap_value = residue.read(a, i);
+			residue.write(a, i, residue.read(a, j));
+			residue.write(a, j, swap_value);
+		}
 	}
 }
 
 /// Forward NTT with caller-supplied precomputed twiddles. `twiddles[j]` =
 /// omega_N^j for j in 0..N/2. Output is bit-reversed-naturally-ordered.
-pub fn goldNttWithTwiddles(a: []u64, twiddles: []const u64) void {
+pub fn goldNttWithTwiddles(a: []u8, twiddles: []const u8) void {
 	goldBitReverse(a);
-	const N = a.len;
+	const N = (a.len / residue.slot_bytes);
 	var half: usize = 1;
 	while (half < N) : (half *= 2) {
 		const step = N / (half * 2);
@@ -2736,36 +2727,36 @@ pub fn goldNttWithTwiddles(a: []u64, twiddles: []const u64) void {
 		while (k < N) : (k += 2 * half) {
 			var j: usize = 0;
 			while (j < half) : (j += 1) {
-				const t = goldMulMod(a[k + j + half], twiddles[j * step]);
-				const u = a[k + j];
-				a[k + j] = goldAddMod(u, t);
-				a[k + j + half] = goldSubMod(u, t);
+				const t = goldMulMod(residue.read(a, k + j + half), residue.read(twiddles, j * step));
+				const u = residue.read(a, k + j);
+				residue.write(a, k + j, goldAddMod(u, t));
+				residue.write(a, k + j + half, goldSubMod(u, t));
 			}
 		}
 	}
 }
 
 /// Inverse NTT — same as forward with inverse twiddles, then scale by N^-1.
-pub fn goldInttWithTwiddles(a: []u64, twiddles_inv: []const u64) void {
+pub fn goldInttWithTwiddles(a: []u8, twiddles_inv: []const u8) void {
 	goldNttWithTwiddles(a, twiddles_inv);
-	const n_inv = goldInvMod(@intCast(a.len));
-	for (a) |*x| x.* = goldMulMod(x.*, n_inv);
+	const n_inv = goldInvMod(@intCast((a.len / residue.slot_bytes)));
+	for (0..(a.len / residue.slot_bytes)) |element| residue.write(a, element, goldMulMod(residue.read(a, element), n_inv));
 }
 
 /// Stockham auto-sort NTT for Goldilocks. Avoids the bit-reverse permutation
 /// by ping-ponging between `a` and `scratch` buffers. Same algorithm as the
 /// 30-bit-prime `nttStockham`, just using `goldMulMod` / `goldAddMod` /
 /// `goldSubMod`. After log2(n) passes, result is in `a`.
-pub fn goldNttStockham(a: []u64, scratch: []u64, twiddles: []const u64) void {
-	const n = a.len;
+pub fn goldNttStockham(a: []u8, scratch: []u8, twiddles: []const u8) void {
+	const n = (a.len / residue.slot_bytes);
 	if (n <= 1) return;
 	std.debug.assert(n & (n - 1) == 0);
-	std.debug.assert(scratch.len == n);
-	std.debug.assert(twiddles.len >= n / 2);
+	std.debug.assert((scratch.len / residue.slot_bytes) == n);
+	std.debug.assert((twiddles.len / residue.slot_bytes) >= n / 2);
 
 	const half_n = n >> 1;
-	var src: []u64 = a;
-	var dst: []u64 = scratch;
+	var src: []u8 = a;
+	var dst: []u8 = scratch;
 
 	var m: usize = 2;
 	while (m <= n) : (m <<= 1) {
@@ -2777,12 +2768,12 @@ pub fn goldNttStockham(a: []u64, scratch: []u64, twiddles: []const u64) void {
 			const src_base = q_idx * m2;
 			var j: usize = 0;
 			while (j < m2) : (j += 1) {
-				const w = twiddles[j * stride];
-				const x = src[src_base + j];
-				const y = src[src_base + j + half_n];
+				const w = residue.read(twiddles, j * stride);
+				const x = residue.read(src, src_base + j);
+				const y = residue.read(src, src_base + j + half_n);
 				const t = goldMulMod(y, w);
-				dst[q + j] = goldAddMod(x, t);
-				dst[q + j + m2] = goldSubMod(x, t);
+				residue.write(dst, q + j, goldAddMod(x, t));
+				residue.write(dst, q + j + m2, goldSubMod(x, t));
 			}
 		}
 		const tmp = src;
@@ -2820,11 +2811,11 @@ pub fn goldMulMagnitudesWithScratch(
 	a: []const u8,
 	b: []const u8,
 	out: []u8,
-	pa: []u64,
-	pb: []u64,
-	tw_fwd: []u64,
-	tw_inv: []u64,
-	stockham_scratch: []u64,
+	pa: []u8,
+	pb: []u8,
+	tw_fwd: []u8,
+	tw_inv: []u8,
+	stockham_scratch: []u8,
 ) usize {
 	if (a.len == 0 or b.len == 0) return 0;
 	const need_byte_len = a.len + b.len;
@@ -2835,28 +2826,28 @@ pub fn goldMulMagnitudesWithScratch(
 	const need_digit_len = (need_byte_len + 1) / 2;
 	var N: usize = 1;
 	while (N < need_digit_len) N <<= 1;
-	std.debug.assert(pa.len >= N);
-	std.debug.assert(pb.len >= N);
-	std.debug.assert(tw_fwd.len >= N / 2);
-	std.debug.assert(tw_inv.len >= N / 2);
+	std.debug.assert((pa.len / residue.slot_bytes) >= N);
+	std.debug.assert((pb.len / residue.slot_bytes) >= N);
+	std.debug.assert((tw_fwd.len / residue.slot_bytes) >= N / 2);
+	std.debug.assert((tw_inv.len / residue.slot_bytes) >= N / 2);
 
-	std.debug.assert(stockham_scratch.len >= N);
+	std.debug.assert((stockham_scratch.len / residue.slot_bytes) >= N);
 
-	const pa_n = pa[0..N];
-	const pb_n = pb[0..N];
-	const tw_fwd_n = tw_fwd[0 .. N / 2];
-	const tw_inv_n = tw_inv[0 .. N / 2];
-	const sc_n = stockham_scratch[0..N];
+	const pa_n = pa[(0) * residue.slot_bytes .. (N) * residue.slot_bytes];
+	const pb_n = pb[(0) * residue.slot_bytes .. (N) * residue.slot_bytes];
+	const tw_fwd_n = tw_fwd[(0) * residue.slot_bytes .. (N / 2) * residue.slot_bytes];
+	const tw_inv_n = tw_inv[(0) * residue.slot_bytes .. (N / 2) * residue.slot_bytes];
+	const sc_n = stockham_scratch[(0) * residue.slot_bytes .. (N) * residue.slot_bytes];
 
 	// Precompute twiddles.
 	const omega_n = goldNthRootOfUnity(N);
 	const omega_n_inv = goldInvMod(omega_n);
-	tw_fwd_n[0] = 1;
-	tw_inv_n[0] = 1;
+	residue.write(tw_fwd_n, 0, 1);
+	residue.write(tw_inv_n, 0, 1);
 	var j: usize = 1;
 	while (j < N / 2) : (j += 1) {
-		tw_fwd_n[j] = goldMulMod(tw_fwd_n[j - 1], omega_n);
-		tw_inv_n[j] = goldMulMod(tw_inv_n[j - 1], omega_n_inv);
+		residue.write(tw_fwd_n, j, goldMulMod(residue.read(tw_fwd_n, j - 1), omega_n));
+		residue.write(tw_inv_n, j, goldMulMod(residue.read(tw_inv_n, j - 1), omega_n_inv));
 	}
 
 	// Pack bytes into 16-bit digits (LE within each digit).
@@ -2867,7 +2858,7 @@ pub fn goldMulMagnitudesWithScratch(
 		while (i * 2 < a.len) : (i += 1) {
 			const lo: u64 = a[i * 2];
 			const hi: u64 = if (i * 2 + 1 < a.len) @as(u64, a[i * 2 + 1]) else 0;
-			pa_n[i] = lo | (hi << 8);
+			residue.write(pa_n, i, lo | (hi << 8));
 		}
 	}
 	{
@@ -2875,7 +2866,7 @@ pub fn goldMulMagnitudesWithScratch(
 		while (i * 2 < b.len) : (i += 1) {
 			const lo: u64 = b[i * 2];
 			const hi: u64 = if (i * 2 + 1 < b.len) @as(u64, b[i * 2 + 1]) else 0;
-			pb_n[i] = lo | (hi << 8);
+			residue.write(pb_n, i, lo | (hi << 8));
 		}
 	}
 
@@ -2883,17 +2874,17 @@ pub fn goldMulMagnitudesWithScratch(
 	// Stockham auto-sort eliminates the explicit bit-reverse permutation.
 	goldNttStockham(pa_n, sc_n, tw_fwd_n);
 	goldNttStockham(pb_n, sc_n, tw_fwd_n);
-	for (0..N) |i| pa_n[i] = goldMulMod(pa_n[i], pb_n[i]);
+	for (0..N) |i| residue.write(pa_n, i, goldMulMod(residue.read(pa_n, i), residue.read(pb_n, i)));
 	goldNttStockham(pa_n, sc_n, tw_inv_n);
 	const n_inv = goldInvMod(@intCast(N));
-	for (pa_n) |*x| x.* = goldMulMod(x.*, n_inv);
+	for (0..(pa_n.len / residue.slot_bytes)) |element| residue.write(pa_n, element, goldMulMod(residue.read(pa_n, element), n_inv));
 
 	// Carry propagation: each digit holds a value up to ~2^43; emit 16 bits
 	// per digit, carry the rest. Output bytes are LE.
 	var carry: u64 = 0;
 	var out_pos: usize = 0;
 	for (0..N) |i| {
-		const val = pa_n[i] +% carry; // u64 add (carry adds < 2^48, val fits)
+		const val = residue.read(pa_n, i) +% carry; // u64 add (carry adds < 2^48, val fits)
 		// Emit low 16 bits as 2 bytes (LE).
 		if (out_pos < out.len) out[out_pos] = @truncate(val & 0xFF);
 		if (out_pos + 1 < out.len) out[out_pos + 1] = @truncate((val >> 8) & 0xFF);
@@ -2955,15 +2946,15 @@ test "goldMulMagnitudes: cross-check vs schoolbook (small)" {
 		const need_digit_len = (a.len + b.len + 1) / 2;
 		var N: usize = 1;
 		while (N < need_digit_len) N <<= 1;
-		const pa = try allocator.alloc(u64, N);
+		const pa = try allocator.alloc(u8, (N) * residue.slot_bytes);
 		defer allocator.free(pa);
-		const pb = try allocator.alloc(u64, N);
+		const pb = try allocator.alloc(u8, (N) * residue.slot_bytes);
 		defer allocator.free(pb);
-		const tw_fwd = try allocator.alloc(u64, N / 2);
+		const tw_fwd = try allocator.alloc(u8, (N / 2) * residue.slot_bytes);
 		defer allocator.free(tw_fwd);
-		const tw_inv = try allocator.alloc(u64, N / 2);
+		const tw_inv = try allocator.alloc(u8, (N / 2) * residue.slot_bytes);
 		defer allocator.free(tw_inv);
-		const sc = try allocator.alloc(u64, N);
+		const sc = try allocator.alloc(u8, (N) * residue.slot_bytes);
 		defer allocator.free(sc);
 
 		const got = goldMulMagnitudesWithScratch(a, b, out, pa, pb, tw_fwd, tw_inv, sc);
