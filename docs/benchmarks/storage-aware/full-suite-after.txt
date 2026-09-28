@@ -1,0 +1,364 @@
+== building bench package ==
+bench binaries: /nix/store/q8q2qs7bvj51rl06zvb761j6b18cvp0n-blip_mp-bench-0.0.1/bin
+
+== stable bench: 3 runs each, per-bucket median + range ==
+
+run 1/3...
+run 2/3...
+run 3/3...
+
+## blip_mp (medians over 3 runs)
+impl=Mp.add bucket=L=0 (immediate, 0..127)                  median=        4.51  range=4.39..4.54  (±3%)
+impl=raw bucket=L=0 (immediate, 0..127)                     median=        2.47  range=2.46..2.51  (±2%)
+impl=Mp.add bucket=L=2 (128..32K)                           median=        4.68  range=4.68..4.69  (±0%)
+impl=raw bucket=L=2 (128..32K)                              median=        7.17  range=7.16..7.18  (±0%)
+impl=Mp.add bucket=L=3 (~16-bit..~24-bit)                   median=        4.71  range=4.69..4.74  (±1%)
+impl=raw bucket=L=3 (~16-bit..~24-bit)                      median=        8.03  range=8.03..8.06  (±0%)
+impl=Mp.add bucket=L=4 (~32-bit)                            median=        4.69  range=4.69..4.88  (±4%)
+impl=raw bucket=L=4 (~32-bit)                               median=        8.70  range=8.67..8.73  (±1%)
+impl=Mp.add bucket=128-bit                                  median=       13.86  range=13.81..13.91  (±1%)
+impl=Mp.add bucket=192-bit                                  median=       10.99  range=10.87..11.65  (±7%)
+impl=Mp.add bucket=256-bit                                  median=       11.29  range=11.24..11.40  (±1%)
+impl=Mp.add bucket=384-bit                                  median=       12.64  range=12.60..12.70  (±1%)
+impl=Mp.add bucket=512-bit                                  median=       13.69  range=13.62..13.78  (±1%)
+impl=Mp.add bucket=768-bit                                  median=       15.85  range=15.65..15.92  (±2%)
+impl=Mp.add bucket=1024-bit                                 median=       19.49  range=19.44..19.51  (±0%)
+impl=Mp.add bucket=1536-bit                                 median=       23.38  range=23.38..23.74  (±2%)
+impl=Mp.add bucket=1792-bit                                 median=       33.07  range=32.99..33.13  (±0%)
+impl=Mp.add bucket=1920-bit                                 median=       33.61  range=33.56..33.90  (±1%)
+impl=Mp.add bucket=2048-bit                                 median=       29.76  range=29.72..29.79  (±0%)
+impl=Mp.add bucket=2176-bit                                 median=       37.01  range=36.94..37.10  (±0%)
+impl=Mp.add bucket=2304-bit                                 median=       37.65  range=37.56..37.65  (±0%)
+impl=Mp.add bucket=2560-bit                                 median=       41.12  range=40.36..42.35  (±5%)
+impl=Mp.add bucket=2816-bit                                 median=       43.80  range=43.52..44.06  (±1%)
+impl=Mp.add bucket=3072-bit                                 median=       40.90  range=40.75..40.97  (±1%)
+impl=Mp.add bucket=4096-bit                                 median=       52.09  range=52.05..52.15  (±0%)
+impl=Mp.add bucket=6144-bit                                 median=       76.29  range=75.96..76.62  (±1%)
+impl=Mp.add bucket=8192-bit                                 median=       96.21  range=96.19..96.39  (±0%)
+impl=Mp.add bucket=16384-bit                                median=      180.06  range=179.98..180.25  (±0%)
+impl=Mp.add bucket=32768-bit                                median=      352.26  range=349.10..352.60  (±1%)
+impl=Mp.add bucket=49152-bit                                median=      522.98  range=522.81..523.58  (±0%)
+impl=Mp.add bucket=65536-bit                                median=      692.35  range=689.89..696.75  (±1%)
+impl=Mp.add bucket=98304-bit                                median=     1040.58  range=1035.98..1044.22  (±1%)
+impl=Mp.sub bucket=128-bit                                  median=       13.77  range=13.69..13.86  (±1%)
+impl=Mp.sub bucket=192-bit                                  median=       10.22  range=10.21..10.26  (±0%)
+impl=Mp.sub bucket=256-bit                                  median=       10.62  range=10.57..10.73  (±2%)
+impl=Mp.sub bucket=384-bit                                  median=       12.57  range=12.54..12.71  (±1%)
+impl=Mp.sub bucket=512-bit                                  median=       12.73  range=12.71..12.76  (±0%)
+impl=Mp.sub bucket=768-bit                                  median=       15.82  range=15.73..16.01  (±2%)
+impl=Mp.sub bucket=1024-bit                                 median=       17.78  range=17.66..17.82  (±1%)
+impl=Mp.sub bucket=1536-bit                                 median=       22.48  range=22.29..22.78  (±2%)
+impl=Mp.sub bucket=1792-bit                                 median=       32.21  range=32.07..32.31  (±1%)
+impl=Mp.sub bucket=1920-bit                                 median=       33.69  range=33.65..33.83  (±1%)
+impl=Mp.sub bucket=2048-bit                                 median=       28.48  range=28.40..28.50  (±0%)
+impl=Mp.sub bucket=2176-bit                                 median=       36.17  range=36.14..36.29  (±0%)
+impl=Mp.sub bucket=2304-bit                                 median=       37.01  range=36.99..37.22  (±1%)
+impl=Mp.sub bucket=2560-bit                                 median=       39.17  range=39.09..39.29  (±1%)
+impl=Mp.sub bucket=2816-bit                                 median=       43.21  range=43.06..43.28  (±1%)
+impl=Mp.sub bucket=3072-bit                                 median=       38.86  range=38.77..38.91  (±0%)
+impl=Mp.sub bucket=4096-bit                                 median=       52.49  range=52.42..52.57  (±0%)
+impl=Mp.sub bucket=6144-bit                                 median=       76.22  range=76.02..76.38  (±0%)
+impl=Mp.sub bucket=8192-bit                                 median=       96.79  range=96.56..99.48  (±3%)
+impl=Mp.sub bucket=16384-bit                                median=      182.59  range=181.71..182.73  (±1%)
+impl=Mp.sub bucket=32768-bit                                median=      356.51  range=356.31..357.35  (±0%)
+impl=Mp.sub bucket=49152-bit                                median=      531.82  range=531.56..534.11  (±0%)
+impl=Mp.sub bucket=65536-bit                                median=      708.92  range=706.51..710.50  (±1%)
+impl=Mp.sub bucket=98304-bit                                median=     1077.46  range=1072.00..1077.81  (±1%)
+impl=Mp.mul bucket=128-bit                                  median=       14.53  range=14.50..14.55  (±0%)
+impl=Mp.mul bucket=192-bit                                  median=       19.72  range=19.71..19.75  (±0%)
+impl=Mp.mul bucket=256-bit                                  median=       27.10  range=26.94..27.26  (±1%)
+impl=Mp.mul bucket=384-bit                                  median=       45.51  range=45.39..45.60  (±0%)
+impl=Mp.mul bucket=512-bit                                  median=       68.09  range=68.09..68.50  (±1%)
+impl=Mp.mul bucket=768-bit                                  median=      243.50  range=236.70..249.31  (±5%)
+impl=Mp.mul bucket=1024-bit                                 median=      372.16  range=370.90..372.21  (±0%)
+impl=Mp.mul bucket=1536-bit                                 median=      706.25  range=704.70..708.88  (±1%)
+impl=Mp.mul bucket=1792-bit                                 median=      912.88  range=912.29..919.39  (±1%)
+impl=Mp.mul bucket=1920-bit                                 median=     1031.91  range=1031.69..1037.90  (±1%)
+impl=Mp.mul bucket=2048-bit                                 median=     1157.25  range=1155.29..1162.69  (±1%)
+impl=Mp.mul bucket=2176-bit                                 median=     1286.31  range=1285.51..1295.02  (±1%)
+impl=Mp.mul bucket=2304-bit                                 median=     1425.44  range=1418.65..1428.92  (±1%)
+impl=Mp.mul bucket=2560-bit                                 median=     1723.98  range=1722.37..1730.41  (±0%)
+impl=Mp.mul bucket=2816-bit                                 median=     2051.59  range=2047.92..2060.32  (±1%)
+impl=Mp.mul bucket=3072-bit                                 median=     2654.89  range=2653.01..2660.04  (±0%)
+impl=Mp.mul bucket=4096-bit                                 median=     4210.26  range=4204.65..4227.55  (±1%)
+impl=Mp.mul bucket=6144-bit                                 median=     8527.61  range=8515.87..8557.94  (±0%)
+impl=Mp.mul bucket=8192-bit                                 median=    13409.50  range=13287.80..13438.50  (±1%)
+impl=Mp.mul bucket=16384-bit                                median=    53833.30  range=53608.80..54732.50  (±2%)
+impl=Mp.mul bucket=32768-bit                                median=   159109.00  range=158566.00..159283.00  (±0%)
+impl=Mp.mul bucket=49152-bit                                median=   290417.00  range=290218.00..290564.00  (±0%)
+impl=Mp.mul bucket=65536-bit                                median=   455803.00  range=454031.00..456165.00  (±0%)
+impl=Mp.mul bucket=98304-bit                                median=   834257.00  range=832829.00..836221.00  (±0%)
+impl=Mp.divMod bucket=256-bit                               median=      121.70  range=121.18..122.52  (±1%)
+impl=Mp.divMod bucket=512-bit                               median=      182.79  range=180.73..183.16  (±1%)
+impl=Mp.divMod bucket=1024-bit                              median=      345.22  range=344.49..345.49  (±0%)
+impl=Mp.divMod bucket=2048-bit                              median=      820.82  range=817.42..822.46  (±1%)
+impl=Mp.divMod bucket=4096-bit                              median=     2174.13  range=2172.03..2178.66  (±0%)
+impl=Mp.divMod bucket=8192-bit                              median=     7170.08  range=7144.32..7180.88  (±1%)
+impl=Mp.divMod bucket=16384-bit                             median=    26426.40  range=26402.20..26597.80  (±1%)
+impl=Mp.divMod bucket=32768-bit                             median=   101115.00  range=101016.00..101774.00  (±1%)
+impl=Mp.divMod bucket=65536-bit                             median=   397540.00  range=396737.00..397899.00  (±0%)
+impl=Mp.powm bucket=512-bit                                 median=   136173.00  range=135610.00..136368.00  (±1%)
+impl=Mp.powm bucket=1024-bit                                median=   816390.00  range=813923.00..817286.00  (±0%)
+impl=Mp.powm bucket=2048-bit                                median=  5466800.00  range=5456340.00..5478650.00  (±0%)
+impl=Mp.powm bucket=3072-bit                                median= 17086800.00  range=17022200.00..17148900.00  (±1%)
+impl=Mp.invMod bucket=128-bit                               median=     1559.87  range=1553.44..1559.94  (±0%)
+impl=Mp.invMod bucket=192-bit                               median=     3305.72  range=3300.22..3312.95  (±0%)
+impl=Mp.invMod bucket=256-bit                               median=     4324.79  range=4316.11..4343.80  (±1%)
+impl=Mp.invMod bucket=384-bit                               median=    11160.90  range=11133.80..11195.30  (±1%)
+impl=Mp.invMod bucket=512-bit                               median=    15581.60  range=15534.90..15610.50  (±0%)
+impl=Mp.invMod bucket=768-bit                               median=    24886.80  range=24734.90..24972.70  (±1%)
+impl=Mp.invMod bucket=1024-bit                              median=    35013.80  range=34798.10..35110.90  (±1%)
+impl=Mp.invMod bucket=1536-bit                              median=    45593.30  range=45177.20..45716.80  (±1%)
+impl=Mp.invMod bucket=2048-bit                              median=    62221.80  range=62009.30..62438.40  (±1%)
+
+## GMP-asm (medians over 3 runs)
+mpz_add bucket=L=0 (immediate, 0..127)                      median=        5.84  range=5.71..5.89  (±3%)
+mpz_add bucket=L=2 (128..32K)                               median=        5.71  range=5.66..5.72  (±1%)
+mpz_add bucket=L=3 (~16-bit..~24-bit)                       median=        5.70  range=5.67..5.72  (±1%)
+mpz_add bucket=L=4 (~32-bit)                                median=        5.71  range=5.67..5.74  (±1%)
+mpz_add bucket=128-bit                                      median=        6.44  range=6.41..6.46  (±1%)
+mpz_add bucket=192-bit                                      median=        6.66  range=6.64..6.69  (±1%)
+mpz_add bucket=256-bit                                      median=        6.93  range=6.87..6.93  (±1%)
+mpz_add bucket=384-bit                                      median=        7.67  range=7.66..7.74  (±1%)
+mpz_add bucket=512-bit                                      median=        7.70  range=7.69..7.78  (±1%)
+mpz_add bucket=768-bit                                      median=        8.99  range=8.92..9.04  (±1%)
+mpz_add bucket=1024-bit                                     median=       10.33  range=10.25..10.34  (±1%)
+mpz_add bucket=1536-bit                                     median=       12.32  range=12.26..12.39  (±1%)
+mpz_add bucket=2048-bit                                     median=       14.74  range=14.67..14.80  (±1%)
+mpz_add bucket=3072-bit                                     median=       19.15  range=19.01..19.20  (±1%)
+mpz_add bucket=4096-bit                                     median=       23.54  range=23.41..23.58  (±1%)
+mpz_add bucket=6144-bit                                     median=       32.25  range=32.08..32.38  (±1%)
+mpz_add bucket=8192-bit                                     median=       41.01  range=40.94..41.23  (±1%)
+mpz_add bucket=16384-bit                                    median=       76.86  range=76.38..77.15  (±1%)
+mpz_add bucket=32768-bit                                    median=      154.69  range=153.25..157.35  (±3%)
+mpz_sub bucket=128-bit                                      median=        7.81  range=7.81..7.85  (±1%)
+mpz_sub bucket=192-bit                                      median=        7.49  range=7.44..7.52  (±1%)
+mpz_sub bucket=256-bit                                      median=        8.71  range=8.68..8.78  (±1%)
+mpz_sub bucket=384-bit                                      median=        9.59  range=9.58..9.67  (±1%)
+mpz_sub bucket=512-bit                                      median=        8.62  range=8.59..8.68  (±1%)
+mpz_sub bucket=768-bit                                      median=       11.98  range=11.94..12.01  (±1%)
+mpz_sub bucket=1024-bit                                     median=       11.17  range=11.13..11.25  (±1%)
+mpz_sub bucket=1536-bit                                     median=       13.98  range=13.82..13.98  (±1%)
+mpz_sub bucket=2048-bit                                     median=       17.45  range=17.32..17.47  (±1%)
+mpz_sub bucket=3072-bit                                     median=       21.42  range=21.37..21.68  (±1%)
+mpz_sub bucket=4096-bit                                     median=       25.01  range=24.94..25.03  (±0%)
+mpz_sub bucket=6144-bit                                     median=       35.90  range=35.65..39.11  (±10%)
+mpz_sub bucket=8192-bit                                     median=       43.73  range=43.41..43.86  (±1%)
+mpz_sub bucket=16384-bit                                    median=       81.83  range=80.64..82.03  (±2%)
+mpz_sub bucket=32768-bit                                    median=      164.89  range=162.79..167.53  (±3%)
+mpz_mul bucket=128-bit                                      median=        7.03  range=6.96..7.04  (±1%)
+mpz_mul bucket=192-bit                                      median=       13.62  range=13.51..15.53  (±15%)
+mpz_mul bucket=256-bit                                      median=       16.27  range=16.24..16.52  (±2%)
+mpz_mul bucket=384-bit                                      median=       25.48  range=25.31..25.62  (±1%)
+mpz_mul bucket=512-bit                                      median=       36.83  range=36.71..36.95  (±1%)
+mpz_mul bucket=768-bit                                      median=       69.52  range=69.31..70.12  (±1%)
+mpz_mul bucket=1024-bit                                     median=      140.56  range=139.64..143.45  (±3%)
+mpz_mul bucket=1536-bit                                     median=      243.19  range=242.40..244.23  (±1%)
+mpz_mul bucket=2048-bit                                     median=      454.64  range=453.94..455.74  (±0%)
+mpz_mul bucket=3072-bit                                     median=      788.68  range=777.92..791.52  (±2%)
+mpz_mul bucket=4096-bit                                     median=     1443.21  range=1433.39..1444.59  (±1%)
+mpz_mul bucket=6144-bit                                     median=     2453.35  range=2447.73..2483.53  (±1%)
+mpz_mul bucket=8192-bit                                     median=     4009.43  range=4000.81..4033.57  (±1%)
+mpz_mul bucket=16384-bit                                    median=    11821.50  range=11784.50..11897.80  (±1%)
+mpz_mul bucket=32768-bit                                    median=    33777.80  range=33609.60..33943.50  (±1%)
+mpz_tdiv_qr bucket=256-bit                                  median=       33.30  range=33.10..33.42  (±1%)
+mpz_tdiv_qr bucket=512-bit                                  median=       90.85  range=89.96..90.99  (±1%)
+mpz_tdiv_qr bucket=1024-bit                                 median=      140.51  range=140.47..141.35  (±1%)
+mpz_tdiv_qr bucket=2048-bit                                 median=      305.56  range=304.00..306.38  (±1%)
+mpz_tdiv_qr bucket=4096-bit                                 median=      911.61  range=909.30..913.06  (±0%)
+mpz_tdiv_qr bucket=8192-bit                                 median=     2766.34  range=2760.44..2779.13  (±1%)
+mpz_tdiv_qr bucket=16384-bit                                median=     8548.90  range=8526.25..8602.31  (±1%)
+mpz_tdiv_qr bucket=32768-bit                                median=    25287.20  range=25229.00..25515.10  (±1%)
+mpz_tdiv_qr bucket=65536-bit                                median=    74832.40  range=74521.80..75538.40  (±1%)
+mpz_powm bucket=512-bit                                     median=    43696.30  range=43526.50..43999.80  (±1%)
+mpz_powm bucket=1024-bit                                    median=   291213.00  range=288943.00..291244.00  (±1%)
+mpz_powm bucket=2048-bit                                    median=  1980770.00  range=1971750.00..1990340.00  (±1%)
+mpz_powm bucket=3072-bit                                    median=  6069790.00  range=6042290.00..6073150.00  (±1%)
+mpz_invert bucket=128-bit                                   median=      804.70  range=799.12..817.99  (±2%)
+mpz_invert bucket=192-bit                                   median=     1252.15  range=1250.07..1252.76  (±0%)
+mpz_invert bucket=256-bit                                   median=     1675.51  range=1672.53..1676.41  (±0%)
+mpz_invert bucket=384-bit                                   median=     2509.65  range=2504.28..2512.03  (±0%)
+mpz_invert bucket=512-bit                                   median=     3379.29  range=3370.34..3379.62  (±0%)
+mpz_invert bucket=768-bit                                   median=     5120.19  range=5108.85..5124.49  (±0%)
+mpz_invert bucket=1024-bit                                  median=     6949.01  range=6940.83..6970.75  (±0%)
+mpz_invert bucket=1536-bit                                  median=    10988.80  range=10980.00..11003.70  (±0%)
+mpz_invert bucket=2048-bit                                  median=    14976.70  range=14972.00..15081.40  (±1%)
+
+## GMP-noasm (medians over 3 runs)
+mpz_add bucket=L=0 (immediate, 0..127)                      median=        6.25  range=6.21..6.38  (±3%)
+mpz_add bucket=L=2 (128..32K)                               median=        6.19  range=6.17..6.22  (±1%)
+mpz_add bucket=L=3 (~16-bit..~24-bit)                       median=        6.19  range=6.17..6.21  (±1%)
+mpz_add bucket=L=4 (~32-bit)                                median=        6.21  range=6.18..6.21  (±0%)
+mpz_add bucket=128-bit                                      median=        7.20  range=7.20..7.21  (±0%)
+mpz_add bucket=192-bit                                      median=        7.69  range=7.68..7.72  (±1%)
+mpz_add bucket=256-bit                                      median=        8.51  range=8.49..8.77  (±3%)
+mpz_add bucket=384-bit                                      median=       10.07  range=10.06..10.10  (±0%)
+mpz_add bucket=512-bit                                      median=       11.71  range=11.69..11.74  (±0%)
+mpz_add bucket=768-bit                                      median=       14.90  range=14.83..15.00  (±1%)
+mpz_add bucket=1024-bit                                     median=       18.36  range=18.34..18.37  (±0%)
+mpz_add bucket=1536-bit                                     median=       25.92  range=25.89..26.05  (±1%)
+mpz_add bucket=2048-bit                                     median=       33.74  range=33.65..33.95  (±1%)
+mpz_add bucket=3072-bit                                     median=       49.61  range=49.53..49.83  (±1%)
+mpz_add bucket=4096-bit                                     median=       65.49  range=65.22..65.69  (±1%)
+mpz_add bucket=6144-bit                                     median=      101.16  range=101.14..101.29  (±0%)
+mpz_add bucket=8192-bit                                     median=      133.37  range=132.64..134.99  (±2%)
+mpz_add bucket=16384-bit                                    median=      260.48  range=259.31..260.77  (±1%)
+mpz_add bucket=32768-bit                                    median=      516.28  range=513.80..516.94  (±1%)
+mpz_sub bucket=128-bit                                      median=        9.05  range=9.01..9.10  (±1%)
+mpz_sub bucket=192-bit                                      median=        9.23  range=9.21..9.26  (±1%)
+mpz_sub bucket=256-bit                                      median=       11.11  range=11.11..11.23  (±1%)
+mpz_sub bucket=384-bit                                      median=       12.79  range=12.72..12.87  (±1%)
+mpz_sub bucket=512-bit                                      median=       12.70  range=12.64..12.74  (±1%)
+mpz_sub bucket=768-bit                                      median=       18.53  range=18.47..18.54  (±0%)
+mpz_sub bucket=1024-bit                                     median=       19.73  range=19.47..19.74  (±1%)
+mpz_sub bucket=1536-bit                                     median=       27.83  range=27.64..27.87  (±1%)
+mpz_sub bucket=2048-bit                                     median=       37.76  range=37.68..37.84  (±0%)
+mpz_sub bucket=3072-bit                                     median=       52.77  range=52.54..52.84  (±1%)
+mpz_sub bucket=4096-bit                                     median=       67.18  range=67.07..69.50  (±4%)
+mpz_sub bucket=6144-bit                                     median=      104.68  range=104.56..104.95  (±0%)
+mpz_sub bucket=8192-bit                                     median=      135.87  range=135.24..136.08  (±1%)
+mpz_sub bucket=16384-bit                                    median=      264.21  range=263.14..264.84  (±1%)
+mpz_sub bucket=32768-bit                                    median=      522.64  range=521.62..524.20  (±0%)
+mpz_mul bucket=128-bit                                      median=       21.63  range=21.51..21.66  (±1%)
+mpz_mul bucket=192-bit                                      median=       33.14  range=32.93..33.16  (±1%)
+mpz_mul bucket=256-bit                                      median=       49.52  range=49.40..49.57  (±0%)
+mpz_mul bucket=384-bit                                      median=       95.39  range=95.18..96.09  (±1%)
+mpz_mul bucket=512-bit                                      median=      157.91  range=156.98..157.93  (±1%)
+mpz_mul bucket=768-bit                                      median=      339.47  range=336.30..340.33  (±1%)
+mpz_mul bucket=1024-bit                                     median=      584.04  range=579.78..587.72  (±1%)
+mpz_mul bucket=1536-bit                                     median=     1277.98  range=1268.55..1289.06  (±2%)
+mpz_mul bucket=2048-bit                                     median=     1855.29  range=1845.14..1857.44  (±1%)
+mpz_mul bucket=3072-bit                                     median=     3998.06  range=3960.36..4050.54  (±2%)
+mpz_mul bucket=4096-bit                                     median=     5760.90  range=5728.70..5780.01  (±1%)
+mpz_mul bucket=6144-bit                                     median=    12273.70  range=12239.00..12308.40  (±1%)
+mpz_mul bucket=8192-bit                                     median=    18007.60  range=18001.40..18051.20  (±0%)
+mpz_mul bucket=16384-bit                                    median=    53752.20  range=53614.90..53759.20  (±0%)
+mpz_mul bucket=32768-bit                                    median=   120373.00  range=120086.00..120699.00  (±1%)
+mpz_tdiv_qr bucket=256-bit                                  median=       60.75  range=59.92..61.17  (±2%)
+mpz_tdiv_qr bucket=512-bit                                  median=      121.97  range=121.72..122.03  (±0%)
+mpz_tdiv_qr bucket=1024-bit                                 median=      265.32  range=265.11..265.39  (±0%)
+mpz_tdiv_qr bucket=2048-bit                                 median=      747.74  range=743.95..748.36  (±1%)
+mpz_tdiv_qr bucket=4096-bit                                 median=     2492.80  range=2489.66..2510.34  (±1%)
+mpz_tdiv_qr bucket=8192-bit                                 median=     8897.00  range=8893.16..8907.30  (±0%)
+mpz_tdiv_qr bucket=16384-bit                                median=    29666.50  range=29642.00..29775.90  (±0%)
+mpz_tdiv_qr bucket=32768-bit                                median=    96058.10  range=95996.80..96142.80  (±0%)
+mpz_tdiv_qr bucket=65536-bit                                median=   301124.00  range=300995.00..301540.00  (±0%)
+mpz_powm bucket=512-bit                                     median=   167443.00  range=167094.00..167655.00  (±0%)
+mpz_powm bucket=1024-bit                                    median=  1175230.00  range=1173840.00..1179360.00  (±0%)
+mpz_powm bucket=2048-bit                                    median=  8513590.00  range=8505260.00..8551880.00  (±1%)
+mpz_powm bucket=3072-bit                                    median= 27983997.00  range=27914100.00..28020500.00  (±0%)
+mpz_invert bucket=128-bit                                   median=      984.95  range=982.53..991.38  (±1%)
+mpz_invert bucket=192-bit                                   median=     1527.47  range=1526.02..1538.17  (±1%)
+mpz_invert bucket=256-bit                                   median=     2053.44  range=2048.03..2063.09  (±1%)
+mpz_invert bucket=384-bit                                   median=     3188.99  range=3184.66..3200.47  (±0%)
+mpz_invert bucket=512-bit                                   median=     4399.91  range=4376.57..4407.62  (±1%)
+mpz_invert bucket=768-bit                                   median=     6962.83  range=6939.23..7010.54  (±1%)
+mpz_invert bucket=1024-bit                                  median=     9859.41  range=9855.28..9902.88  (±0%)
+mpz_invert bucket=1536-bit                                  median=    16912.90  range=16854.80..16947.70  (±1%)
+mpz_invert bucket=2048-bit                                  median=    24682.20  range=24637.90..24699.30  (±0%)
+
+## side-by-side (blip vs GMP-asm, by matching bucket)
+op + bucket                                           blip       GMP-asm     GMP-noasm  blip/gmp
+----------                                            ----       -------     ---------  --------
+add L=0                                               4.51          5.84          6.25     0.77x ✓
+add L=0                                               2.47          5.84          6.25     0.42x ✓
+add L=2                                               4.68          5.71          6.19     0.82x ✓
+add L=2                                               7.17          5.71          6.19     1.26x
+add L=3                                               4.71          5.70          6.19     0.83x ✓
+add L=3                                               8.03          5.70          6.19     1.41x
+add L=4                                               4.69          5.71          6.21     0.82x ✓
+add L=4                                               8.70          5.71          6.21     1.52x ✗
+add 128-bit                                          13.86          6.44          7.20     2.15x ✗
+add 192-bit                                          10.99          6.66          7.69     1.65x ✗
+add 256-bit                                          11.29          6.93          8.51     1.63x ✗
+add 384-bit                                          12.64          7.67         10.07     1.65x ✗
+add 512-bit                                          13.69          7.70         11.71     1.78x ✗
+add 768-bit                                          15.85          8.99         14.90     1.76x ✗
+add 1024-bit                                         19.49         10.33         18.36     1.89x ✗
+add 1536-bit                                         23.38         12.32         25.92     1.90x ✗
+add 1792-bit                                         33.07          0.00          0.00     0.00x
+add 1920-bit                                         33.61          0.00          0.00     0.00x
+add 2048-bit                                         29.76         14.74         33.74     2.02x ✗
+add 2176-bit                                         37.01          0.00          0.00     0.00x
+add 2304-bit                                         37.65          0.00          0.00     0.00x
+add 2560-bit                                         41.12          0.00          0.00     0.00x
+add 2816-bit                                         43.80          0.00          0.00     0.00x
+add 3072-bit                                         40.90         19.15         49.61     2.14x ✗
+add 4096-bit                                         52.09         23.54         65.49     2.21x ✗
+add 6144-bit                                         76.29         32.25        101.16     2.37x ✗
+add 8192-bit                                         96.21         41.01        133.37     2.35x ✗
+add 16384-bit                                       180.06         76.86        260.48     2.34x ✗
+add 32768-bit                                       352.26        154.69        516.28     2.28x ✗
+add 49152-bit                                       522.98          0.00          0.00     0.00x
+add 65536-bit                                       692.35          0.00          0.00     0.00x
+add 98304-bit                                      1040.58          0.00          0.00     0.00x
+sub 128-bit                                          13.77          7.81          9.05     1.76x ✗
+sub 192-bit                                          10.22          7.49          9.23     1.36x
+sub 256-bit                                          10.62          8.71         11.11     1.22x
+sub 384-bit                                          12.57          9.59         12.79     1.31x
+sub 512-bit                                          12.73          8.62         12.70     1.48x
+sub 768-bit                                          15.82         11.98         18.53     1.32x
+sub 1024-bit                                         17.78         11.17         19.73     1.59x ✗
+sub 1536-bit                                         22.48         13.98         27.83     1.61x ✗
+sub 1792-bit                                         32.21          0.00          0.00     0.00x
+sub 1920-bit                                         33.69          0.00          0.00     0.00x
+sub 2048-bit                                         28.48         17.45         37.76     1.63x ✗
+sub 2176-bit                                         36.17          0.00          0.00     0.00x
+sub 2304-bit                                         37.01          0.00          0.00     0.00x
+sub 2560-bit                                         39.17          0.00          0.00     0.00x
+sub 2816-bit                                         43.21          0.00          0.00     0.00x
+sub 3072-bit                                         38.86         21.42         52.77     1.81x ✗
+sub 4096-bit                                         52.49         25.01         67.18     2.10x ✗
+sub 6144-bit                                         76.22         35.90        104.68     2.12x ✗
+sub 8192-bit                                         96.79         43.73        135.87     2.21x ✗
+sub 16384-bit                                       182.59         81.83        264.21     2.23x ✗
+sub 32768-bit                                       356.51        164.89        522.64     2.16x ✗
+sub 49152-bit                                       531.82          0.00          0.00     0.00x
+sub 65536-bit                                       708.92          0.00          0.00     0.00x
+sub 98304-bit                                      1077.46          0.00          0.00     0.00x
+mul 128-bit                                          14.53          7.03         21.63     2.07x ✗
+mul 192-bit                                          19.72         13.62         33.14     1.45x
+mul 256-bit                                          27.10         16.27         49.52     1.67x ✗
+mul 384-bit                                          45.51         25.48         95.39     1.79x ✗
+mul 512-bit                                          68.09         36.83        157.91     1.85x ✗
+mul 768-bit                                         243.50         69.52        339.47     3.50x ✗
+mul 1024-bit                                        372.16        140.56        584.04     2.65x ✗
+mul 1536-bit                                        706.25        243.19       1277.98     2.90x ✗
+mul 1792-bit                                        912.88          0.00          0.00     0.00x
+mul 1920-bit                                       1031.91          0.00          0.00     0.00x
+mul 2048-bit                                       1157.25        454.64       1855.29     2.55x ✗
+mul 2176-bit                                       1286.31          0.00          0.00     0.00x
+mul 2304-bit                                       1425.44          0.00          0.00     0.00x
+mul 2560-bit                                       1723.98          0.00          0.00     0.00x
+mul 2816-bit                                       2051.59          0.00          0.00     0.00x
+mul 3072-bit                                       2654.89        788.68       3998.06     3.37x ✗
+mul 4096-bit                                       4210.26       1443.21       5760.90     2.92x ✗
+mul 6144-bit                                       8527.61       2453.35      12273.70     3.48x ✗
+mul 8192-bit                                      13409.50       4009.43      18007.60     3.34x ✗
+mul 16384-bit                                     53833.30      11821.50      53752.20     4.55x ✗
+mul 32768-bit                                    159109.00      33777.80     120373.00     4.71x ✗
+mul 49152-bit                                    290417.00          0.00          0.00     0.00x
+mul 65536-bit                                    455803.00          0.00          0.00     0.00x
+mul 98304-bit                                    834257.00          0.00          0.00     0.00x
+divmod 256-bit                                      121.70         33.30         60.75     3.65x ✗
+divmod 512-bit                                      182.79         90.85        121.97     2.01x ✗
+divmod 1024-bit                                     345.22        140.51        265.32     2.46x ✗
+divmod 2048-bit                                     820.82        305.56        747.74     2.69x ✗
+divmod 4096-bit                                    2174.13        911.61       2492.80     2.38x ✗
+divmod 8192-bit                                    7170.08       2766.34       8897.00     2.59x ✗
+divmod 16384-bit                                  26426.40       8548.90      29666.50     3.09x ✗
+divmod 32768-bit                                 101115.00      25287.20      96058.10     4.00x ✗
+divmod 65536-bit                                 397540.00      74832.40     301124.00     5.31x ✗
+powm 512-bit                                     136173.00      43696.30     167443.00     3.12x ✗
+powm 1024-bit                                    816390.00     291213.00    1175230.00     2.80x ✗
+powm 2048-bit                                   5466800.00    1980770.00    8513590.00     2.76x ✗
+powm 3072-bit                                  17086800.00    6069790.00   27983997.00     2.82x ✗
+invmod 128-bit                                     1559.87        804.70        984.95     1.94x ✗
+invmod 192-bit                                     3305.72       1252.15       1527.47     2.64x ✗
+invmod 256-bit                                     4324.79       1675.51       2053.44     2.58x ✗
+invmod 384-bit                                    11160.90       2509.65       3188.99     4.45x ✗
+invmod 512-bit                                    15581.60       3379.29       4399.91     4.61x ✗
+invmod 768-bit                                    24886.80       5120.19       6962.83     4.86x ✗
+invmod 1024-bit                                   35013.80       6949.01       9859.41     5.04x ✗
+invmod 1536-bit                                   45593.30      10988.80      16912.90     4.15x ✗
+invmod 2048-bit                                   62221.80      14976.70      24682.20     4.15x ✗

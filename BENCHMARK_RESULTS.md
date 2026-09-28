@@ -5,6 +5,11 @@
 Field-sized canonical slots, an existing-header fast path and fused arithmetic
 reduce forced small-prime products by 33.6–35.2% and Goldilocks by 5.3–7.6%.
 [Repeated CPU/wall measurements and limits](docs/benchmarks/storage-aware/README.md).
+After crossover tuning, recursive Toom-3 improves the 32,768-byte balanced
+kernel 6.4%; blocked asymmetric Mp products improve 19.0–66.5% at sampled
+eligible sizes. The more aggressive recursion candidate was rejected after
+a 98,304-bit regression in the broad benchmark.
+[Research measurements and correctness findings](docs/benchmarks/storage-aware/RESEARCH.md).
 The earlier tables below are retained as historical measurements.
 
 

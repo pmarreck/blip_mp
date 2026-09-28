@@ -50,7 +50,10 @@ Verification includes:
   tests and GMP's own representation are deliberately outside the core audit.
 - The GMP integration test forces single-prime, CRT and Goldilocks products on
   seeded random and all-255 inputs at 7, 257, 4,096, 16,385 and 100,000 bytes,
-  selecting backends only within their supported bounds.
+  selecting backends only within their supported bounds. The same products now
+  also force recursive Toom-3, including 100,000-byte operands.
+- Additional tests cover Toom interpolation workspace, sparse coefficients,
+  partial blocked products, signed public dispatch and output aliasing.
 - Division tests cover unaligned storage, partial final chunks and normalization
   shifts. Allocation-failure injection verifies FFT cache growth and cleanup.
 

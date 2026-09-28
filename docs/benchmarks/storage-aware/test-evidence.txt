@@ -1,0 +1,50 @@
+Field capacity: initial test failed expected 5, found 16; then passed.
+Zero initialization: absent clear API failed compilation; implemented test passed.
+
+Toom boundary test before scratch correction:
+1/1 tier3.test.Toom products across recursive boundaries preserve scratch canaries...thread 235137 panic: reached unreachable code
+/nix/store/5x5y75rc3l43ic0lwal6wzk7wi1ga3m1-zig-0.16.0/lib/zig/std/debug.zig:420:14: 0x107c81e in assert (test)
+    if (!ok) unreachable; // assertion failure
+             ^
+<project>/src/tier3.zig:3331:28: 0x107c377 in smAdd (test)
+		const len = subUnsignedLE(a, a_len, b, b_len, r_buf);
+                           ^
+<project>/src/tier3.zig:3563:21: 0x1028c97 in mulToom3 (test)
+	const c1_sm = smAdd(d_sign, work1, d_len, @intCast(-@as(i32, c3_sm.sign)), work2, c3_sm.len, ea1);
+                    ^
+/nix/store/5x5y75rc3l43ic0lwal6wzk7wi1ga3m1-zig-0.16.0/lib/zig/compiler/test_runner.zig:291:25: 0x1081541 in mainTerminal (test)
+        if (test_fn.func()) |_| {
+                        ^
+
+Toom boundary test after scratch correction:
+1/1 tier3.test.Toom products across recursive boundaries preserve scratch canaries...OK
+All 1 tests passed.
+
+Toom boundary test after recursion:
+1/1 tier3.test.Toom products across recursive boundaries preserve scratch canaries...OK
+All 1 tests passed.
+
+Blocked-product test before implementation:
+src/tier3.zig:6503:40: error: use of undeclared identifier 'blockedScratchNeed'
+  const work = try allocator.alloc(u8, blockedScratchNeed(@min(a.len, b.len)) + 2);
+                                       ^~~~~~~~~~~~~~~~~~
+
+Blocked-product test before significant-length correction:
+1/1 tier3.test.blocked unequal products match schoolbook and preserve output bounds...slices differ. first difference occurs at index 5462 (0x1556)
+
+============ expected this output: =============  len: 6145 (0x1801)
+
+Blocked-product test after correction:
+1/1 tier3.test.blocked unequal products match schoolbook and preserve output bounds...OK
+All 1 tests passed.
+
+Tuned recursion threshold, ReleaseSafe:
+error (ignored): SQLite database '<home>/.cache/nix/eval-cache-v6/01b8b3d60a20f14dada0a565d0b4f1f35bd886ebbad73dc05e9228a78c880c2d.sqlite' is busy
+1/1 tier3.test.Toom products across recursive boundaries preserve scratch canaries...OK
+All 1 tests passed.
+
+Final validation (retained recursive crossover):
+./test: all four groups passed; 13,087 GMP checks, zero failures.
+./build: passed (ReleaseFast Nix package).
+Initial candidate: full native ReleaseSafe suite passed.
+Retained crossover: ReleaseSafe Toom boundary/canary tests passed.

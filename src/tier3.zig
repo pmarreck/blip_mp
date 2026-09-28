@@ -92,7 +92,7 @@ fn TransformScratch(comptime slot_bytes: usize) type {
 			}
 			self.* = .{};
 		}
-};
+	};
 }
 
 inline fn allocatorEq(a: std.mem.Allocator, b: std.mem.Allocator) bool {
@@ -3350,10 +3350,17 @@ pub fn smAdd(
 pub const TOOM3_THRESHOLD: usize = 2048;
 
 /// Conservative scratch for `mulToom3` on n-byte equal-length operands.
-/// Each level needs ~12 buffers of size m+1 (where m ≈ n/3) plus
-/// karatsubaScratchNeed(m) for sub-products. Geometric series: ≤ 16n.
+/// Each level reserves 22*(ceil(n/3)+2) bytes plus recursive scratch.
+/// 22*slot + (16*slot+256) <= 16*n+256 for n >= TOOM3_THRESHOLD.
 pub fn toom3ScratchNeed(n: usize) usize {
 	return 16 * n + 256;
+}
+
+/// The recursive crossover differs from the top-level one: evaluation widths
+/// and padding change the cost. Measured on the September x86_64 host.
+const TOOM3_RECURSE_THRESHOLD: usize = 8192;
+fn mulToomSubproduct(a: []const u8, b: []const u8, r: []u8, scratch: []u8) void {
+	if (a.len >= TOOM3_RECURSE_THRESHOLD) mulToom3(a, b, r, scratch) else mulKaratsuba(a, b, r, scratch);
 }
 
 /// Toom-Cook 3-way multiply. a.len == b.len. Result fills r[0..2*n].
@@ -3427,9 +3434,9 @@ pub fn mulToom3(a: []const u8, b: []const u8, r: []u8, scratch: []u8) void {
 
 	// a_m1_eval = a0 + a2 - a1 (signed); b_m1_eval similar
 	const a02_len = addUnsignedLE(a0, a0_len, a2, a2_len, work1);
-	const am1_sm = smAdd(1, work1, a02_len, -1, a1, a1_len, eam1);
+	const am1_sm = smAdd(1, work1, a02_len, -1, a1, trimLen(a1), eam1);
 	const b02_len = addUnsignedLE(b0, a0_len, b2, a2_len, work1);
-	const bm1_sm = smAdd(1, work1, b02_len, -1, b1, a1_len, ebm1);
+	const bm1_sm = smAdd(1, work1, b02_len, -1, b1, trimLen(b1), ebm1);
 
 	// a2_eval = a0 + 2*a1 + 4*a2 (positive); b2_eval similar
 	@memcpy(ea2[0..a0_len], a0);
@@ -3451,25 +3458,23 @@ pub fn mulToom3(a: []const u8, b: []const u8, r: []u8, scratch: []u8) void {
 
 	// ── 5 sub-multiplications ──
 	// Pad all operand evaluations to a uniform `slot` byte length (zero-extend
-	// on the high end). This lets every sub-multiplication use Karatsuba
-	// uniformly — when lengths differ or aren't 8-byte multiples, mulMagnitudes
-	// falls back to per-byte schoolbook which is dramatically slower.
+	// on the high end). Balanced subproducts select recursive Toom-3 or
+	// Karatsuba at the measured recursive crossover.
 	@memset(v0_buf, 0);
 	{
 		// v0 = a0 * b0 (size m × m).
-		mulKaratsuba(a0[0..a0_len], b0[0..a0_len], v0_buf[0 .. 2 * a0_len], sub_scratch);
+		mulToomSubproduct(a0[0..a0_len], b0[0..a0_len], v0_buf[0 .. 2 * a0_len], sub_scratch);
 	}
 	const v0_len = trimLen(v0_buf[0 .. 2 * a0_len]);
 
 	@memset(vinf_buf, 0);
 	{
-		// v_inf = a2 * b2 (size a2_len × a2_len). Pad if a2_len < a0_len for chunking,
-		// but keep it simple: use mulKaratsuba directly (handles small sizes via fallback).
-		mulKaratsuba(a2, b2, vinf_buf[0 .. 2 * a2_len], sub_scratch);
+		// v_inf = a2 * b2; the high parts can be shorter than m.
+		mulToomSubproduct(a2, b2, vinf_buf[0 .. 2 * a2_len], sub_scratch);
 	}
 	const vinf_len = trimLen(vinf_buf[0 .. 2 * a2_len]);
 
-	// v1, v_m1, v2: pad operands to `slot` bytes uniformly so Karatsuba applies.
+	// v1, v_m1, v2: pad operands to `slot` bytes uniformly so recursive Toom-3 applies.
 	// (slot = m + 2, large enough for all eval results.)
 	if (a1_evln < slot) @memset(ea1[a1_evln..slot], 0);
 	if (b1_evln < slot) @memset(eb1[b1_evln..slot], 0);
@@ -3479,18 +3484,18 @@ pub fn mulToom3(a: []const u8, b: []const u8, r: []u8, scratch: []u8) void {
 	if (eb2_len < slot) @memset(eb2[eb2_len..slot], 0);
 
 	@memset(v1_buf, 0);
-	mulKaratsuba(ea1[0..slot], eb1[0..slot], v1_buf[0..psl], sub_scratch);
+	mulToomSubproduct(ea1[0..slot], eb1[0..slot], v1_buf[0..psl], sub_scratch);
 	const v1_len = trimLen(v1_buf[0..psl]);
 
 	@memset(vm1_buf, 0);
 	if (am1_sm.len > 0 and bm1_sm.len > 0) {
-		mulKaratsuba(eam1[0..slot], ebm1[0..slot], vm1_buf[0..psl], sub_scratch);
+		mulToomSubproduct(eam1[0..slot], ebm1[0..slot], vm1_buf[0..psl], sub_scratch);
 	}
 	const vm1_len = trimLen(vm1_buf[0..psl]);
 	const vm1_sign: i8 = @intCast(@as(i32, am1_sm.sign) * @as(i32, bm1_sm.sign));
 
 	@memset(v2_buf, 0);
-	mulKaratsuba(ea2[0..slot], eb2[0..slot], v2_buf[0..psl], sub_scratch);
+	mulToomSubproduct(ea2[0..slot], eb2[0..slot], v2_buf[0..psl], sub_scratch);
 	const v2_len = trimLen(v2_buf[0..psl]);
 
 	// ── Interpolation ──
@@ -3527,17 +3532,16 @@ pub fn mulToom3(a: []const u8, b: []const u8, r: []u8, scratch: []u8) void {
 		t_sm = .{ .sign = t1.sign, .len = t1.len };
 	}
 	// 4 * c2 → into a temp via mulSmallConst on the magnitude.
-	var four_c2_buf: [16384]u8 = undefined; // big enough for any practical c2; spill to vinf_buf if needed.
-	const four_c2_dst: []u8 = if (c2_sm.len + 1 <= four_c2_buf.len) four_c2_buf[0 .. c2_sm.len + 1] else blk: {
-		// Fall back to using vinf_buf as scratch (vinf_buf has psl bytes which is plenty).
-		break :blk vinf_buf[0 .. c2_sm.len + 1];
-	};
+	// Evaluations are dead after the five products. Reuse two full-width
+	// regions without overwriting v_inf, which composition still needs.
+	const c1_buf = scratch[0..psl];
+	const four_c2_dst = scratch[psl .. 2 * psl];
 	const four_c2_len = if (c2_sm.len > 0) mulSmallConst(work3, c2_sm.len, 4, four_c2_dst) else 0;
 	{
 		const t1 = smAdd(t_sm.sign, work2, t_sm.len, @intCast(-@as(i32, c2_sm.sign)), four_c2_dst, four_c2_len, work2);
 		t_sm = .{ .sign = t1.sign, .len = t1.len };
 	}
-	// 16 * v_inf — use mulSmallConst with c=16. Use four_c2_buf as scratch.
+	// 16 * v_inf, reusing the temporary after subtracting 4*c2.
 	const sixteen_vinf_dst = four_c2_dst;
 	const sixteen_vinf_len = mulSmallConst(vinf_buf, vinf_len, 16, sixteen_vinf_dst);
 	{
@@ -3560,8 +3564,8 @@ pub fn mulToom3(a: []const u8, b: []const u8, r: []u8, scratch: []u8) void {
 	const c3_sm = t_sm; // c3 in work2
 
 	// c1 = D - c3
-	const c1_sm = smAdd(d_sign, work1, d_len, @intCast(-@as(i32, c3_sm.sign)), work2, c3_sm.len, ea1);
-	// (c1 in ea1, reusing — we don't need ea1 anymore.)
+	const c1_sm = smAdd(d_sign, work1, d_len, @intCast(-@as(i32, c3_sm.sign)), work2, c3_sm.len, c1_buf);
+	// c1 owns two former evaluation slots.
 
 	// ── Compose result: c0 + c1*B + c2*B^2 + c3*B^3 + c4*B^4 ──
 	// r[0..2m] gets c0 (= v0). r[4m..4m+2*a2_len] gets c4 (= v_inf).
@@ -3581,9 +3585,9 @@ pub fn mulToom3(a: []const u8, b: []const u8, r: []u8, scratch: []u8) void {
 	// Add c1 at offset m.
 	if (c1_sm.len > 0) {
 		if (c1_sm.sign > 0) {
-			addUnsignedInPlace(r[m..], ea1[0..c1_sm.len]);
+			addUnsignedInPlace(r[m..], c1_buf[0..c1_sm.len]);
 		} else {
-			subUnsignedInPlace(r[m..], ea1[0..c1_sm.len]);
+			subUnsignedInPlace(r[m..], c1_buf[0..c1_sm.len]);
 		}
 	}
 	// Add c3 at offset 3m.
@@ -3593,6 +3597,43 @@ pub fn mulToom3(a: []const u8, b: []const u8, r: []u8, scratch: []u8) void {
 		} else {
 			subUnsignedInPlace(r[3 * m ..], work2[0..c3_sm.len]);
 		}
+	}
+}
+
+pub fn blockedEligible(a_len: usize, b_len: usize) bool {
+	const shorter = @min(a_len, b_len);
+	return shorter >= TOOM3_THRESHOLD and @max(a_len, b_len) / shorter >= 2;
+}
+
+/// Workspace depends on the shorter operand, including a padded final block.
+pub fn blockedScratchNeed(short_len: usize) usize {
+	return 3 * short_len + toom3ScratchNeed(short_len);
+}
+
+/// Multiply unequal magnitudes in balanced blocks; a and b may be reversed.
+/// Inputs, output and scratch must not overlap. Output needs a.len+b.len bytes.
+pub fn mulBlocked(a: []const u8, b: []const u8, out: []u8, scratch: []u8) void {
+	const longer = if (a.len >= b.len) a else b;
+	const shorter = if (a.len >= b.len) b else a;
+	const n = shorter.len;
+	std.debug.assert(out.len >= a.len + b.len);
+	@memset(out[0 .. a.len + b.len], 0);
+	if (n == 0) return;
+	std.debug.assert(scratch.len >= blockedScratchNeed(n));
+	const padded = scratch[0..n];
+	const product = scratch[n .. 3 * n];
+	const work = scratch[3 * n ..];
+	var offset: usize = 0;
+	while (offset < longer.len) : (offset += n) {
+		const count = @min(n, longer.len - offset);
+		const block = longer[offset..][0..count];
+		const balanced = if (count == n) block else blk: {
+			@memcpy(padded[0..count], block);
+			@memset(padded[count..], 0);
+			break :blk padded;
+		};
+		mulToom3(balanced, shorter, product, work);
+		addUnsignedInPlace(out[offset .. a.len + b.len], product[0 .. count + n]);
 	}
 }
 
@@ -3693,6 +3734,8 @@ pub fn mulRawBlip(
 			fft_scratch.tw_inv,
 			fft_scratch.stockham,
 		);
+	} else if (blockedEligible(a_pay.len, b_pay.len) and scratch_k.len >= blockedScratchNeed(@min(a_pay.len, b_pay.len))) {
+		mulBlocked(a_mag, b_mag, scratch_r[0..r_len], scratch_k);
 	} else if (a_pay.len == b_pay.len and a_pay.len >= TOOM3_THRESHOLD and scratch_k.len >= toom3ScratchNeed(a_pay.len)) {
 		@memset(scratch_r[0..r_len], 0);
 		mulToom3(a_mag, b_mag, scratch_r[0..r_len], scratch_k);
@@ -6451,4 +6494,86 @@ test "FFT scratch growth remains releasable after allocation failure" {
 		}
 	};
 	try std.testing.checkAllAllocationFailures(std.testing.allocator, Case.run, .{});
+}
+
+test "Toom products across recursive boundaries preserve scratch canaries" {
+	const allocator = std.testing.allocator;
+	for ([_]usize{ 2047, 2048, 2049, 6135, 6136, 6144, 18420, 18421, 24567, 24568, 24576, 32768 }) |n| {
+		const a = try allocator.alloc(u8, n);
+		defer allocator.free(a);
+		const b = try allocator.alloc(u8, n);
+		defer allocator.free(b);
+		const expected = try allocator.alloc(u8, 2 * n);
+		defer allocator.free(expected);
+		const actual = try allocator.alloc(u8, 2 * n + 2);
+		defer allocator.free(actual);
+		const scratch = try allocator.alloc(u8, toom3ScratchNeed(n) + 2);
+		defer allocator.free(scratch);
+		const reference_work = try allocator.alloc(u8, karatsubaScratchNeed(n));
+		defer allocator.free(reference_work);
+		var rng = std.Random.DefaultPrng.init(0x7357 + n);
+		for (0..4) |pattern| {
+			if (pattern == 0) {
+				rng.random().bytes(a);
+				rng.random().bytes(b);
+			} else {
+				@memset(a, 255);
+				@memset(b, 255);
+			}
+			if (pattern >= 2) {
+				@memset(a, 0);
+				if (pattern == 2) a[0] = 37;
+			}
+			@memset(actual, 0xa5);
+			@memset(scratch, 0xa5);
+			mulKaratsuba(a, b, expected, reference_work);
+			mulToom3(a, b, actual[1..][0 .. 2 * n], scratch[1 .. scratch.len - 1]);
+			try testing.expectEqualSlices(u8, expected, actual[1..][0 .. 2 * n]);
+			try testing.expectEqual(@as(u8, 0xa5), actual[0]);
+			try testing.expectEqual(@as(u8, 0xa5), actual[actual.len - 1]);
+			try testing.expectEqual(@as(u8, 0xa5), scratch[0]);
+			try testing.expectEqual(@as(u8, 0xa5), scratch[scratch.len - 1]);
+		}
+	}
+}
+
+test "blocked unequal products match schoolbook and preserve output bounds" {
+	const allocator = std.testing.allocator;
+	for ([_][2]usize{ .{ 0, 7 }, .{ 1, 0 }, .{ 257, 128 }, .{ 4097, 2048 }, .{ 16385, 4096 } }) |shape| {
+		const a = try allocator.alloc(u8, shape[0]);
+		defer allocator.free(a);
+		const b = try allocator.alloc(u8, shape[1]);
+		defer allocator.free(b);
+		const expected = try allocator.alloc(u8, a.len + b.len);
+		defer allocator.free(expected);
+		const actual = try allocator.alloc(u8, expected.len + 2);
+		defer allocator.free(actual);
+		const work = try allocator.alloc(u8, blockedScratchNeed(@min(a.len, b.len)) + 2);
+		defer allocator.free(work);
+		var rng = std.Random.DefaultPrng.init(0xa5a5 + a.len);
+		for (0..3) |pattern| {
+			if (pattern == 0) { rng.random().bytes(a); rng.random().bytes(b); }
+			if (pattern == 1) { @memset(a, 255); @memset(b, 255); }
+			if (pattern == 2) { @memset(a, 0); @memset(b, 255); }
+			mulMagnitudes(a, b, expected);
+			for (0..2) |reverse| {
+				@memset(actual, 0xa5);
+				@memset(work, 0xa5);
+				mulBlocked(if (reverse == 0) a else b, if (reverse == 0) b else a, actual[1..][0..expected.len], work[1 .. work.len - 1]);
+				try testing.expectEqualSlices(u8, expected, actual[1..][0..expected.len]);
+				try testing.expectEqual(@as(u8, 0xa5), actual[0]);
+				try testing.expectEqual(@as(u8, 0xa5), actual[actual.len - 1]);
+				try testing.expectEqual(@as(u8, 0xa5), work[0]);
+				try testing.expectEqual(@as(u8, 0xa5), work[work.len - 1]);
+			}
+		}
+	}
+}
+
+test "blocked dispatch classifies operand shape sets" {
+	const cases = [_][2]usize{ .{0, 9999}, .{9999, 0}, .{2047, 4094}, .{2048, 4095}, .{2048, 4096}, .{4096, 2048}, .{4096, 4096}, .{4096, 16385} };
+	const expected = [_]bool{ false, false, false, false, true, true, false, true };
+	var actual: [cases.len]bool = undefined;
+	for (cases, 0..) |shape, k| actual[k] = blockedEligible(shape[0], shape[1]);
+	try testing.expectEqualSlices(bool, &expected, &actual);
 }

@@ -1,0 +1,115 @@
+=== blip_mp add benchmark ===
+small_iters=5000000 large_iters=500000
+
+RESULT impl=Mp.add bucket=L=0 (immediate, 0..127) ns_per_op=4.42
+RESULT impl=raw bucket=L=0 (immediate, 0..127) ns_per_op=2.47
+RESULT impl=Mp.add bucket=L=2 (128..32K) ns_per_op=4.70
+RESULT impl=raw bucket=L=2 (128..32K) ns_per_op=7.21
+RESULT impl=Mp.add bucket=L=3 (~16-bit..~24-bit) ns_per_op=4.71
+RESULT impl=raw bucket=L=3 (~16-bit..~24-bit) ns_per_op=8.07
+RESULT impl=Mp.add bucket=L=4 (~32-bit) ns_per_op=4.70
+RESULT impl=raw bucket=L=4 (~32-bit) ns_per_op=8.72
+RESULT impl=Mp.add bucket=128-bit ns_per_op=13.88
+RESULT impl=Mp.add bucket=192-bit ns_per_op=10.89
+RESULT impl=Mp.add bucket=256-bit ns_per_op=11.31
+RESULT impl=Mp.add bucket=384-bit ns_per_op=12.72
+RESULT impl=Mp.add bucket=512-bit ns_per_op=13.69
+RESULT impl=Mp.add bucket=768-bit ns_per_op=15.86
+RESULT impl=Mp.add bucket=1024-bit ns_per_op=19.57
+RESULT impl=Mp.add bucket=1536-bit ns_per_op=23.56
+RESULT impl=Mp.add bucket=1792-bit ns_per_op=33.46
+RESULT impl=Mp.add bucket=1920-bit ns_per_op=33.83
+RESULT impl=Mp.add bucket=2048-bit ns_per_op=29.73
+RESULT impl=Mp.add bucket=2176-bit ns_per_op=37.31
+RESULT impl=Mp.add bucket=2304-bit ns_per_op=37.80
+RESULT impl=Mp.add bucket=2560-bit ns_per_op=40.60
+RESULT impl=Mp.add bucket=2816-bit ns_per_op=44.10
+RESULT impl=Mp.add bucket=3072-bit ns_per_op=40.89
+RESULT impl=Mp.add bucket=4096-bit ns_per_op=52.18
+RESULT impl=Mp.add bucket=6144-bit ns_per_op=76.37
+RESULT impl=Mp.add bucket=8192-bit ns_per_op=96.54
+RESULT impl=Mp.add bucket=16384-bit ns_per_op=180.68
+RESULT impl=Mp.add bucket=32768-bit ns_per_op=355.19
+RESULT impl=Mp.add bucket=49152-bit ns_per_op=525.29
+RESULT impl=Mp.add bucket=65536-bit ns_per_op=697.21
+RESULT impl=Mp.add bucket=98304-bit ns_per_op=1052.99
+
+--- subtraction ---
+RESULT impl=Mp.sub bucket=128-bit ns_per_op=13.84
+RESULT impl=Mp.sub bucket=192-bit ns_per_op=10.34
+RESULT impl=Mp.sub bucket=256-bit ns_per_op=10.73
+RESULT impl=Mp.sub bucket=384-bit ns_per_op=12.81
+RESULT impl=Mp.sub bucket=512-bit ns_per_op=12.80
+RESULT impl=Mp.sub bucket=768-bit ns_per_op=16.05
+RESULT impl=Mp.sub bucket=1024-bit ns_per_op=17.94
+RESULT impl=Mp.sub bucket=1536-bit ns_per_op=22.60
+RESULT impl=Mp.sub bucket=1792-bit ns_per_op=32.51
+RESULT impl=Mp.sub bucket=1920-bit ns_per_op=34.11
+RESULT impl=Mp.sub bucket=2048-bit ns_per_op=29.06
+RESULT impl=Mp.sub bucket=2176-bit ns_per_op=36.98
+RESULT impl=Mp.sub bucket=2304-bit ns_per_op=37.44
+RESULT impl=Mp.sub bucket=2560-bit ns_per_op=39.63
+RESULT impl=Mp.sub bucket=2816-bit ns_per_op=43.68
+RESULT impl=Mp.sub bucket=3072-bit ns_per_op=39.15
+RESULT impl=Mp.sub bucket=4096-bit ns_per_op=52.83
+RESULT impl=Mp.sub bucket=6144-bit ns_per_op=76.65
+RESULT impl=Mp.sub bucket=8192-bit ns_per_op=97.30
+RESULT impl=Mp.sub bucket=16384-bit ns_per_op=183.99
+RESULT impl=Mp.sub bucket=32768-bit ns_per_op=361.82
+RESULT impl=Mp.sub bucket=49152-bit ns_per_op=540.09
+RESULT impl=Mp.sub bucket=65536-bit ns_per_op=712.79
+RESULT impl=Mp.sub bucket=98304-bit ns_per_op=1079.92
+
+--- multiplication ---
+RESULT impl=Mp.mul bucket=128-bit ns_per_op=14.54
+RESULT impl=Mp.mul bucket=192-bit ns_per_op=19.81
+RESULT impl=Mp.mul bucket=256-bit ns_per_op=27.07
+RESULT impl=Mp.mul bucket=384-bit ns_per_op=45.59
+RESULT impl=Mp.mul bucket=512-bit ns_per_op=68.15
+RESULT impl=Mp.mul bucket=768-bit ns_per_op=241.53
+RESULT impl=Mp.mul bucket=1024-bit ns_per_op=370.68
+RESULT impl=Mp.mul bucket=1536-bit ns_per_op=704.44
+RESULT impl=Mp.mul bucket=1792-bit ns_per_op=918.24
+RESULT impl=Mp.mul bucket=1920-bit ns_per_op=1039.96
+RESULT impl=Mp.mul bucket=2048-bit ns_per_op=1157.14
+RESULT impl=Mp.mul bucket=2176-bit ns_per_op=1292.99
+RESULT impl=Mp.mul bucket=2304-bit ns_per_op=1433.02
+RESULT impl=Mp.mul bucket=2560-bit ns_per_op=1732.24
+RESULT impl=Mp.mul bucket=2816-bit ns_per_op=2066.74
+RESULT impl=Mp.mul bucket=3072-bit ns_per_op=2650.87
+RESULT impl=Mp.mul bucket=4096-bit ns_per_op=4204.96
+RESULT impl=Mp.mul bucket=6144-bit ns_per_op=8534.75
+RESULT impl=Mp.mul bucket=8192-bit ns_per_op=13411.76
+RESULT impl=Mp.mul bucket=16384-bit ns_per_op=53934.47
+RESULT impl=Mp.mul bucket=32768-bit ns_per_op=159980.84
+RESULT impl=Mp.mul bucket=49152-bit ns_per_op=296769.42
+RESULT impl=Mp.mul bucket=65536-bit ns_per_op=462684.22
+RESULT impl=Mp.mul bucket=98304-bit ns_per_op=833464.21
+
+--- division (Mp.divMod, N-bit / ~N/2-bit) ---
+RESULT impl=Mp.divMod bucket=256-bit ns_per_op=120.40
+RESULT impl=Mp.divMod bucket=512-bit ns_per_op=182.07
+RESULT impl=Mp.divMod bucket=1024-bit ns_per_op=342.88
+RESULT impl=Mp.divMod bucket=2048-bit ns_per_op=814.22
+RESULT impl=Mp.divMod bucket=4096-bit ns_per_op=2173.98
+RESULT impl=Mp.divMod bucket=8192-bit ns_per_op=7152.13
+RESULT impl=Mp.divMod bucket=16384-bit ns_per_op=26435.02
+RESULT impl=Mp.divMod bucket=32768-bit ns_per_op=100948.27
+RESULT impl=Mp.divMod bucket=65536-bit ns_per_op=395352.85
+
+--- modular exponentiation (Mp.powm, base^exp mod n at N-bit) ---
+RESULT impl=Mp.powm bucket=512-bit ns_per_op=135563.88
+RESULT impl=Mp.powm bucket=1024-bit ns_per_op=816770.06
+RESULT impl=Mp.powm bucket=2048-bit ns_per_op=5464271.45
+RESULT impl=Mp.powm bucket=3072-bit ns_per_op=17029898.36
+
+--- modular inverse (Mp.invMod, a^-1 mod m at N-bit) ---
+RESULT impl=Mp.invMod bucket=128-bit ns_per_op=1560.76
+RESULT impl=Mp.invMod bucket=192-bit ns_per_op=3308.88
+RESULT impl=Mp.invMod bucket=256-bit ns_per_op=4774.82
+RESULT impl=Mp.invMod bucket=384-bit ns_per_op=11271.81
+RESULT impl=Mp.invMod bucket=512-bit ns_per_op=15593.17
+RESULT impl=Mp.invMod bucket=768-bit ns_per_op=24911.46
+RESULT impl=Mp.invMod bucket=1024-bit ns_per_op=35022.85
+RESULT impl=Mp.invMod bucket=1536-bit ns_per_op=45492.84
+RESULT impl=Mp.invMod bucket=2048-bit ns_per_op=62541.69

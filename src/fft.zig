@@ -237,9 +237,9 @@ pub fn mulMagnitudes(allocator: std.mem.Allocator, a: []const u8, b: []const u8,
 
 /// E.1 + E.2 — caller-supplied scratch variant of `mulMagnitudes`. The
 /// caller owns five buffers covering all internal state:
-///   pa, pb            : N u64 each (digit buffers)
-///   tw_fwd, tw_inv    : N/2 u64 each (precomputed twiddle tables)
-///   stockham_scratch  : N u64 (Stockham auto-sort ping-pong buffer)
+///   pa, pb            : N BLIP slots each (digit buffers)
+///   tw_fwd, tw_inv    : N/2 BLIP slots each (precomputed twiddle tables)
+///   stockham_scratch  : N BLIP slots (workspace for alternate Stockham kernels)
 /// where N = next_pow2(a.len + b.len).
 ///
 /// Eliminates the 4-5 per-call alloc/free pairs that previously dominated

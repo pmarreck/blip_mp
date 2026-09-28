@@ -577,10 +577,17 @@ fn checkEncodedFft(allocator: std.mem.Allocator) !usize {
 			__gmpz_mul(&product, &ga, &gb);
 			var expected_len: usize = 0;
 			_ = __gmpz_export(expected.ptr, &expected_len, -1, 1, 0, 0, &product);
-			for (0..3) |backend| {
+			for (0..4) |backend| {
 				if ((backend == 0 and 2 * size > fft.MAX_FFT_COMBINED_LEN) or
 					(backend == 1 and 2 * size > fft.MAX_FFT_CRT_COMBINED_LEN)) continue;
-				const actual_len = if (backend == 0) try fft.mulMagnitudes(allocator, a, b, actual) else if (backend == 1) try fft.mulMagnitudesCRT(allocator, a, b, actual) else blk: {
+				const actual_len = if (backend == 0) try fft.mulMagnitudes(allocator, a, b, actual) else if (backend == 1) try fft.mulMagnitudesCRT(allocator, a, b, actual) else if (backend == 3) blk: {
+					const work = try allocator.alloc(u8, blip_mp.tier3.toom3ScratchNeed(size));
+					defer allocator.free(work);
+					blip_mp.tier3.mulToom3(a, b, actual, work);
+					var len = actual.len;
+					while (len > 0 and actual[len - 1] == 0) len -= 1;
+					break :blk len;
+				} else blk: {
 					var n: usize = 1;
 					while (n < size) n *= 2;
 					const bytes = n * fft.gold_residue.slot_bytes;
@@ -1046,7 +1053,24 @@ pub fn main() !u8 {
 
 	const fft_checks = try checkEncodedFft(allocator);
 	total_checks += fft_checks;
-	std.debug.print("  PASS forced BLIP FFT backends: {d} GMP comparisons\n", .{fft_checks});
+	std.debug.print("  PASS forced BLIP FFT and Toom backends: {d} GMP comparisons\n", .{fft_checks});
+
+	// Public signed and aliasing paths around the blocked-product thresholds.
+	for ([_][2]usize{ .{4094, 2047}, .{4096, 2048}, .{4097, 2048}, .{8192, 4096}, .{16385, 4096}, .{32768, 16384} }) |shape| {
+		for (0..4) |trial| {
+			try setBoth(&blip_a, &gmp_a, allocator, rng, shape[0] * 8);
+			try setBoth(&blip_b, &gmp_b, allocator, rng, shape[1] * 8);
+			__gmpz_mul(&gmp_r, &gmp_a, &gmp_b);
+			if (trial % 2 == 0) try blip_a.mul(&blip_a, &blip_b) else try blip_a.mul(&blip_b, &blip_a);
+			var got = try normalizeBlip(blip_a.bytes(), allocator);
+			defer got.deinit();
+			var expected = try normalizeGmp(&gmp_r, allocator);
+			defer expected.deinit();
+			if (got.sign != expected.sign or !std.mem.eql(u8, got.magnitude, expected.magnitude)) return error.BlockedProductMismatch;
+			total_checks += 1;
+		}
+	}
+	std.debug.print("  PASS asymmetric public/aliasing products: 24 GMP comparisons\n", .{});
 
 	std.debug.print("\n=== Summary ===\n", .{});
 	std.debug.print("Total checks: {d}\n", .{total_checks});

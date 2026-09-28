@@ -15,8 +15,8 @@ specification and the unresolved contract for contextual fixed-width types.
 
 | Area | Current implementation | Established avenue to investigate |
 |---|---|---|
-| Balanced multiplication | Chunked schoolbook, Karatsuba, Toom-3; Toom-3's five products call Karatsuba | Recursive Toom-3, then Toom-4/6.5/8.5 where measurements justify them |
-| Unbalanced multiplication | Several internal paths pad to equal length; public dispatch uses equal-length conditions for faster algorithms | Asymmetric Toom splits or blocked multiplication to avoid padding work |
+| Balanced multiplication | Chunked schoolbook, Karatsuba, Toom-3; Toom-3's five products now recurse above a separately measured 8192-byte threshold | Tune recursion, then Toom-4/6.5/8.5 where measurements justify them |
+| Unbalanced multiplication | Public products with shorter payload ≥2048 bytes and ratio ≥2:1 use balanced blocks; other unequal paths remain | Asymmetric Toom splits or blocked multiplication to avoid padding work |
 | Squaring | A symmetry-aware basecase exists; large products largely share multiplication machinery | Dedicated recursive squaring and independent crossover thresholds |
 | Division | Reciprocal-assisted Knuth D, byte-based Burnikel–Ziegler implementation | Block-wise Barrett with reciprocal reuse; benchmark before changing dispatch |
 | Modular exponentiation | Montgomery reduction and sliding windows, with a quadratic multiply/reduce kernel | Truncated products, faster large-modulus reduction and reusable modulus setup |
@@ -69,7 +69,11 @@ algorithm, published in 2021. That theorem alone supplies neither a crossover
 for this library nor a claim of practical speed at the sizes in its benchmarks.
 [Original paper](https://annals.math.princeton.edu/2021/193-2/p04).
 
-## Experiments worth running next
+## Experiments and follow-up
+
+[Recursive Toom and blocked multiplication](benchmarks/storage-aware/RESEARCH.md)
+now have repeated CPU/wall measurements and boundary tests. They also exposed
+and repaired scratch-lifetime and zero-padded evaluation errors.
 
 1. **Recursive Toom-3 and asymmetric products.** These address verified
    algorithm gaps without changing the representation. Compare full Mp.mul

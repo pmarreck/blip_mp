@@ -3656,9 +3656,11 @@ fn tier3MulOp(r: *Mp, a: *const Mp, b: *const Mp) ArithError!void {
 	var stack_b: [STACK_BYTES]u8 = undefined;
 	var stack_r: [STACK_BYTES * 2 + 1]u8 = undefined;
 	var stack_out: [STACK_BYTES * 2 + 16]u8 = undefined;
-	// Toom-3 / Karatsuba scratch — sized for the larger operand.
+	// Balanced scratch follows the larger operand; blocked scratch follows the shorter.
 	const max_pay = @max(a_pay_len, b_pay_len);
-	const k_need = if (a_pay_len == b_pay_len)
+	const k_need = if (tier3.blockedEligible(a.cached_pay_len, b.cached_pay_len))
+		tier3.blockedScratchNeed(@min(a.cached_pay_len, b.cached_pay_len))
+	else if (a_pay_len == b_pay_len)
 		(if (max_pay >= tier3.TOOM3_THRESHOLD) tier3.toom3ScratchNeed(max_pay) else tier3.karatsubaScratchNeed(max_pay))
 	else
 		0;

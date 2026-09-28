@@ -4,6 +4,10 @@ Follow-up: [storage-aware FFT measurements](docs/benchmarks/storage-aware/README
 reduce forced small-prime products by 33.6–35.2% and Goldilocks by 5.3–7.6%
 relative to the 16-byte BLIP implementation. The tables below preserve the
 earlier migration comparison; they are not timings of the follow-up revision.
+[Recursive and asymmetric product results](docs/benchmarks/storage-aware/RESEARCH.md)
+record the next experiments, including null results and correctness fixes.
+The final immediate-add samples vary from 4.41 to 7.31 ns; their median loses
+to GMP, leaving three winning buckets in that final comparison.
 
 Measured September 27, 2026 on an AMD Ryzen Threadripper 3990X (Zen 2,
 64 cores / 128 threads), Linux 6.18.43 x86_64, Zig 0.16.0 ReleaseFast,
