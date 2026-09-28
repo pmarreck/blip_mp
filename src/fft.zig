@@ -12,6 +12,7 @@
 const std = @import("std");
 pub const residue = @import("fft_residue.zig").Small;
 pub const gold_residue = @import("fft_residue.zig").Gold;
+pub const shifted_residue = @import("fft_residue.zig").Shifted(P);
 
 // ── Field parameters (single-prime variant) ──────────────────────────────────
 
@@ -98,13 +99,75 @@ pub inline fn invModP(x: u64) u64 {
 	return powMod(x, P - 2, P);
 }
 
+/// All modes store canonical BLIP integers. Shifted modes encode r+p;
+/// boundary mode subtracts p on reads, arithmetic mode keeps [p,2p) operands.
+pub const SmallResidueMode = enum { canonical, shifted_boundary, shifted_arithmetic };
+fn SmallField(comptime mode: SmallResidueMode) type {
+	return struct {
+		const shifted = shifted_residue;
+		const direct = mode == .shifted_arithmetic;
+		pub const slot_bytes = residue.slot_bytes;
+		pub const encoded = if (mode == .canonical) residue.encoded else shifted.encoded;
+		pub const clear = if (mode == .canonical) residue.clear else shifted.clear;
+		pub fn read(bytes: []const u8, index: usize) u64 {
+			if (mode == .canonical) return residue.read(bytes, index);
+			const value = shifted.read(bytes, index);
+			return if (direct) value else value - P;
+		}
+		pub fn write(bytes: []u8, index: usize, value: u64) void {
+			if (mode == .canonical) return residue.write(bytes, index, value);
+			shifted.write(bytes, index, if (direct) value else value + P);
+		}
+		pub fn fromReduced(value: u64) u64 {
+			std.debug.assert(value < P);
+			return if (direct) value + P else value;
+		}
+		pub fn toReduced(value: u64) u64 {
+			if (direct) std.debug.assert(value >= P and value < 2 * P);
+			return if (direct) value - P else value;
+		}
+		pub inline fn add(a: u64, b: u64) u64 {
+			if (!direct) return addModP(a, b);
+			const sum = a + b - P;
+			return if (sum >= 2 * P) sum - P else sum;
+		}
+		pub inline fn sub(a: u64, b: u64) u64 {
+			if (!direct) return subModP(a, b);
+			const diff = a + P - b;
+			return if (diff < P) diff + P else diff;
+		}
+		pub inline fn mul(a: u64, b: u64) u64 {
+			return (a * b) % P + if (direct) P else @as(u64, 0);
+		}
+		pub inline fn add2(a: @Vector(2, u64), b: @Vector(2, u64)) @Vector(2, u64) {
+			if (!direct) return addModP_x2(a, b);
+			const p: @Vector(2, u64) = @splat(P);
+			const sum = a + b - p;
+			return @select(u64, sum >= p + p, sum - p, sum);
+		}
+		pub inline fn sub2(a: @Vector(2, u64), b: @Vector(2, u64)) @Vector(2, u64) {
+			if (!direct) return subModP_x2(a, b);
+			const p: @Vector(2, u64) = @splat(P);
+			const diff = a + p - b;
+			return @select(u64, diff < p, diff + p, diff);
+		}
+		pub inline fn mul2(a: @Vector(2, u64), b: @Vector(2, u64)) @Vector(2, u64) {
+			return .{ mul(a[0], b[0]), mul(a[1], b[1]) };
+		}
+	};
+}
+
 // ── Bit-reversal permutation ────────────────────────────────────────────────
 
 /// In-place bit-reversal permutation. For each index i, swap a[i] with
 /// a[bitreverse(i, log2(n))]. Used by iterative Cooley-Tukey NTT to put
 /// inputs in the order the radix-2 butterfly expects.
 pub fn bitReversePermute(a: []u8) void {
-	const n = (a.len / residue.slot_bytes);
+	bitReversePermuteScoped(.canonical, a);
+}
+fn bitReversePermuteScoped(comptime mode: SmallResidueMode, a: []u8) void {
+	const codec = SmallField(mode);
+	const n = (a.len / codec.slot_bytes);
 	if (n <= 1) return;
 	std.debug.assert(n & (n - 1) == 0); // power of 2
 	var j: usize = 0;
@@ -118,9 +181,9 @@ pub fn bitReversePermute(a: []u8) void {
 		}
 		j ^= bit;
 		if (i < j) {
-			const swap_value = residue.read(a, i);
-			residue.write(a, i, residue.read(a, j));
-			residue.write(a, j, swap_value);
+			const swap_value = codec.read(a, i);
+			codec.write(a, i, codec.read(a, j));
+			codec.write(a, j, swap_value);
 		}
 	}
 }
@@ -249,6 +312,8 @@ pub fn mulMagnitudes(allocator: std.mem.Allocator, a: []const u8, b: []const u8,
 ///
 /// Uses fused radix-4 stages to reduce BLIP decode/encode round trips.
 /// The final inverse scaling feeds the carry loop directly in registers.
+/// Scratch values are canonical BLIP representatives in [P,2P), including
+/// zero stored as P. Inspect them with shifted_residue, not the reduced codec.
 /// Stockham scratch remains accepted for alternate kernels.
 pub fn mulMagnitudesWithScratch(
 	a: []const u8,
@@ -260,6 +325,22 @@ pub fn mulMagnitudesWithScratch(
 	tw_inv: []u8,
 	stockham_scratch: []u8,
 ) usize {
+	return mulMagnitudesScoped(.shifted_arithmetic, a, b, out, pa, pb, tw_fwd, tw_inv, stockham_scratch);
+}
+
+/// Compare canonical encodings and shifted representatives within one kernel.
+pub fn mulMagnitudesScoped(
+	comptime mode: SmallResidueMode,
+	a: []const u8,
+	b: []const u8,
+	out: []u8,
+	pa: []u8,
+	pb: []u8,
+	tw_fwd: []u8,
+	tw_inv: []u8,
+	stockham_scratch: []u8,
+) usize {
+	const codec = SmallField(mode);
 	if (a.len == 0 or b.len == 0) return 0;
 	const need_len = a.len + b.len;
 	std.debug.assert(out.len >= need_len);
@@ -267,47 +348,48 @@ pub fn mulMagnitudesWithScratch(
 
 	var N: usize = 1;
 	while (N < need_len) N <<= 1;
-	std.debug.assert((pa.len / residue.slot_bytes) >= N);
-	std.debug.assert((pb.len / residue.slot_bytes) >= N);
-	std.debug.assert((tw_fwd.len / residue.slot_bytes) >= N / 2);
-	std.debug.assert((tw_inv.len / residue.slot_bytes) >= N / 2);
-	std.debug.assert((stockham_scratch.len / residue.slot_bytes) >= N);
+	std.debug.assert((pa.len / codec.slot_bytes) >= N);
+	std.debug.assert((pb.len / codec.slot_bytes) >= N);
+	std.debug.assert((tw_fwd.len / codec.slot_bytes) >= N / 2);
+	std.debug.assert((tw_inv.len / codec.slot_bytes) >= N / 2);
+	std.debug.assert((stockham_scratch.len / codec.slot_bytes) >= N);
 
-	const pa_n = pa[(0) * residue.slot_bytes .. (N) * residue.slot_bytes];
-	const pb_n = pb[(0) * residue.slot_bytes .. (N) * residue.slot_bytes];
-	const tw_fwd_n = tw_fwd[(0) * residue.slot_bytes .. (N / 2) * residue.slot_bytes];
-	const tw_inv_n = tw_inv[(0) * residue.slot_bytes .. (N / 2) * residue.slot_bytes];
+	const pa_n = pa[(0) * codec.slot_bytes .. (N) * codec.slot_bytes];
+	const pb_n = pb[(0) * codec.slot_bytes .. (N) * codec.slot_bytes];
+	const tw_fwd_n = tw_fwd[(0) * codec.slot_bytes .. (N / 2) * codec.slot_bytes];
+	const tw_inv_n = tw_inv[(0) * codec.slot_bytes .. (N / 2) * codec.slot_bytes];
 
 	// Precompute twiddles once, reuse across 3 NTT calls (forward A,
 	// forward B, inverse). Cuts per-call mulModP count nearly in half.
-	const omega_n = nthRootOfUnity(N);
-	const omega_n_inv = invModP(omega_n);
-	residue.write(tw_fwd_n, 0, 1);
-	residue.write(tw_inv_n, 0, 1);
+	const root = nthRootOfUnity(N);
+	const omega_n = codec.fromReduced(root);
+	const omega_n_inv = codec.fromReduced(invModP(root));
+	codec.write(tw_fwd_n, 0, codec.fromReduced(1));
+	codec.write(tw_inv_n, 0, codec.fromReduced(1));
 	{
 		var j: usize = 1;
 		while (j < N / 2) : (j += 1) {
-			residue.write(tw_fwd_n, j, mulModP(residue.read(tw_fwd_n, j - 1), omega_n));
-			residue.write(tw_inv_n, j, mulModP(residue.read(tw_inv_n, j - 1), omega_n_inv));
+			codec.write(tw_fwd_n, j, codec.mul(codec.read(tw_fwd_n, j - 1), omega_n));
+			codec.write(tw_inv_n, j, codec.mul(codec.read(tw_inv_n, j - 1), omega_n_inv));
 		}
 	}
 
-	residue.clear(pa_n);
-	residue.clear(pb_n);
-	for (a, 0..) |byte, i| residue.write(pa_n, i, byte);
-	for (b, 0..) |byte, i| residue.write(pb_n, i, byte);
+	codec.clear(pa_n);
+	codec.clear(pb_n);
+	for (a, 0..) |byte, i| codec.write(pa_n, i, codec.fromReduced(byte));
+	for (b, 0..) |byte, i| codec.write(pb_n, i, codec.fromReduced(byte));
 
-	nttRadix4Vec(pa_n, tw_fwd_n);
-	nttRadix4Vec(pb_n, tw_fwd_n);
-	for (0..N) |i| residue.write(pa_n, i, mulModP(residue.read(pa_n, i), residue.read(pb_n, i)));
-	nttRadix4Vec(pa_n, tw_inv_n);
-	const n_inv = invModP(@intCast(N));
+	nttRadix4Scoped(mode, pa_n, tw_fwd_n);
+	nttRadix4Scoped(mode, pb_n, tw_fwd_n);
+	for (0..N) |i| codec.write(pa_n, i, codec.mul(codec.read(pa_n, i), codec.read(pb_n, i)));
+	nttRadix4Scoped(mode, pa_n, tw_inv_n);
+	const n_inv = codec.fromReduced(invModP(@intCast(N)));
 
 	// Carry propagation through the byte-output buffer.
 	var carry: u64 = 0;
 	var i: usize = 0;
 	while (i < need_len) : (i += 1) {
-		const val = mulModP(residue.read(pa_n, i), n_inv) + carry;
+		const val = codec.toReduced(codec.mul(codec.read(pa_n, i), n_inv)) + carry;
 		out[i] = @truncate(val & 0xFF);
 		carry = val >> 8;
 	}
@@ -1406,12 +1488,16 @@ fn nttStockhamVecU4Body(
 // across pairs of groups within an L-block, falling back to scalar when
 // only 1 group fits.
 pub fn nttRadix4Vec(a: []u8, twiddles: []const u8) void {
-	const n = (a.len / residue.slot_bytes);
+	nttRadix4Scoped(.canonical, a, twiddles);
+}
+fn nttRadix4Scoped(comptime mode: SmallResidueMode, a: []u8, twiddles: []const u8) void {
+	const codec = SmallField(mode);
+	const n = (a.len / codec.slot_bytes);
 	if (n <= 1) return;
 	std.debug.assert(n & (n - 1) == 0);
-	std.debug.assert((twiddles.len / residue.slot_bytes) >= n / 2);
+	std.debug.assert((twiddles.len / codec.slot_bytes) >= n / 2);
 
-	bitReversePermute(a);
+	bitReversePermuteScoped(mode, a);
 
 	const log2_n = std.math.log2_int(usize, n);
 	var cur_L: usize = 1;
@@ -1421,10 +1507,10 @@ pub fn nttRadix4Vec(a: []u8, twiddles: []const u8) void {
 	if (log2_n & 1 == 1) {
 		var i: usize = 0;
 		while (i < n) : (i += 2) {
-			const u = residue.read(a, i);
-			const t = residue.read(a, i + 1); // twiddle = 1
-			residue.write(a, i, addModP(u, t));
-			residue.write(a, i + 1, subModP(u, t));
+			const u = codec.read(a, i);
+			const t = codec.read(a, i + 1); // twiddle = 1
+			codec.write(a, i, codec.add(u, t));
+			codec.write(a, i + 1, codec.sub(u, t));
 		}
 		cur_L = 2;
 	}
@@ -1445,32 +1531,32 @@ pub fn nttRadix4Vec(a: []u8, twiddles: []const u8) void {
 			// shifted by 1, so their loads/stores compress to vector pairs.
 			if (M == 1) {
 				// Only one group per L-block — no pair to vectorize.
-				const a_v = residue.read(a, i);
-				const b_v = residue.read(a, i + 1);
-				const c_v = residue.read(a, i + 2);
-				const d_v = residue.read(a, i + 3);
-				const w_k = residue.read(twiddles, 0); // = 1
-				const w_2k = residue.read(twiddles, 0); // = 1
-				const w_kM = residue.read(twiddles, i_off); // ω_4
+				const a_v = codec.read(a, i);
+				const b_v = codec.read(a, i + 1);
+				const c_v = codec.read(a, i + 2);
+				const d_v = codec.read(a, i + 3);
+				const w_k = codec.read(twiddles, 0); // = 1
+				const w_2k = codec.read(twiddles, 0); // = 1
+				const w_kM = codec.read(twiddles, i_off); // ω_4
 				// Stage 2M butterflies (twiddle = 1, so multiply skipped here
 				// by virtue of identity — but we keep the form for clarity).
-				const tb = mulModP(b_v, w_2k);
-				const A = addModP(a_v, tb);
-				const B = subModP(a_v, tb);
-				const td0 = mulModP(d_v, w_2k);
-				const C = addModP(c_v, td0);
-				const D = subModP(c_v, td0);
+				const tb = codec.mul(b_v, w_2k);
+				const A = codec.add(a_v, tb);
+				const B = codec.sub(a_v, tb);
+				const td0 = codec.mul(d_v, w_2k);
+				const C = codec.add(c_v, td0);
+				const D = codec.sub(c_v, td0);
 				// Stage L butterflies.
-				const tC = mulModP(C, w_k);
-				const out_a = addModP(A, tC);
-				const out_c = subModP(A, tC);
-				const tD = mulModP(D, w_kM);
-				const out_b = addModP(B, tD);
-				const out_d = subModP(B, tD);
-				residue.write(a, i, out_a);
-				residue.write(a, i + 1, out_b);
-				residue.write(a, i + 2, out_c);
-				residue.write(a, i + 3, out_d);
+				const tC = codec.mul(C, w_k);
+				const out_a = codec.add(A, tC);
+				const out_c = codec.sub(A, tC);
+				const tD = codec.mul(D, w_kM);
+				const out_b = codec.add(B, tD);
+				const out_d = codec.sub(B, tD);
+				codec.write(a, i, out_a);
+				codec.write(a, i + 1, out_b);
+				codec.write(a, i + 2, out_c);
+				codec.write(a, i + 3, out_d);
 			} else {
 				// M >= 2 (and a power of 2): vectorize two adjacent groups.
 				var k: usize = 0;
@@ -1478,49 +1564,49 @@ pub fn nttRadix4Vec(a: []u8, twiddles: []const u8) void {
 					// Twiddle pairs: w_k for (k, k+1); w_2k for (2k, 2k+2);
 					// w_kM for (k+M, k+1+M).
 					const w_k_pair: @Vector(2, u64) = .{
-						residue.read(twiddles, k * stride),
-						residue.read(twiddles, (k + 1) * stride),
+						codec.read(twiddles, k * stride),
+						codec.read(twiddles, (k + 1) * stride),
 					};
 					const w_2k_pair: @Vector(2, u64) = .{
-						residue.read(twiddles, (2 * k) * stride),
-						residue.read(twiddles, (2 * (k + 1)) * stride),
+						codec.read(twiddles, (2 * k) * stride),
+						codec.read(twiddles, (2 * (k + 1)) * stride),
 					};
 					const w_kM_pair: @Vector(2, u64) = .{
-						residue.read(twiddles, k * stride + i_off),
-						residue.read(twiddles, (k + 1) * stride + i_off),
+						codec.read(twiddles, k * stride + i_off),
+						codec.read(twiddles, (k + 1) * stride + i_off),
 					};
 
 					// Load 4-element group for k and k+1, packed into pairs.
-					const av: @Vector(2, u64) = .{ residue.read(a, i + k), residue.read(a, i + k + 1) };
-					const bv: @Vector(2, u64) = .{ residue.read(a, i + k + M), residue.read(a, i + k + 1 + M) };
-					const cv: @Vector(2, u64) = .{ residue.read(a, i + k + 2 * M), residue.read(a, i + k + 1 + 2 * M) };
-					const dv: @Vector(2, u64) = .{ residue.read(a, i + k + 3 * M), residue.read(a, i + k + 1 + 3 * M) };
+					const av: @Vector(2, u64) = .{ codec.read(a, i + k), codec.read(a, i + k + 1) };
+					const bv: @Vector(2, u64) = .{ codec.read(a, i + k + M), codec.read(a, i + k + 1 + M) };
+					const cv: @Vector(2, u64) = .{ codec.read(a, i + k + 2 * M), codec.read(a, i + k + 1 + 2 * M) };
+					const dv: @Vector(2, u64) = .{ codec.read(a, i + k + 3 * M), codec.read(a, i + k + 1 + 3 * M) };
 
 					// Stage 2M butterflies (twiddle w_2k for both (a,b) and (c,d)).
-					const tb = mulModP_x2(bv, w_2k_pair);
-					const A = addModP_x2(av, tb);
-					const B = subModP_x2(av, tb);
-					const td0 = mulModP_x2(dv, w_2k_pair);
-					const C = addModP_x2(cv, td0);
-					const D = subModP_x2(cv, td0);
+					const tb = codec.mul2(bv, w_2k_pair);
+					const A = codec.add2(av, tb);
+					const B = codec.sub2(av, tb);
+					const td0 = codec.mul2(dv, w_2k_pair);
+					const C = codec.add2(cv, td0);
+					const D = codec.sub2(cv, td0);
 
 					// Stage L butterflies.
-					const tC = mulModP_x2(C, w_k_pair);
-					const out_a = addModP_x2(A, tC);
-					const out_c = subModP_x2(A, tC);
-					const tD = mulModP_x2(D, w_kM_pair);
-					const out_b = addModP_x2(B, tD);
-					const out_d = subModP_x2(B, tD);
+					const tC = codec.mul2(C, w_k_pair);
+					const out_a = codec.add2(A, tC);
+					const out_c = codec.sub2(A, tC);
+					const tD = codec.mul2(D, w_kM_pair);
+					const out_b = codec.add2(B, tD);
+					const out_d = codec.sub2(B, tD);
 
 					// Store back into the same 4-element-per-group layout.
-					residue.write(a, i + k, out_a[0]);
-					residue.write(a, i + k + 1, out_a[1]);
-					residue.write(a, i + k + M, out_b[0]);
-					residue.write(a, i + k + 1 + M, out_b[1]);
-					residue.write(a, i + k + 2 * M, out_c[0]);
-					residue.write(a, i + k + 1 + 2 * M, out_c[1]);
-					residue.write(a, i + k + 3 * M, out_d[0]);
-					residue.write(a, i + k + 1 + 3 * M, out_d[1]);
+					codec.write(a, i + k, out_a[0]);
+					codec.write(a, i + k + 1, out_a[1]);
+					codec.write(a, i + k + M, out_b[0]);
+					codec.write(a, i + k + 1 + M, out_b[1]);
+					codec.write(a, i + k + 2 * M, out_c[0]);
+					codec.write(a, i + k + 1 + 2 * M, out_c[1]);
+					codec.write(a, i + k + 3 * M, out_d[0]);
+					codec.write(a, i + k + 1 + 3 * M, out_d[1]);
 				}
 			}
 		}
@@ -2960,5 +3046,101 @@ test "goldMulMagnitudes: cross-check vs schoolbook (small)" {
 
 		try testing.expectEqual(ref_len, got);
 		try testing.expectEqualSlices(u8, ref[0..ref_len], out[0..got]);
+	}
+}
+
+test "scoped field scalar and SIMD arithmetic matches u128 modular oracle" {
+	const cases = [_]u64{ 0, 1, 2, 127, 128, P / 2, P / 2 + 1, P - 2, P - 1 };
+	inline for (.{ SmallResidueMode.shifted_boundary, SmallResidueMode.shifted_arithmetic }) |mode| {
+		const Scoped = SmallField(mode);
+		var rng = std.Random.DefaultPrng.init(0x5c0bed);
+		for (0..1000 + cases.len * cases.len) |i| {
+			const a = if (i < cases.len * cases.len) cases[i / cases.len] else rng.random().uintLessThan(u64, P);
+			const b = if (i < cases.len * cases.len) cases[i % cases.len] else rng.random().uintLessThan(u64, P);
+			const x = Scoped.fromReduced(a);
+			const y = Scoped.fromReduced(b);
+			try testing.expectEqual(@as(u64, @intCast((@as(u128, a) + b) % P)), Scoped.toReduced(Scoped.add(x, y)));
+			try testing.expectEqual(@as(u64, @intCast((@as(u128, a) + P - b) % P)), Scoped.toReduced(Scoped.sub(x, y)));
+			try testing.expectEqual(@as(u64, @intCast((@as(u128, a) * b) % P)), Scoped.toReduced(Scoped.mul(x, y)));
+			const vx: @Vector(2, u64) = .{ x, y };
+			const vy: @Vector(2, u64) = .{ y, x };
+			const sums = Scoped.add2(vx, vy);
+			const diffs = Scoped.sub2(vx, vy);
+			const products = Scoped.mul2(vx, vy);
+			try testing.expectEqual(Scoped.add(x, y), sums[0]);
+			try testing.expectEqual(Scoped.add(y, x), sums[1]);
+			try testing.expectEqual(Scoped.sub(x, y), diffs[0]);
+			try testing.expectEqual(Scoped.sub(y, x), diffs[1]);
+			try testing.expectEqual(Scoped.mul(x, y), products[0]);
+			try testing.expectEqual(Scoped.mul(y, x), products[1]);
+		}
+	}
+}
+
+test "scoped FFT products match schoolbook and keep canonical shifted scratch" {
+	const allocator = testing.allocator;
+	var rng = std.Random.DefaultPrng.init(0x5348494654);
+	const Mp = @import("bignum.zig").Mp;
+	var expected_integer = Mp.init(allocator);
+	defer expected_integer.deinit();
+	var zero = Mp.init(allocator);
+	defer zero.deinit();
+	try zero.setI64(0);
+	for ([_][2]usize{ .{ 1, 1 }, .{ 7, 3 }, .{ 128, 128 }, .{ 255, 257 }, .{ 4095, 4097 }, .{ 7000, 7000 } }) |shape| {
+		const a = try allocator.alloc(u8, shape[0]);
+		defer allocator.free(a);
+		const b = try allocator.alloc(u8, shape[1]);
+		defer allocator.free(b);
+		const expected = try allocator.alloc(u8, a.len + b.len);
+		defer allocator.free(expected);
+		const actual = try allocator.alloc(u8, expected.len + 2);
+		defer allocator.free(actual);
+		var n: usize = 1;
+		while (n < expected.len) n *= 2;
+		const size = n * residue.slot_bytes;
+		const work = try allocator.alloc(u8, 4 * size + 2);
+		defer allocator.free(work);
+		const pa = work[1..][0..size];
+		const pb = work[1 + size ..][0..size];
+		const fwd = work[1 + 2 * size ..][0 .. size / 2];
+		const inv = work[1 + 5 * size / 2 ..][0 .. size / 2];
+		const sc = work[1 + 3 * size ..][0..size];
+		for (0..4) |pattern| {
+			rng.random().bytes(a);
+			rng.random().bytes(b);
+			if (pattern == 1) { @memset(a, 255); @memset(b, 255); }
+			if (pattern == 2) @memset(a, 0);
+			if (pattern == 3) { @memset(a, 0); a[0] = 1; a[a.len - 1] = 128; }
+			@import("tier3.zig").mulMagnitudes(a, b, expected);
+			var expected_len = expected.len;
+			while (expected_len > 0 and expected[expected_len - 1] == 0) expected_len -= 1;
+			inline for (.{ SmallResidueMode.shifted_boundary, SmallResidueMode.shifted_arithmetic }) |mode| {
+				@memset(work, 0xa5);
+				@memset(actual, 0xa5);
+				const got = mulMagnitudesScoped(mode, a, b, actual[1..][0..expected.len], pa, pb, fwd, inv, sc);
+				try testing.expectEqual(expected_len, got);
+				try testing.expectEqualSlices(u8, expected, actual[1..][0..expected.len]);
+				try testing.expectEqual(@as(u8, 0xa5), actual[0]);
+				try testing.expectEqual(@as(u8, 0xa5), actual[actual.len - 1]);
+				try testing.expectEqual(@as(u8, 0xa5), work[0]);
+				try testing.expectEqual(@as(u8, 0xa5), work[work.len - 1]);
+				for ([_][]u8{ pa, pb, fwd, inv }) |buffer| {
+					for (0..buffer.len / residue.slot_bytes) |i| {
+						const encoded_value = @import("fft_residue.zig").Shifted(P).read(buffer, i);
+						try expected_integer.addU64(&zero, encoded_value);
+						try testing.expectEqualSlices(u8, expected_integer.bytes(), SmallField(mode).encoded(buffer, i));
+					}
+				}
+			}
+		}
+	}
+}
+
+test "scoped FFT empty inputs need no scratch and leave output untouched" {
+	inline for (.{ SmallResidueMode.canonical, SmallResidueMode.shifted_boundary, SmallResidueMode.shifted_arithmetic }) |mode| {
+		var out = [_]u8{ 0xa5, 0xa5 };
+		try testing.expectEqual(@as(usize, 0), mulMagnitudesScoped(mode, &.{}, &.{1}, &out, &.{}, &.{}, &.{}, &.{}, &.{}));
+		try testing.expectEqual(@as(usize, 0), mulMagnitudesScoped(mode, &.{1}, &.{}, &out, &.{}, &.{}, &.{}, &.{}, &.{}));
+		try testing.expectEqualSlices(u8, &.{ 0xa5, 0xa5 }, &out);
 	}
 }

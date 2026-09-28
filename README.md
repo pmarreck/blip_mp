@@ -38,6 +38,13 @@ preserving canonical BLIP for every stored residue. Initial
 32,768-byte balanced product by 6.4% and sampled asymmetric products by
 19.0–66.5%. These compare BLIP revisions, not GMP.
 
+The latest [scoped-residue experiment](docs/benchmarks/shifted-residues/README.md)
+stores each small-field residue as `r+p`. Every resulting integer needs exactly
+four payload bytes under the existing canonical BLIP rules, including field
+zero. Five-run medians reduce complete forced FFT product time by 22.5–43.4%
+relative to the preceding five-byte implementation. Normal `Mp` dispatch remains
+unchanged; this result does not establish another win over GMP.
+
 Wins depend on the operation, integer size and platform. The older Apple
 Silicon and Zen 4 measurements remain historical records; they are not results
 for this revision. GMP without assembly is a separate comparison and does not

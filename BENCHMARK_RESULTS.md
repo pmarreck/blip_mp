@@ -1,5 +1,16 @@
 # BENCHMARK_RESULTS.md — blip_mp vs GMP
 
+## September 27 night: one canonical length through shifted representatives
+
+Storing `r+p` confines every small-prime residue to the existing four-byte
+payload encoding. Five interleaved runs measure a 22.5–43.4% reduction in
+complete FFT product time across twenty size/pattern combinations, including
+zero and sparse inputs. Keeping register arithmetic shifted saves another
+2.1–4.1% relative to shifting at each storage boundary. Baseline: the five-byte
+implementation at `cc268f4`; host: Threadripper 3990X, Zig 0.16.0 ReleaseFast.
+[CPU/wall medians, ranges, raw samples and validation](docs/benchmarks/shifted-residues/README.md).
+These are forced-backend BLIP comparisons; normal dispatch remains unchanged.
+
 ## September 27 evening: storage-aware FFT
 
 Field-sized canonical slots, an existing-header fast path and fused arithmetic

@@ -1,5 +1,12 @@
 # Results after the BLIP-residue migration
 
+Latest follow-up: [shifted representatives](docs/benchmarks/shifted-residues/README.md)
+reduce complete forced small-prime FFT product time by 22.5–43.4% across twenty
+size/pattern combinations, measured over five interleaved runs. Every stored
+integer retains its canonical BLIP encoding. This compares the preceding
+five-byte implementation with the new scoped representation; normal `Mp`
+dispatch and the GMP comparison below are unchanged.
+
 Follow-up: [storage-aware FFT measurements](docs/benchmarks/storage-aware/README.md)
 reduce forced small-prime products by 33.6–35.2% and Goldilocks by 5.3–7.6%
 relative to the 16-byte BLIP implementation. The tables below preserve the

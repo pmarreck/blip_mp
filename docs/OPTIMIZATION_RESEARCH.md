@@ -11,6 +11,15 @@ measures field-sized slots, common-header checks and fused stages. The
 [sentinel/type investigation](BLIP_ALGORITHM_TYPES.md) records the sibling
 specification and the unresolved contract for contextual fixed-width types.
 
+The next [scoped-residue experiment](benchmarks/shifted-residues/README.md)
+avoids a format extension. BDFN (Benevolent Dictator For Now) proposed restricting the lengths available
+within an algorithm; choosing representatives `r+p` makes every small-prime
+value use the existing `84` header, including field zero. Complete forced FFT
+products take 22.5–43.4% less time across the measured cases. Scalar/SIMD
+modular oracles, canonical-byte checks and GMP comparisons validate the change.
+Goldilocks and CRT remain separate follow-ups; the measured result applies to
+the single-prime backend. No novelty claim is made for shifted representatives.
+
 ## Gaps verified in this code
 
 | Area | Current implementation | Established avenue to investigate |
@@ -82,7 +91,7 @@ and repaired scratch-lifetime and zero-padded evaluation errors.
    changes whose wins disappear in repeated runs.
 2. **Fuse FFT stages while values remain in registers.** Decode each BLIP
    residue once for a radix-4 or larger local butterfly, then encode each
-   output once. Every stored intermediate still obeys BDFN (Benevolent Dictator For Now)'s constraint.
+   output once. Every stored intermediate still obeys BDFN's constraint.
    Radix-4 already exists here, so stage fusion itself is not novel. The
    research question is how much encoding work can be removed without
    increasing register spills or instruction count. Check generated machine

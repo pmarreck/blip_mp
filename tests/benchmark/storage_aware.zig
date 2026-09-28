@@ -5,7 +5,7 @@ const fft = lib.fft;
 const clock = @import("time_util");
 const allocator = std.heap.c_allocator;
 
-fn cpuNs() u64 {
+pub fn cpuNs() u64 {
 	var ts: clock.TimeSpec = undefined;
 	const rc = clock.clock_gettime(@intFromEnum(std.posix.CLOCK.PROCESS_CPUTIME_ID), &ts);
 	if (rc != 0) @panic("process CPU clock failed");

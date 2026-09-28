@@ -40,11 +40,33 @@ where applicable, allowed values, canonical form and treatment of unknown
 contexts. Unknown context must fail before payload traversal. A length alone
 cannot distinguish two fields with different moduli.
 
-## Next decision
+## Scoped representative range: implemented without a format change
 
-Measure the existing header fast path and stage fusion first. Consider an
-explicitly separate typed-BLIP experiment only if encoding remains a measured
-bottleneck. Its acceptance tests would include decoding without context,
+BDFN's follow-up proposed restricting the existing encoding lengths within
+an algorithm. For `p=998244353`, storing `r+p` instead of the least nonnegative
+representative confines every value to `[p,2p)`. Every integer in that interval
+requires exactly four signed payload bytes. Field zero therefore has canonical
+bytes `84 01 00 80 3b`; it is the integer `p`, interpreted modulo `p`.
+
+This removes width selection altogether from the trusted small-prime loop.
+Every slot still contains its own ordinary BLIP header. No overlong zero, new
+type, sentinel or reserved bit is needed. The codec checks header, length and
+range when validating external bytes; it does not identify the modulus from
+the bytes alone. Two modular contexts can have overlapping representative
+ranges, so context identity remains a caller responsibility.
+
+[Five-run measurements](benchmarks/shifted-residues/README.md) compare reduced
+integers, shifts at storage boundaries, and arithmetic that stays shifted.
+The latter is now the single-prime multiplication default. It reduces complete
+product time by 22.5–43.4% relative to the reduced-integer implementation.
+The same choice for Goldilocks would require 65-bit representatives, so its
+cost needs a separate experiment.
+
+## Deferred type extension
+
+The existing header fast path, stage fusion and restricted representative range
+now have measurements. Consider a separate typed-BLIP experiment only if a
+remaining encoding bottleneck justifies it. Its acceptance tests would include decoding without context,
 wrong-context rejection, truncated payloads, noncanonical values and namespace
 collisions, alongside end-to-end arithmetic and memory measurements.
 

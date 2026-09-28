@@ -5,6 +5,7 @@
 | BLIP | Byte Length Integer Prefix, a variable-length, self-describing byte encoding. The external specification is [../BLIP/BLIP_SPEC.md](../BLIP/BLIP_SPEC.md). This library applies a signed two's-complement interpretation. |
 | Payload length (`L`) | Number of payload bytes after the header. `L=0` denotes the immediate form; `L=1..8` is the original tier-1 range. |
 | Canonical form | The minimum-width signed encoding for a value, using the immediate form where possible. Overlong sentinel encodings are excluded from ordinary integer values. |
+| Shifted field representative | Store `r+p` for residue `r` modulo `p`. This is the same field element with a different integer representative. Its BLIP encoding remains minimum-width for that integer; field zero is stored as the integer `p`. |
 | Tier 0 / 1 / 2 / 3 | Original dispatch vocabulary: immediate operands; operands with payloads up to eight bytes; mixed small/large operands; large operands. Current dispatch details belong in code and the minimap. |
 | `Mp` / `blip_mp_t` | Zig integer type / opaque C API handle. The original always-heap `{bytes, len}` proposal was replaced by inline storage with heap fallback. |
 | SBO | Small-buffer optimization: store short encodings inside the integer object to avoid a separate payload allocation. |

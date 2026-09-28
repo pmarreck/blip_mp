@@ -555,7 +555,7 @@ fn checkEncodedFft(allocator: std.mem.Allocator) !usize {
 	defer __gmpz_clear(&gb);
 	__gmpz_init(&product);
 	defer __gmpz_clear(&product);
-	for ([_]usize{ 7, 257, 4096, 16385, 100000 }) |size| {
+	for ([_]usize{ 7, 257, 4096, 7000, 16385, 100000 }) |size| {
 		const a = try allocator.alloc(u8, size);
 		defer allocator.free(a);
 		const b = try allocator.alloc(u8, size);
@@ -577,29 +577,37 @@ fn checkEncodedFft(allocator: std.mem.Allocator) !usize {
 			__gmpz_mul(&product, &ga, &gb);
 			var expected_len: usize = 0;
 			_ = __gmpz_export(expected.ptr, &expected_len, -1, 1, 0, 0, &product);
-			for (0..4) |backend| {
-				if ((backend == 0 and 2 * size > fft.MAX_FFT_COMBINED_LEN) or
-					(backend == 1 and 2 * size > fft.MAX_FFT_CRT_COMBINED_LEN)) continue;
-				const actual_len = if (backend == 0) try fft.mulMagnitudes(allocator, a, b, actual) else if (backend == 1) try fft.mulMagnitudesCRT(allocator, a, b, actual) else if (backend == 3) blk: {
-					const work = try allocator.alloc(u8, blip_mp.tier3.toom3ScratchNeed(size));
-					defer allocator.free(work);
-					blip_mp.tier3.mulToom3(a, b, actual, work);
-					var len = actual.len;
-					while (len > 0 and actual[len - 1] == 0) len -= 1;
-					break :blk len;
-				} else blk: {
-					var n: usize = 1;
-					while (n < size) n *= 2;
-					const bytes = n * fft.gold_residue.slot_bytes;
-					const scratch = try allocator.alloc(u8, 4 * bytes);
-					defer allocator.free(scratch);
-					break :blk fft.goldMulMagnitudesWithScratch(a, b, actual, scratch[0..bytes], scratch[bytes .. 2 * bytes], scratch[2 * bytes .. 5 * bytes / 2], scratch[5 * bytes / 2 .. 3 * bytes], scratch[3 * bytes .. 4 * bytes]);
-				};
-				if (!std.mem.eql(u8, expected[0..expected_len], actual[0..actual_len])) {
-					std.debug.print("FFT mismatch backend={d} bytes={d} pattern={d}\n", .{ backend, size, pattern });
-					return error.FftMismatch;
+			inline for (0..6) |backend| {
+				if (!(((backend == 0 or backend >= 4) and 2 * size > fft.MAX_FFT_COMBINED_LEN) or
+					(backend == 1 and 2 * size > fft.MAX_FFT_CRT_COMBINED_LEN))) {
+					const actual_len = if (backend == 0) try fft.mulMagnitudes(allocator, a, b, actual) else if (backend == 1) try fft.mulMagnitudesCRT(allocator, a, b, actual) else if (backend == 3) blk: {
+						const work = try allocator.alloc(u8, blip_mp.tier3.toom3ScratchNeed(size));
+						defer allocator.free(work);
+						blip_mp.tier3.mulToom3(a, b, actual, work);
+						var len = actual.len;
+						while (len > 0 and actual[len - 1] == 0) len -= 1;
+						break :blk len;
+					} else if (backend >= 4) blk: {
+						var n: usize = 1;
+						while (n < 2 * size) n *= 2;
+						const bytes = n * fft.residue.slot_bytes;
+						const scratch = try allocator.alloc(u8, 4 * bytes);
+						defer allocator.free(scratch);
+						break :blk fft.mulMagnitudesScoped(if (backend == 4) .shifted_boundary else .shifted_arithmetic, a, b, actual, scratch[0..bytes], scratch[bytes .. 2 * bytes], scratch[2 * bytes .. 5 * bytes / 2], scratch[5 * bytes / 2 .. 3 * bytes], scratch[3 * bytes ..]);
+					} else blk: {
+						var n: usize = 1;
+						while (n < size) n *= 2;
+						const bytes = n * fft.gold_residue.slot_bytes;
+						const scratch = try allocator.alloc(u8, 4 * bytes);
+						defer allocator.free(scratch);
+						break :blk fft.goldMulMagnitudesWithScratch(a, b, actual, scratch[0..bytes], scratch[bytes .. 2 * bytes], scratch[2 * bytes .. 5 * bytes / 2], scratch[5 * bytes / 2 .. 3 * bytes], scratch[3 * bytes .. 4 * bytes]);
+					};
+					if (!std.mem.eql(u8, expected[0..expected_len], actual[0..actual_len])) {
+						std.debug.print("FFT mismatch backend={d} bytes={d} pattern={d}\n", .{ backend, size, pattern });
+						return error.FftMismatch;
+					}
+					checks += 1;
 				}
-				checks += 1;
 			}
 		}
 	}

@@ -1,0 +1,133 @@
+=== fft_microbench (iters=10000000) ===
+
+RESULT impl=addModP_scalar ns_per_op=0.827
+RESULT impl=subModP_scalar ns_per_op=0.775
+RESULT impl=mulModP_scalar ns_per_op=1.000
+
+--- vector x2 (ns_per_vec_op | ns_per_scalar_equiv) ---
+RESULT impl=addModP_x2 ns_per_op=0.815 ns_per_scalar_equiv=0.408
+RESULT impl=subModP_x2 ns_per_op=0.879 ns_per_scalar_equiv=0.440
+RESULT impl=mulModP_x2 ns_per_op=1.999 ns_per_scalar_equiv=0.999
+RESULT impl=montMul_scalar ns_per_op=1.321
+RESULT impl=montMul_x2 ns_per_op=1.388 ns_per_scalar_equiv=0.694
+
+--- Goldilocks-prime (p = 2^64 - 2^32 + 1) scalar ops ---
+RESULT impl=goldAddMod_scalar ns_per_op=1.130
+RESULT impl=goldSubMod_scalar ns_per_op=0.900
+RESULT impl=goldMulMod_scalar ns_per_op=2.374
+
+--- butterfly cost: 30-bit p vs Goldilocks p ---
+butterfly@30-bit-p:   2.60 ns  (mul 1.00 + add 0.83 + sub 0.78)
+butterfly@Goldilocks: 4.40 ns  (mul 2.37 + add 1.13 + sub 0.90)
+per-butterfly ratio (Goldilocks / 30-bit): 1.69x
+
+projected NTT-mul ns @ 32K-bit operands (3·(N/2)·log₂N butterflies, scalar):
+  30-bit p (N=8192, log2N=13):    415751 ns
+  Goldilocks (N=4096, log2N=12): 324672 ns
+  PROJECTED SPEEDUP (Goldilocks vs 30-bit): 1.28x
+  → MARGINAL: Goldilocks projects to 28% gain — consider whether worth the implementation cost
+
+--- speedup vs scalar (>1.0 = SIMD wins) ---
+addModP: 2.03x
+subModP: 1.76x
+mulModP: 1.00x
+montMul: 1.90x (vec vs scalar Mont)
+mulModP_x2 vs montMul_x2 (lower is better): scalar%P_vec=1.999 mont_vec=1.388
+
+--- full NTT pass at N=8192 (iters=200) ---
+RESULT impl=nttWithTwiddles_scalar n=8192 ns_per_pass=184083
+RESULT impl=nttWithTwiddlesVec n=8192 ns_per_pass=158156
+NTT speedup (vec vs scalar): 1.16x
+RESULT impl=nttWithTwiddlesMontVec n=8192 ns_per_pass=174508
+Mont NTT speedup (mont_vec vs scalar): 1.05x
+Mont NTT speedup (mont_vec vs %P_vec): 0.91x
+RESULT impl=nttStockhamVec n=8192 ns_per_pass=149646
+Stockham vs Cooley-Tukey vec (1x) — lower is better
+Stockham NTT speedup (stockham_vec vs %P_vec): 1.06x
+Stockham NTT speedup (stockham_vec vs scalar): 1.23x
+RESULT impl=nttStockhamVecU4 n=8192 ns_per_pass=161954
+Stockham U4 speedup vs nttStockhamVec:      0.924x
+RESULT impl=nttStockhamVecU8 n=8192 ns_per_pass=191328
+Stockham U8 speedup vs nttStockhamVec:      0.782x
+Stockham U8 speedup vs nttStockhamVecU4:    0.846x
+RESULT impl=nttStockhamMontVec n=8192 ns_per_pass=189110
+Stockham+Mont speedup vs nttStockhamVec:    0.79x
+Stockham+Mont speedup vs nttWithMontVec:    0.92x
+Stockham+Mont speedup vs scalar baseline:   0.97x
+RESULT impl=nttRadix4Vec n=8192 ns_per_pass=139468
+Radix-4 NTT speedup (r4_vec vs %P_vec): 1.13x
+Radix-4 NTT speedup (r4_vec vs scalar): 1.32x
+STORAGE impl=toom3 bytes=512 iterations=100 wall_ns=3836 cpu_ns=4347
+STORAGE impl=small_fft bytes=512 iterations=100 wall_ns=38236 cpu_ns=38540
+STORAGE impl=gold_fft bytes=512 iterations=100 wall_ns=59780 cpu_ns=59222
+STORAGE impl=asymmetric_mp bytes=512 iterations=100 wall_ns=2264 cpu_ns=2787
+STORAGE impl=toom3 bytes=4096 iterations=100 wall_ns=155701 cpu_ns=153867
+STORAGE impl=small_fft bytes=4096 iterations=100 wall_ns=372522 cpu_ns=367945
+STORAGE impl=gold_fft bytes=4096 iterations=100 wall_ns=593898 cpu_ns=586834
+STORAGE impl=asymmetric_mp bytes=4096 iterations=100 wall_ns=101954 cpu_ns=101206
+STORAGE impl=toom3 bytes=8192 iterations=10 wall_ns=437054 cpu_ns=432138
+STORAGE impl=gold_fft bytes=8192 iterations=10 wall_ns=1268063 cpu_ns=1253456
+STORAGE impl=asymmetric_mp bytes=8192 iterations=10 wall_ns=296945 cpu_ns=296125
+STORAGE impl=toom3 bytes=32768 iterations=10 wall_ns=3910857 cpu_ns=3861371
+STORAGE impl=gold_fft bytes=32768 iterations=10 wall_ns=5762849 cpu_ns=5686866
+STORAGE impl=asymmetric_mp bytes=32768 iterations=10 wall_ns=2660887 cpu_ns=2624436
+SHIFT impl=canonical bytes=128 pattern=random iterations=100 wall_ns=12086 cpu_ns=12593
+SHIFT impl=shifted_boundary bytes=128 pattern=random iterations=100 wall_ns=9518 cpu_ns=9873
+SHIFT impl=shifted_arithmetic bytes=128 pattern=random iterations=100 wall_ns=8578 cpu_ns=9082
+SHIFT impl=canonical bytes=128 pattern=all255 iterations=100 wall_ns=12421 cpu_ns=12927
+SHIFT impl=shifted_boundary bytes=128 pattern=all255 iterations=100 wall_ns=9466 cpu_ns=9856
+SHIFT impl=shifted_arithmetic bytes=128 pattern=all255 iterations=100 wall_ns=8706 cpu_ns=9134
+SHIFT impl=canonical bytes=128 pattern=zero iterations=100 wall_ns=12718 cpu_ns=13381
+SHIFT impl=shifted_boundary bytes=128 pattern=zero iterations=100 wall_ns=9542 cpu_ns=10008
+SHIFT impl=shifted_arithmetic bytes=128 pattern=zero iterations=100 wall_ns=9555 cpu_ns=9260
+SHIFT impl=canonical bytes=128 pattern=sparse iterations=100 wall_ns=12768 cpu_ns=12866
+SHIFT impl=shifted_boundary bytes=128 pattern=sparse iterations=100 wall_ns=9461 cpu_ns=9926
+SHIFT impl=shifted_arithmetic bytes=128 pattern=sparse iterations=100 wall_ns=8708 cpu_ns=9169
+SHIFT impl=canonical bytes=512 pattern=random iterations=100 wall_ns=60252 cpu_ns=60411
+SHIFT impl=shifted_boundary bytes=512 pattern=random iterations=100 wall_ns=41881 cpu_ns=42129
+SHIFT impl=shifted_arithmetic bytes=512 pattern=random iterations=100 wall_ns=39608 cpu_ns=39103
+SHIFT impl=canonical bytes=512 pattern=all255 iterations=100 wall_ns=57516 cpu_ns=56817
+SHIFT impl=shifted_boundary bytes=512 pattern=all255 iterations=100 wall_ns=41787 cpu_ns=42071
+SHIFT impl=shifted_arithmetic bytes=512 pattern=all255 iterations=100 wall_ns=38477 cpu_ns=38841
+SHIFT impl=canonical bytes=512 pattern=zero iterations=100 wall_ns=59448 cpu_ns=58778
+SHIFT impl=shifted_boundary bytes=512 pattern=zero iterations=100 wall_ns=42148 cpu_ns=42419
+SHIFT impl=shifted_arithmetic bytes=512 pattern=zero iterations=100 wall_ns=38883 cpu_ns=39329
+SHIFT impl=canonical bytes=512 pattern=sparse iterations=100 wall_ns=56134 cpu_ns=56304
+SHIFT impl=shifted_boundary bytes=512 pattern=sparse iterations=100 wall_ns=42535 cpu_ns=42183
+SHIFT impl=shifted_arithmetic bytes=512 pattern=sparse iterations=100 wall_ns=39641 cpu_ns=39107
+SHIFT impl=canonical bytes=2048 pattern=random iterations=32 wall_ns=302083 cpu_ns=299931
+SHIFT impl=shifted_boundary bytes=2048 pattern=random iterations=32 wall_ns=194151 cpu_ns=188925
+SHIFT impl=shifted_arithmetic bytes=2048 pattern=random iterations=32 wall_ns=174273 cpu_ns=174491
+SHIFT impl=canonical bytes=2048 pattern=all255 iterations=32 wall_ns=264795 cpu_ns=262129
+SHIFT impl=shifted_boundary bytes=2048 pattern=all255 iterations=32 wall_ns=193107 cpu_ns=191869
+SHIFT impl=shifted_arithmetic bytes=2048 pattern=all255 iterations=32 wall_ns=182806 cpu_ns=177543
+SHIFT impl=canonical bytes=2048 pattern=zero iterations=32 wall_ns=297826 cpu_ns=289008
+SHIFT impl=shifted_boundary bytes=2048 pattern=zero iterations=32 wall_ns=192675 cpu_ns=190939
+SHIFT impl=shifted_arithmetic bytes=2048 pattern=zero iterations=32 wall_ns=181414 cpu_ns=179740
+SHIFT impl=canonical bytes=2048 pattern=sparse iterations=32 wall_ns=258758 cpu_ns=255354
+SHIFT impl=shifted_boundary bytes=2048 pattern=sparse iterations=32 wall_ns=188367 cpu_ns=187738
+SHIFT impl=shifted_arithmetic bytes=2048 pattern=sparse iterations=32 wall_ns=176710 cpu_ns=173442
+SHIFT impl=canonical bytes=4096 pattern=random iterations=32 wall_ns=657993 cpu_ns=650105
+SHIFT impl=shifted_boundary bytes=4096 pattern=random iterations=32 wall_ns=403615 cpu_ns=399653
+SHIFT impl=shifted_arithmetic bytes=4096 pattern=random iterations=32 wall_ns=376755 cpu_ns=372369
+SHIFT impl=canonical bytes=4096 pattern=all255 iterations=32 wall_ns=575803 cpu_ns=570077
+SHIFT impl=shifted_boundary bytes=4096 pattern=all255 iterations=32 wall_ns=401297 cpu_ns=397593
+SHIFT impl=shifted_arithmetic bytes=4096 pattern=all255 iterations=32 wall_ns=375609 cpu_ns=369911
+SHIFT impl=canonical bytes=4096 pattern=zero iterations=32 wall_ns=644117 cpu_ns=636398
+SHIFT impl=shifted_boundary bytes=4096 pattern=zero iterations=32 wall_ns=406416 cpu_ns=402513
+SHIFT impl=shifted_arithmetic bytes=4096 pattern=zero iterations=32 wall_ns=383024 cpu_ns=376675
+SHIFT impl=canonical bytes=4096 pattern=sparse iterations=32 wall_ns=564167 cpu_ns=557685
+SHIFT impl=shifted_boundary bytes=4096 pattern=sparse iterations=32 wall_ns=404166 cpu_ns=398646
+SHIFT impl=shifted_arithmetic bytes=4096 pattern=sparse iterations=32 wall_ns=377935 cpu_ns=372482
+SHIFT impl=canonical bytes=7000 pattern=random iterations=32 wall_ns=1331609 cpu_ns=1314892
+SHIFT impl=shifted_boundary bytes=7000 pattern=random iterations=32 wall_ns=865621 cpu_ns=856269
+SHIFT impl=shifted_arithmetic bytes=7000 pattern=random iterations=32 wall_ns=802957 cpu_ns=793758
+SHIFT impl=canonical bytes=7000 pattern=all255 iterations=32 wall_ns=1084956 cpu_ns=1068296
+SHIFT impl=shifted_boundary bytes=7000 pattern=all255 iterations=32 wall_ns=864383 cpu_ns=853323
+SHIFT impl=shifted_arithmetic bytes=7000 pattern=all255 iterations=32 wall_ns=795514 cpu_ns=790088
+SHIFT impl=canonical bytes=7000 pattern=zero iterations=32 wall_ns=1333323 cpu_ns=1314528
+SHIFT impl=shifted_boundary bytes=7000 pattern=zero iterations=32 wall_ns=875403 cpu_ns=861058
+SHIFT impl=shifted_arithmetic bytes=7000 pattern=zero iterations=32 wall_ns=806395 cpu_ns=800906
+SHIFT impl=canonical bytes=7000 pattern=sparse iterations=32 wall_ns=1170657 cpu_ns=1155569
+SHIFT impl=shifted_boundary bytes=7000 pattern=sparse iterations=32 wall_ns=869760 cpu_ns=856266
+SHIFT impl=shifted_arithmetic bytes=7000 pattern=sparse iterations=32 wall_ns=803224 cpu_ns=793314

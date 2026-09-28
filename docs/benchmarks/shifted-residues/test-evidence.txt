@@ -1,0 +1,30 @@
+September 27, 2026; initial TDD failure before implementing Shifted:
+
+src/fft_residue.zig:127:17: error: use of undeclared identifier 'Shifted'
+  const Codec = Shifted(prime);
+                ^~~~~~~
+src/fft_residue.zig:148:16: error: use of undeclared identifier 'Shifted'
+ const Codec = Shifted(998244353);
+               ^~~~~~~
+
+After implementation, focused ReleaseSafe codec tests:
+
+1/2 fft_residue.test.shifted representatives have one canonical width including field zero...OK
+2/2 fft_residue.test.shifted scope validation classifies headers widths and range boundaries...OK
+All 2 tests passed.
+
+Focused ReleaseSafe field/product tests:
+
+1/2 fft.test.scoped field scalar and SIMD arithmetic matches u128 modular oracle...OK
+2/2 fft.test.scoped FFT products match schoolbook and keep canonical shifted scratch...OK
+All 2 tests passed.
+
+Full ./test after selecting shifted_arithmetic as the default: exit 0.
+  PASS forced BLIP FFT and Toom backends: 58 GMP comparisons
+Total checks: 13111
+All test groups passed.
+
+./build: exit 0.
+nix develop -c zig build test -Doptimize=ReleaseSafe --summary none: exit 0.
+
+No timing assertions were added to deterministic correctness tests.

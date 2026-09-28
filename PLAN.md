@@ -2,16 +2,15 @@
 
 Purpose: [INTENT.md](INTENT.md). The [legacy roadmap](docs/plan_context/legacy-roadmap.md) preserves all prior tasks, decisions and measurements; its checkboxes include stale and conflicting statuses.
 
-## Storage-aware optimization (BDFN (Benevolent Dictator For Now), 2026-09-27 evening)
+## Scoped fixed-length canonical residues (BDFN (Benevolent Dictator For Now), 2026-09-27)
 
-- [x] Inspect sibling BLIP reserved symbols and evaluate context-defined fixed-width types as a design proposal, without changing the format. (done 2026-09-27 19:57 EDT)
+- [x] Test canonical BLIP encodings of r+p, including zero, maximal residues and malformed scoped input; verify scalar/SIMD field identities and transform boundaries. (done 2026-09-27 22:06 EDT; source and evidence in this commit)
+- [x] Compare boundary-shifted and arithmetic-shifted small-prime FFTs with the current implementation on identical seeded dense, sparse and carry-heavy products. (done 2026-09-27 22:06 EDT; source and evidence in this commit)
+- [x] Retain only measured improvements, run the full tests/build and GMP oracle, update benchmark/representation docs, and capture successful collaboration evidence in the private ledger. (done 2026-09-27 22:06 EDT; source and evidence in this commit)
+
+## Storage-aware optimization (BDFN, 2026-09-27 evening)
+
 - [x] Start research experiments after the FFT work: recursive Toom-3 and asymmetric multiplication, with failing tests and before/after measurements. (done 2026-09-27 20:14 EDT)
-- [x] Evaluate remaining research candidates for tighter packing, sparse transforms and truncated Montgomery work; retain measured null results and rank further experiments. (done 2026-09-27 20:09 EDT)
-- [x] Publish before/after evidence and update README, results, representation notes and optimization research; commit passing units of work. (done 2026-09-27 20:09 EDT)
-
-## Current work (BDFN, 2026-09-27)
-
-
 
 ## Follow-up and existing backlog
 

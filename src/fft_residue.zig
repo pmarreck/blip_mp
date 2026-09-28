@@ -53,6 +53,39 @@ fn FieldCodec(comptime Word: type) type {
 	};
 }
 
+/// Algorithm-scoped representatives r+p. Each stored integer has the ordinary
+/// canonical positive signed BLIP encoding 84 followed by four payload bytes.
+pub fn Shifted(comptime modulus: u64) type {
+	if (modulus < (1 << 23) or modulus > (1 << 30)) @compileError("shifted field must fit one canonical signed four-byte width");
+	return struct {
+		pub const slot_bytes: usize = 5;
+		pub fn encoded(bytes: []const u8, index: usize) []const u8 {
+			return bytes[index * 5 ..][0..5];
+		}
+		/// Validate once when admitting bytes from outside the trusted scope.
+		pub fn isValid(bytes: []const u8) bool {
+			if (bytes.len != 5 or bytes[0] != 0x84) return false;
+			const value = std.mem.readInt(u32, bytes[1..5], .little);
+			return value >= modulus and value < 2 * modulus;
+		}
+		pub fn read(bytes: []const u8, index: usize) u64 {
+			const slot = @This().encoded(bytes, index);
+			std.debug.assert(isValid(slot));
+			return std.mem.readInt(u32, slot[1..5], .little);
+		}
+		pub fn write(bytes: []u8, index: usize, value: u64) void {
+			std.debug.assert(value >= modulus and value < 2 * modulus);
+			const slot = bytes[index * 5 ..][0..5];
+			slot[0] = 0x84;
+			std.mem.writeInt(u32, slot[1..5], @intCast(value), .little);
+		}
+		pub fn clear(bytes: []u8) void {
+			std.debug.assert(bytes.len % 5 == 0);
+			for (0..bytes.len / 5) |i| @This().write(bytes, i, modulus);
+		}
+	};
+}
+
 test "residues match canonical BLIP at all signed payload boundaries" {
 	const Mp = @import("bignum.zig").Mp;
 	var expected = Mp.init(std.testing.allocator);
@@ -114,4 +147,55 @@ test "zero initialization touches only the canonical immediate byte" {
 			for (bytes[i * Codec.slot_bytes + 1 .. (i + 1) * Codec.slot_bytes]) |byte| try std.testing.expectEqual(@as(u8, 0xa5), byte);
 		}
 	}
+}
+
+test "shifted representatives have one canonical width including field zero" {
+	const Mp = @import("bignum.zig").Mp;
+	var expected = Mp.init(std.testing.allocator);
+	defer expected.deinit();
+	var zero = Mp.init(std.testing.allocator);
+	defer zero.deinit();
+	try zero.setI64(0);
+	inline for (.{ 998244353, 985661441 }) |prime| {
+		const Codec = Shifted(prime);
+		var storage: [3 * Codec.slot_bytes + 1]u8 = @splat(0xa5);
+		const bytes = storage[1..];
+		var rng = std.Random.DefaultPrng.init(0x5157);
+		for (0..1010) |i| {
+			const boundaries = [_]u64{ 0, 1, 127, 128, 32767, 32768, 8388607, 8388608, prime - 2, prime - 1 };
+			const r = if (i < boundaries.len) boundaries[i] else rng.random().uintLessThan(u64, prime);
+			try expected.addU64(&zero, r + prime);
+			Codec.write(bytes, 1, r + prime);
+			try std.testing.expectEqualSlices(u8, expected.bytes(), Codec.encoded(bytes, 1));
+			try std.testing.expectEqual(@as(u64, r + prime), Codec.read(bytes, 1));
+			try std.testing.expectEqual(@as(u8, 0x84), bytes[Codec.slot_bytes]);
+			try std.testing.expectEqual(@as(u8, 0xa5), bytes[Codec.slot_bytes - 1]);
+			try std.testing.expectEqual(@as(u8, 0xa5), bytes[2 * Codec.slot_bytes]);
+		}
+		Codec.clear(bytes);
+		for (0..3) |i| try std.testing.expectEqual(@as(u64, prime), Codec.read(bytes, i));
+	}
+}
+
+test "shifted scope validation classifies headers widths and range boundaries" {
+	const Codec = Shifted(998244353);
+	const values = [_]u32{ 0, 998244352, 998244353, 998244354, 1996488705, 1996488706, 2147483647 };
+	const expected = [_]bool{ false, false, true, true, true, false, false };
+	var actual: [values.len]bool = undefined;
+	var bytes: [6]u8 = @splat(0);
+	bytes[0] = 0x84;
+	for (values, 0..) |v, i| {
+		std.mem.writeInt(u32, bytes[1..5], v, .little);
+		actual[i] = Codec.isValid(bytes[0..5]);
+	}
+	try std.testing.expectEqualSlices(bool, &expected, &actual);
+	std.mem.writeInt(u32, bytes[1..5], 998244353, .little);
+	const headers = [_]u8{ 0, 0x81, 0x82, 0x83, 0x84, 0x85, 0xc4, 0xa4, 0xff };
+	var header_results: [headers.len]bool = undefined;
+	for (headers, 0..) |h, i| { bytes[0] = h; header_results[i] = Codec.isValid(bytes[0..5]); }
+	try std.testing.expectEqualSlices(bool, &.{ false, false, false, false, true, false, false, false, false }, &header_results);
+	bytes[0] = 0x84;
+	var width_results: [7]bool = undefined;
+	for (0..7) |len| width_results[len] = Codec.isValid(bytes[0..len]);
+	try std.testing.expectEqualSlices(bool, &.{ false, false, false, false, false, true, false }, &width_results);
 }
