@@ -8,7 +8,7 @@ Purpose: [INTENT.md](INTENT.md). The [legacy roadmap](docs/plan_context/legacy-r
 - [x] Honor the temporary scheduling hold through its release; ordinary single-job build budgets apply again. (done 2026-10-14 15:43 EDT; this commit)
 - [x] Sanitize all 160 history commits with a verified private backup; preserve author metadata, arithmetic behavior and benchmark measurements, and remap current evidence references. (done 2026-10-14 17:29 EDT; this commit)
 - [x] Pass the sanitized history audit, full suite with 13,111 GMP comparisons, production build and all three native Linux CI targets. (done 2026-10-14 17:29 EDT; this commit)
-- [ ] Publish with an explicit remote lease and confirm the exact remote commit and CI result.
+- [x] Publish with an explicit remote lease; verify remote 1fc1c40 and its successful exact-commit CI run (159 seconds). (done 2026-10-14 19:34 EDT; 1fc1c40)
 
 ## Scoped fixed-length canonical residues
 
