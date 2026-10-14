@@ -6,7 +6,7 @@ Purpose: [INTENT.md](INTENT.md). The [legacy roadmap](docs/plan_context/legacy-r
 
 - [x] Reconcile the immediate-add benchmark and aggregation backlog against code; record measurement gaps before another performance claim (context: docs/plan_context/performance-follow-up.md). (done 2026-10-14 14:32 EDT; this commit)
 - [x] Fix the reproduced Mp.addU64(&self, 0) alias panic; require ReleaseSafe unit tests and pass the complete suite, 13,111 GMP checks and production build. (done 2026-10-14 15:38 EDT; this commit)
-- [ ] Honor the temporary scheduling hold on further expensive work; the completed validation job has released its build lease.
+- [x] Honor the temporary scheduling hold through its release; ordinary single-job build budgets apply again. (done 2026-10-14 15:43 EDT; this commit)
 - [ ] Keep publication on hold until the unpublished-history privacy decision is resolved (walking decision blip-mp-unpublished-history-privacy, revision 1).
 
 ## Scoped fixed-length canonical residues
