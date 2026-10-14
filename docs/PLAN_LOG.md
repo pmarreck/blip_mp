@@ -15,3 +15,10 @@ Completed PLAN.md items retired by plan-retire, oldest retirement first.
 - [x] [Storage-aware optimization (BDFN, 2026-09-27 evening)] Inspect sibling BLIP reserved symbols and evaluate context-defined fixed-width types as a design proposal, without changing the format. (done 2026-09-27 19:57 EDT)
 - [x] [Storage-aware optimization (BDFN, 2026-09-27 evening)] Evaluate remaining research candidates for tighter packing, sparse transforms and truncated Montgomery work; retain measured null results and rank further experiments. (done 2026-09-27 20:09 EDT)
 - [x] [Storage-aware optimization (BDFN, 2026-09-27 evening)] Publish before/after evidence and update README, results, representation notes and optimization research; commit passing units of work. (done 2026-09-27 20:09 EDT)
+
+## Retired 2026-10-14
+
+- [x] [Scoped fixed-length canonical residues] Test canonical BLIP encodings of r+p, including zero, maximal residues and malformed scoped input; verify scalar/SIMD field identities and transform boundaries. (done 2026-09-27 22:06 EDT; source and evidence in this commit)
+- [x] [Storage-aware optimization] Start research experiments after the FFT work: recursive Toom-3 and asymmetric multiplication, with failing tests and before/after measurements. (done 2026-09-27 20:14 EDT)
+- [x] [Follow-up and existing backlog] Evaluate recursive Toom-3 and BLIP FFT stage fusion with GMP oracles and repeated benchmarks (research: docs/OPTIMIZATION_RESEARCH.md). (done 2026-09-27 20:09 EDT)
+- [x] [Scoped fixed-length canonical residues] Compare boundary-shifted and arithmetic-shifted small-prime FFTs with the current implementation on identical seeded dense, sparse and carry-heavy products. (done 2026-09-27 22:06 EDT; source and evidence in this commit)

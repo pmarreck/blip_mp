@@ -2,27 +2,25 @@
 
 Purpose: [INTENT.md](INTENT.md). The [legacy roadmap](docs/plan_context/legacy-roadmap.md) preserves all prior tasks, decisions and measurements; its checkboxes include stale and conflicting statuses.
 
-## Scoped fixed-length canonical residues (BDFN (Benevolent Dictator For Now), 2026-09-27)
+## Current bounded milestone
 
-- [x] Test canonical BLIP encodings of r+p, including zero, maximal residues and malformed scoped input; verify scalar/SIMD field identities and transform boundaries. (done 2026-09-27 22:06 EDT; source and evidence in this commit)
-- [x] Compare boundary-shifted and arithmetic-shifted small-prime FFTs with the current implementation on identical seeded dense, sparse and carry-heavy products. (done 2026-09-27 22:06 EDT; source and evidence in this commit)
+- [x] Reconcile the immediate-add benchmark and aggregation backlog against code; record measurement gaps before another performance claim (context: docs/plan_context/performance-follow-up.md). (done 2026-10-14 14:32 EDT; this commit)
+- [x] Fix the reproduced Mp.addU64(&self, 0) alias panic; require ReleaseSafe unit tests and pass the complete suite, 13,111 GMP checks and production build. (done 2026-10-14 15:38 EDT; this commit)
+- [ ] Honor the temporary scheduling hold on further expensive work; the completed validation job has released its build lease.
+- [ ] Keep publication on hold until the unpublished-history privacy decision is resolved (walking decision blip-mp-unpublished-history-privacy, revision 1).
+
+## Scoped fixed-length canonical residues
+
 - [x] Retain only measured improvements, run the full tests/build and GMP oracle, update benchmark/representation docs, and capture successful collaboration evidence in the private ledger. (done 2026-09-27 22:06 EDT; source and evidence in this commit)
-
-## Storage-aware optimization (BDFN, 2026-09-27 evening)
-
-- [x] Start research experiments after the FFT work: recursive Toom-3 and asymmetric multiplication, with failing tests and before/after measurements. (done 2026-09-27 20:14 EDT)
 
 ## Follow-up and existing backlog
 
-- [ ] Investigate unstable immediate-add timing (4.41–7.31 ns) in the final rerun before renewing the four-bucket GMP-win claim (context: docs/benchmarks/storage-aware/RESEARCH.md).
+- [ ] Integrate verified immediate-add probes with the shared performance engine, then investigate the 4.41–7.31 ns variation using separate single-core and 12-core cohorts (context: docs/plan_context/performance-follow-up.md).
 
 - [ ] Measure blocked-product crossover, cold allocation costs and wider ratios; continue fused Goldilocks, sparse/truncated FFT and Montgomery experiments in ranked order (context: docs/benchmarks/storage-aware/RESEARCH.md).
 
 - [ ] Profile remaining non-FFT multiplication/powm regressions; the initial FFT overhead is partly recovered by 119dba3 (evidence: RESULTS.md).
-- [x] Evaluate recursive Toom-3 and BLIP FFT stage fusion with GMP oracles and repeated benchmarks (research: docs/OPTIMIZATION_RESEARCH.md). (done 2026-09-27 20:09 EDT)
 - [ ] Reconcile legacy task statuses against code and Git history before selecting further work; retain unresolved tasks and dependencies (context: docs/plan_context/legacy-roadmap.md).
 - [ ] Continue GMP performance work across operand sizes; measure FFT viability, recursive HGCD dependencies, division thresholds and small-divisor paths; hand assembly remains deferred per the May 18 record (context: docs/plan_context/legacy-roadmap.md).
-- [ ] Investigate the pre-existing ReleaseSafe self-copy panic in Mp.addU64(&self, 0), observed while preparing the residue encoding oracle.
-- [ ] Reconcile benchmark aggregation follow-ups with the recorded completion of ./bm --stable N (context: docs/plan_context/legacy-roadmap.md).
 - [ ] Resolve strict unsigned-BLIP interoperability and conditional binary-base GMP float cross-validation requirements before implementation (context: docs/plan_context/legacy-roadmap.md).
 - [ ] Choose MIT or Apache-2.0 before tagging a release.

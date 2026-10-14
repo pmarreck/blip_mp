@@ -18,8 +18,8 @@ run() {
 	fi
 }
 
-# Unit tests — Zig core, run via Nix sandbox for determinism.
-run "zig unit tests (nix)" nix build ".#checks.$(nix eval --raw --impure --expr 'builtins.currentSystem').test" --print-build-logs
+# Unit tests — Zig core with runtime safety checks in the Nix sandbox.
+run "zig unit tests (ReleaseSafe, nix)" nix build ".#checks.$(nix eval --raw --impure --expr 'builtins.currentSystem').test" --print-build-logs
 
 # Cross-validation against GMP — every blip_mp result must equal GMP's.
 # Builds the cross_check exe (linked against GMP) and runs random

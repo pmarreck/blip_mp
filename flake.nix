@@ -101,7 +101,8 @@
 						dontFixup = true;
 						buildPhase = ''
 							${commonBuild}
-							timeout 600 zig build test || { echo "Tests failed"; exit 1; }
+							# Keep overlap and bounds checks in the complete correctness suite.
+							timeout 600 zig build test -Doptimize=ReleaseSafe || { echo "Tests failed"; exit 1; }
 						'';
 						installPhase = ''
 							mkdir -p $out

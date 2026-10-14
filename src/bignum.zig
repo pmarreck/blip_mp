@@ -396,7 +396,8 @@ pub const Mp = struct {
 	/// caller's c1/c2 cached-constant churn rather than a fused inner loop.)
 	pub fn addU64(r: *Mp, a: *const Mp, c: u64) ArithError!void {
 		if (c == 0) {
-			try r.setBytes(a.bytes());
+			// In-place identity must not pass overlapping bytes to setBytes.
+			if (r != a) try r.setBytes(a.bytes());
 			return;
 		}
 		if (a.inline_len <= 9) {
@@ -4936,6 +4937,41 @@ test "mulU64: tier-3 magnitude × small scalar matches Mp.mul" {
 			}
 			try ref.mul(&a, &c_mp);
 			try testing.expectEqualSlices(u8, ref.bytes(), r.bytes());
+		}
+	}
+}
+
+test "addU64: adding zero in place preserves the value" {
+	var value = Mp.init(testing.allocator);
+	defer value.deinit();
+	for ([_]i64{ 42, 0, -1, 127, 128, -128, std.math.minInt(i64), std.math.maxInt(i64) }) |expected| {
+		try value.setI64(expected);
+		try value.addU64(&value, 0);
+		try testing.expectEqual(expected, try value.getI64());
+		try value.addU64(&value, 0);
+		try testing.expectEqual(expected, try value.getI64());
+	}
+}
+
+test "addU64: adding zero in place preserves large signed values" {
+	const allocator = testing.allocator;
+	for ([_]usize{ 16, 24, 32, 64 }) |size| {
+		const encoded = try allocator.alloc(u8, size + 16);
+		defer allocator.free(encoded);
+		const header = try tier3.writeHeader(encoded, size);
+		for ([_]u8{ 0x11, 0xee }) |byte| {
+			@memset(encoded[header..][0..size], byte);
+			var value = Mp.init(allocator);
+			defer value.deinit();
+			var copy = Mp.init(allocator);
+			defer copy.deinit();
+			try value.setBytes(encoded[0 .. header + size]);
+			try copy.addU64(&value, 0);
+			try testing.expectEqualSlices(u8, encoded[0 .. header + size], copy.bytes());
+			try value.addU64(&value, 0);
+			try testing.expectEqualSlices(u8, encoded[0 .. header + size], value.bytes());
+			try value.addU64(&value, 0);
+			try testing.expectEqualSlices(u8, encoded[0 .. header + size], value.bytes());
 		}
 	}
 }
