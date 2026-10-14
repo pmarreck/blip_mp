@@ -18,7 +18,7 @@ to GMP, leaving three winning buckets in that final comparison.
 
 Measured September 27, 2026 on an AMD Ryzen Threadripper 3990X (Zen 2,
 64 cores / 128 threads), Linux 6.18.43 x86_64, Zig 0.16.0 ReleaseFast,
-GMP 6.3.0. The arithmetic revision is `8a7c515`; the baseline is `a6d0d3e`.
+GMP 6.3.0. The arithmetic revision is `3cf3388`; the baseline is `95a9c3f`.
 
 BLIP wins the four small-addition buckets in this run: 4.57–4.81 ns versus
 5.81–5.95 ns for ordinary GMP, about 1.21–1.30× faster. Ordinary GMP wins the

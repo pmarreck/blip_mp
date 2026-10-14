@@ -7,7 +7,7 @@ payload encoding. Five interleaved runs measure a 22.5–43.4% reduction in
 complete FFT product time across twenty size/pattern combinations, including
 zero and sparse inputs. Keeping register arithmetic shifted saves another
 2.1–4.1% relative to shifting at each storage boundary. Baseline: the five-byte
-implementation at `cc268f4`; host: Threadripper 3990X, Zig 0.16.0 ReleaseFast.
+implementation at `eef46a4`; host: Threadripper 3990X, Zig 0.16.0 ReleaseFast.
 [CPU/wall medians, ranges, raw samples and validation](docs/benchmarks/shifted-residues/README.md).
 These are forced-backend BLIP comparisons; normal dispatch remains unchanged.
 
@@ -26,7 +26,7 @@ The earlier tables below are retained as historical measurements.
 
 ## September 27, 2026: byte scratch and canonical BLIP FFT residues
 
-Arithmetic revision: `8a7c515`; baseline: `a6d0d3e`. Linux x86_64,
+Arithmetic revision: `3cf3388`; baseline: `95a9c3f`. Linux x86_64,
 Threadripper 3990X (Zen 2), Zig 0.16.0 ReleaseFast, GMP 6.3.0. Three-run
 medians preserve four small-addition wins over ordinary GMP (1.21–1.30×);
 GMP wins the other 67 matched buckets. BLIP wins 46/71 against GMP-noasm,

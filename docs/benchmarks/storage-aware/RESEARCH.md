@@ -1,6 +1,6 @@
 # First multiplication research experiments
 
-These follow the canonical-residue FFT changes in `119dba3`. Same Linux
+These follow the canonical-residue FFT changes in `a80073f`. Same Linux
 Threadripper host and Zig 0.16.0 ReleaseFast configuration as the
 [FFT experiment](README.md). Three alternating runs compare corrected flat
 Toom-3, recursive Toom-3, and recursion plus blocked asymmetric dispatch.

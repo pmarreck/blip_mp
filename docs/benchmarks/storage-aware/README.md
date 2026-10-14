@@ -1,7 +1,7 @@
 # Storage-aware FFT experiment, September 27, 2026
 
 Host: AMD Threadripper 3990X, Linux x86_64, Zig 0.16.0 ReleaseFast.
-Baseline arithmetic: `505426a` (same arithmetic as `8a7c515`). The added
+Baseline arithmetic: `920be37` (same arithmetic as `3cf3388`). The added
 `tests/benchmark/storage_aware.zig` measures identical seeded operands with
 setup outside timing. CPU samples use process CPU time; wall uses monotonic
 time. CPU-clock overhead is included, particularly visible for tiny products.

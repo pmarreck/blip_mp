@@ -1,6 +1,7 @@
 # Dirtree: Stateful directory trees in the CLI for humans and LLMs. https://github.com/pmarreck/dirtree
 ver=1.2
 annotate=[
+	.mechatron-prime/targets = Exact-commit native Linux CI build and ReleaseSafe test targets
 	INTENT.md = Project purpose, scope and evidence required for success
 	TERMINOLOGY.md = BLIP arithmetic and byte-storage terminology
 	docs/BLIP_ALGORITHM_TYPES.md = Sibling BLIP sentinel and contextual integer type investigation

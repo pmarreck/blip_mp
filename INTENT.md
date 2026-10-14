@@ -121,7 +121,7 @@ This document consolidates the original overview and the decisions recorded in
 the [legacy roadmap](docs/plan_context/legacy-roadmap.md), especially M3, M14,
 M15, M16 and the May 17–18 performance notes. It establishes no new claim that
 those goals have been met. The original overview is recoverable from Git at
-`2c75e42:PROJECT_OVERVIEW.md`.
+`d3b9102:PROJECT_OVERVIEW.md`.
 
 [PLAN.md](PLAN.md) holds current work, [TERMINOLOGY.md](TERMINOLOGY.md) defines
 project terms, and [CODE_MINIMAP.md](CODE_MINIMAP.md) maps the implementation.

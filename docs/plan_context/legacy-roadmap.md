@@ -1,6 +1,6 @@
 # Historical roadmap through May 18, 2026
 
-Preserved from `2c75e42:PLAN.md` during the intent migration. This record contains
+Preserved from `d3b9102:PLAN.md` during the intent migration. This record contains
 stale checkboxes, superseded proposals and historical CI references. Current
 work lives in [PLAN.md](../../PLAN.md); purpose and scope live in
 [INTENT.md](../../INTENT.md). File paths in the original text are relative to
@@ -169,9 +169,9 @@ Closed FFT-vs-Toom-3 gap from 1.93× to 1.15×. Substantial but not flipped.
 - [x] **M6-4-E.1** Caller-supplied scratch via thread-local FftScratch cache in tier3.zig. mulMagnitudesWithScratch shipped. (2026-05-02 EST)
 - [x] **M6-4-E.2** Stockham wired into production via mulMagnitudesWithScratch. **32K-bit Mp.mul: 135K → 128K ns. FFT-vs-Toom-3 gap 1.15× → 1.07-1.08×.** Honest finding: libc malloc on M4 costs ~700-900 ns per call, not the projected 1-2K ns; the rest of the win came from finally uncovering Stockham's per-pass +9% × 3 passes. (2026-05-02 EST)
 - [~] **M6-4-E.3** Hand-scheduled aarch64 inline asm for the butterfly inner loop. **Status (2026-05-14): PARTIAL.** Three attempts logged on `yolo`:
-  - Attempt A (`8af848af`): Stockham+Mont hybrid — NEGATIVE, 7-10% slower (Mont's pure-NEON reduction crowds the same pipes as add/sub).
-  - Attempt B (`c8b7f00f`): nttStockhamVecU4 manual unroll-by-2 — **POSITIVE, real ~6% improvement (32360 → ~31285 ns at N=8192)**. Wired into mulMagnitudes' production path. Closes ~half the original 13-15% target.
-  - Attempt C (`f45fd62a`): nttStockhamVecU8 unroll-by-4 — NEGATIVE, no improvement (hits L1 LSU bandwidth ceiling at U4 already; more butterflies in flight don't help when compute isn't the bottleneck).
+  - Attempt A (`0d264c59`): Stockham+Mont hybrid — NEGATIVE, 7-10% slower (Mont's pure-NEON reduction crowds the same pipes as add/sub).
+  - Attempt B (`10f3132b`): nttStockhamVecU4 manual unroll-by-2 — **POSITIVE, real ~6% improvement (32360 → ~31285 ns at N=8192)**. Wired into mulMagnitudes' production path. Closes ~half the original 13-15% target.
+  - Attempt C (`e52ff45e`): nttStockhamVecU8 unroll-by-4 — NEGATIVE, no improvement (hits L1 LSU bandwidth ceiling at U4 already; more butterflies in flight don't help when compute isn't the bottleneck).
   Bandwidth-bound finding: ~80B per butterfly (3 NEON loads + 2 NEON stores × 16B) × 4 butterflies = 20 LSU ops/iter, saturating the M-series LSU. Real inline asm probably ≤ 2-3% upside given this ceiling. Real next-step paths: (a) cache-tile blocking to reduce L1 churn, (b) stp-paired stores via output reordering, (c) hand asm if all else fails. None small.
 - [ ] **M6-4-E.4** OR accept Toom-3 as production winner in supported range. FFT primitives essential when extending past Toom-3's natural crossover (~512K-bit+).
 
@@ -255,7 +255,7 @@ Each item: (a) Mp method in `src/bignum.zig`, (b) C FFI `export fn` + header dec
 
 - [x] **M12-A1 — Bitwise** (2026-05-04): `Mp.bitwiseAnd / bitwiseOr / bitwiseXor / bitwiseNot / shiftLeft / shiftRight`. GMP-compatible two's-complement on negatives. Pure byte loops.
 - [x] **M12-A2 — Sign / abs / fits** (2026-05-04): `Mp.neg`, `Mp.abs`, `Mp.fitsI64`, `Mp.fitsU64`, `Mp.fitsI32`, `Mp.fitsU32`. Boundary values tested.
-- [x] **M12-A3 — String I/O hex+decimal** — `setStr`/`toString` for bases 2/8/10/16 live in `src/string_io.zig`. Decimal output is sub-quadratic (recursive split-and-conquer formatting, commit `ac52490`).
+- [x] **M12-A3 — String I/O hex+decimal** — `setStr`/`toString` for bases 2/8/10/16 live in `src/string_io.zig`. Decimal output is sub-quadratic (recursive split-and-conquer formatting, commit `1a2e138`).
 - [x] **M12-A4 — GCD / LCM** (2026-05-04): `Mp.gcd(a, b)` + `Mp.lcm(a, b)` via classical EEA over `Mp.divMod`. In `src/gcd.zig`. GMP cross-check at {64, 256, 1024, 2048}-bit pairs.
 - [x] **M12-A5 — Random** (2026-05-04): `setRandomBits` + `setRandomBelow` (uniform in [0, n)) via `std.Random` interface.
 - [x] **M12-A6 — Misc small** (2026-05-04): `Mp.popcount`, `Mp.scan0`, `Mp.scan1`. GMP semantics on negatives (popcount returns `usize.max`).
@@ -400,11 +400,11 @@ Going forward, **"limb"** is used ONLY for genuinely stored fixed-width `[]u64` 
 
 ## Milestone 16 — `bp` CLI: Forth-style RPN exact-arithmetic calculator (DONE 2026-05-15/16)
 
-- [x] **M16-1** — RPN exact-arithmetic CLI dogfooding the C FFI (2026-05-15, commit `cb52f64`). Stack-based; consumes `Mp` values via the public C surface; first end-user surface that exercises the FFI as designed.
-- [x] **M16-2** — Forth-style `:` user-word definitions (threaded code) (2026-05-15, commit `9460f6b`).
-- [x] **M16-3** — argv whitespace tokenization (UX fix: no more escaping) (2026-05-15, commit `7d89200`).
-- [x] **M16-4** — Three input forms + heredoc + redefinition demo (2026-05-15, commit `333e395`).
-- [x] **M16-5** — Linux portability: `_POSIX_C_SOURCE` for `strdup()` (2026-05-16, commit `27ff5b7`).
+- [x] **M16-1** — RPN exact-arithmetic CLI dogfooding the C FFI (2026-05-15, commit `613bd8f`). Stack-based; consumes `Mp` values via the public C surface; first end-user surface that exercises the FFI as designed.
+- [x] **M16-2** — Forth-style `:` user-word definitions (threaded code) (2026-05-15, commit `b2246b0`).
+- [x] **M16-3** — argv whitespace tokenization (UX fix: no more escaping) (2026-05-15, commit `30d72fa`).
+- [x] **M16-4** — Three input forms + heredoc + redefinition demo (2026-05-15, commit `c934c59`).
+- [x] **M16-5** — Linux portability: `_POSIX_C_SOURCE` for `strdup()` (2026-05-16, commit `a111f22`).
 
 The `bp` tool serves the architectural mandate (CLI dogfoods the C FFI, not direct Zig import). It's a Forth-style stack calculator that lets users do exact arbitrary-precision arithmetic from the shell.
 

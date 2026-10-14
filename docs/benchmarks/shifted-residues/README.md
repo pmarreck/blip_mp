@@ -1,7 +1,7 @@
 # One canonical BLIP length through modular representatives
 
 Measured September 27, 2026, Linux 6.18.43 x86_64, AMD Threadripper 3990X,
-Zig 0.16.0 ReleaseFast. Baseline source: `cc268f4`, already using five-byte
+Zig 0.16.0 ReleaseFast. Baseline source: `eef46a4`, already using five-byte
 small-field slots and fused radix-4 stages. No BLIP specification change.
 
 BDFN (Benevolent Dictator For Now) proposed restricting the lengths available within an algorithm so that
