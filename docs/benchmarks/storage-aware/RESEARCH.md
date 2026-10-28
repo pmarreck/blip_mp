@@ -217,3 +217,31 @@ Correctness and allocation-lifetime controls passed; separating the small
 allocation cost from process modes requires a contemporaneous paired experiment.
 No production dispatch or claim of improved GMP-relative performance follows
 from this campaign.
+
+## Register-sized tail candidate
+
+`mulBlockedShortTail` retains the same byte-buffer workspace and balanced full
+blocks as `mulBlocked`. For a final block of one through eight bytes, with a
+shorter operand of at least eight bytes, it reads one temporary `u64` factor
+and calls `mulMagnitudeByU64`. Only the returned significant product bytes are
+added to the result. A zero factor therefore adds no stale workspace bytes.
+Larger tails keep the padded balanced path. Production dispatch still uses
+the original padded implementation while this candidate is measured.
+
+The focused ReleaseSafe controls compare dense random, all-255 and zero-tail
+inputs in both operand orders, with exact output/scratch canaries, across shorter
+lengths 7, 8, 128 and 2048 and tails one through nine bytes. The existing GMP
+probe also checks the candidate. Both controls failed against an empty candidate
+before passing with the implementation. This replaces an unnecessary balanced
+product with a linear operation; SIMD changes are deferred while testing that
+algorithmic reduction.
+
+Run `./bm --verified-multiplication --config profiling-short-tail.json` to compare
+`blocked` and `blocked_tail` in the same optimized executable. The one-byte and
+eight-byte tails exercise the candidate; the nine-byte tail controls its unchanged
+fallback. Each uses six shorter lengths, five processes and five samples in
+separate 1/12-CPU affinity cohorts. No baseline is approved by running it.
+
+The complete native suite and production build passed in 125 seconds combined,
+with 124 seconds of mixed Nix preparation/check time. All-system evaluation
+passed. The candidate remains separate from production selection until measured.

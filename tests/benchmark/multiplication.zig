@@ -52,8 +52,8 @@ pub fn main(init: std.process.Init) !void {
 	try std.Io.File.stdout().writeStreamingAll(init.io, "\n");
 }
 
-pub const Kind = enum { schoolbook, blocked, mp_warm, mp_cold };
-pub const Shape = enum { below, two, above, four, eight, sixteen };
+pub const Kind = enum { schoolbook, blocked, mp_warm, mp_cold, blocked_tail };
+pub const Shape = enum { below, two, above, four, eight, sixteen, tail8, tail9 };
 pub const Options = struct {
 	kind: Kind,
 	shape: Shape,
@@ -98,6 +98,7 @@ pub const Fixture = struct {
 		const longer = switch (shape) {
 			.below => 2 * shorter - 1, .two => 2 * shorter, .above => 2 * shorter + 1,
 			.four => 4 * shorter, .eight => 8 * shorter, .sixteen => 16 * shorter,
+			.tail8 => 2 * shorter + 8, .tail9 => 2 * shorter + 9,
 		};
 		var arena = std.heap.ArenaAllocator.init(parent);
 		errdefer arena.deinit();
@@ -150,9 +151,13 @@ pub const Fixture = struct {
 	}
 	pub fn run(self: *Fixture, kind: Kind) !void {
 		switch (kind) {
-			.schoolbook, .blocked => {
-				if (kind == .schoolbook) blip.tier3.mulMagnitudes(self.a, self.b, self.out)
-				else blip.tier3.mulBlocked(self.a, self.b, self.out, self.scratch);
+			.schoolbook, .blocked, .blocked_tail => {
+				switch (kind) {
+					.schoolbook => blip.tier3.mulMagnitudes(self.a, self.b, self.out),
+					.blocked => blip.tier3.mulBlocked(self.a, self.b, self.out, self.scratch),
+					.blocked_tail => blip.tier3.mulBlockedShortTail(self.a, self.b, self.out, self.scratch),
+					else => unreachable,
+				}
 				if (!std.mem.eql(u8, std.mem.trimEnd(u8, self.out, &.{0}), self.expected)) return error.IncorrectWork;
 			},
 			.mp_warm, .mp_cold => {
@@ -186,7 +191,7 @@ test "multiplication probe classifies algorithms shapes and bounded work" {
 }
 
 test "multiplication probe verifies every shape and dispatch boundary against GMP" {
-	for (std.enums.values(Shape), [_]usize{ 127, 128, 129, 256, 512, 1024 }) |shape, longer| {
+	for (std.enums.values(Shape), [_]usize{ 127, 128, 129, 256, 512, 1024, 136, 137 }) |shape, longer| {
 		var fixture = try Fixture.init(std.testing.allocator, shape, 64);
 		defer fixture.deinit();
 		try std.testing.expectEqual(longer, fixture.a.len);

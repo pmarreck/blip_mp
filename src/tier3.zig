@@ -3613,6 +3613,15 @@ pub fn blockedScratchNeed(short_len: usize) usize {
 /// Multiply unequal magnitudes in balanced blocks; a and b may be reversed.
 /// Inputs, output and scratch must not overlap. Output needs a.len+b.len bytes.
 pub fn mulBlocked(a: []const u8, b: []const u8, out: []u8, scratch: []u8) void {
+	mulBlockedImpl(false, a, b, out, scratch);
+}
+
+/// Experimental blocked product with a native-register-sized final block.
+pub fn mulBlockedShortTail(a: []const u8, b: []const u8, out: []u8, scratch: []u8) void {
+	mulBlockedImpl(true, a, b, out, scratch);
+}
+
+fn mulBlockedImpl(comptime short_tail: bool, a: []const u8, b: []const u8, out: []u8, scratch: []u8) void {
 	const longer = if (a.len >= b.len) a else b;
 	const shorter = if (a.len >= b.len) b else a;
 	const n = shorter.len;
@@ -3627,6 +3636,13 @@ pub fn mulBlocked(a: []const u8, b: []const u8, out: []u8, scratch: []u8) void {
 	while (offset < longer.len) : (offset += n) {
 		const count = @min(n, longer.len - offset);
 		const block = longer[offset..][0..count];
+		if (short_tail and count < n and count <= @sizeOf(u64) and n >= @sizeOf(u64)) {
+			var factor: u64 = 0;
+			for (block, 0..) |byte, index| factor |= @as(u64, byte) << @as(u6, @intCast(8 * index));
+			const length = mulMagnitudeByU64(shorter, n, factor, product);
+			addUnsignedInPlace(out[offset .. a.len + b.len], product[0..length]);
+			continue;
+		}
 		const balanced = if (count == n) block else blk: {
 			@memcpy(padded[0..count], block);
 			@memset(padded[count..], 0);
@@ -6332,6 +6348,40 @@ test "blocked unequal products match schoolbook and preserve output bounds" {
 			}
 		}
 	}
+}
+
+test "blocked short tails preserve products and bounds across native-width edges" {
+	const allocator = std.testing.allocator;
+	for ([_]usize{ 7, 8, 128, 2048 }) |shorter| for (1..10) |tail| {
+		const a = try allocator.alloc(u8, 2 * shorter + tail);
+		defer allocator.free(a);
+		const b = try allocator.alloc(u8, shorter);
+		defer allocator.free(b);
+		const expected = try allocator.alloc(u8, a.len + b.len);
+		defer allocator.free(expected);
+		const actual = try allocator.alloc(u8, expected.len + 2);
+		defer allocator.free(actual);
+		const work = try allocator.alloc(u8, blockedScratchNeed(shorter) + 2);
+		defer allocator.free(work);
+		var random = std.Random.DefaultPrng.init(0x5A07_7A11 + a.len);
+		for (0..3) |pattern| {
+			random.random().bytes(a);
+			random.random().bytes(b);
+			if (pattern == 1) { @memset(a, 255); @memset(b, 255); }
+			if (pattern == 2) @memset(a[2 * shorter ..], 0);
+			mulMagnitudes(a, b, expected);
+			for (0..2) |reverse| {
+				@memset(actual, 0xa5);
+				@memset(work, 0xa5);
+				mulBlockedShortTail(if (reverse == 0) a else b, if (reverse == 0) b else a, actual[1..][0..expected.len], work[1 .. work.len - 1]);
+				try std.testing.expectEqualSlices(u8, expected, actual[1..][0..expected.len]);
+				try std.testing.expectEqual(@as(u8, 0xa5), actual[0]);
+				try std.testing.expectEqual(@as(u8, 0xa5), actual[actual.len - 1]);
+				try std.testing.expectEqual(@as(u8, 0xa5), work[0]);
+				try std.testing.expectEqual(@as(u8, 0xa5), work[work.len - 1]);
+			}
+		}
+	};
 }
 
 test "blocked dispatch classifies operand shape sets" {

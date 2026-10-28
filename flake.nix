@@ -313,7 +313,7 @@
 						cmp expected argv
 						test ! -s stdout
 						test ! -s stderr
-						for kind in schoolbook blocked mp_warm mp_cold; do
+						for kind in schoolbook blocked mp_warm mp_cold blocked_tail; do
 							${self.packages.${system}.multiplication-probe}/bin/blip-mp-multiplication-probe "$kind" two 64,128 2 > output.json 2> stderr
 							test ! -s stderr
 							jq -e --arg kind "$kind" '
