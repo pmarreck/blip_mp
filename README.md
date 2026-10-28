@@ -92,6 +92,9 @@ Its first measurements saved 15–22% CPU time just above sampled padding jumps
 but lost elsewhere, so production continues to use fusion.
 `./bm --verified-hybrid` tests whether fusing complete subtrees recovers those
 losses while retaining truncation's padding-boundary gains.
+Its first paired medians saved about 15% at 100000 bytes and 34–40% just above
+padding jumps; nearly full transforms still lost. A crossover sweep remains
+necessary, and the one-CPU cohort remained inconclusive after its allowed retry.
 
 Requires [Nix](https://nixos.org/) (handles the Zig 0.16.0 toolchain and GMP build for benchmarks).
 

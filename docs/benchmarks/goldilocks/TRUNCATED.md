@@ -171,3 +171,45 @@ The full fused forward/inverse functions retained their 1946/2178-byte sizes.
 Forward disassembly differed in the operands of a register move/multiply pair,
 so this is not a claim of identical machine bytes. SIMD work remains deferred
 while the combined scalar layout is measured.
+
+## Combined-layout result and crossover follow-up
+
+Campaign `blip-mp-hybrid-20261028T063128Z` measured commit
+`a8d5e953847c3f9410e8ac682320a208b0992daa` with the same host/toolchain.
+Its source hash stayed
+`100bcff3a0fc2245f01db54c86f3213c97fbf62c083a8ef823a46665acf39dde`.
+All 15 processes verified their products. The one-CPU cohort remained
+`INCONCLUSIVE` for sample variation after its allowed retry; the 12-CPU cohort
+was `UNBASELINED` after one attempt. Neither is a passed historical gate.
+
+| Bytes per operand | Combined/full-fused CPU ratio, 1 CPU | Combined/full-fused CPU ratio, 12 CPUs |
+|---:|---:|---:|
+| 1024 | 1.079 | 1.080 |
+| 1025 | 0.661 | 0.662 |
+| 4096 | 1.058 | 1.058 |
+| 4097 | 0.635 | 0.634 |
+| 16384 | 1.048 | 1.051 |
+| 16385 | 0.620 | 0.617 |
+| 65536 | 1.044 | 1.042 |
+| 65537 | 0.607 | 0.603 |
+| 98305 | 0.837 | 0.839 |
+| 100000 | 0.848 | 0.845 |
+| 131071 | 1.020 | 1.020 |
+| 131072 | 1.024 | 1.019 |
+| 131073 | 0.602 | 0.604 |
+
+These are upper medians of the final five processes' 30 paired sample ratios.
+The [complete summary](hybrid-summary.jsonl) retains all 16 sizes, component
+CPU/wall means and process ratios. At 100000 bytes, every process mean favored
+the combined layout, including the earlier attempt: ratios ranged from 0.795
+to 0.942. At 131073 bytes that range was 0.570–0.625. Nearly full transforms
+still lost at the median. This supports testing a fill-ratio dispatch rather
+than selecting the combined layout for every size.
+
+The next sweep uses `profiling-hybrid-boundary.json` through
+`./bm --verified-hybrid --config profiling-hybrid-boundary.json`. It samples
+three-quarter through nearly-full transforms at two lengths, including both
+sides of seven-eighths occupancy. That threshold is a hypothesis to test, not
+an accepted crossover. The separate boundary cases use 120-second per-process
+deadlines for their larger operands. The original inconclusive result stays
+in history; the new sweep answers a different dispatch question.
