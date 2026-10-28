@@ -2046,6 +2046,76 @@ remainder dependency limits straightforward SIMD across chunks of one division;
 batch throughput is a separate workload. No small-divisor implementation change
 has been made in this report.
 
+### Variable small-divisor probe qualification
+
+`single-variable` compares the current `divModSingleU64` byte kernel with
+ordinary GMP on identical positive values. The divisor has 1, 2, 4 or 8
+magnitude bytes and varies across 32 deterministic fixtures, including all
+eight top-byte normalization shifts. Dividend lengths are 8/9, 16/17, 64/65,
+256/257, 1,024/1,025 and 4,096/4,097 bytes. The adjacent lengths expose the
+cost of a high partial chunk. This is an unsigned kernel comparison, not a
+signed public-API result.
+
+The method is `division-single-variable-paired-v1`.
+`profiling-division-single-variable.json` declares five fresh processes for
+each divisor width in both affinity cohorts. Each size gets 64 warmup calls
+and six ABBA/BAAB samples. Fixed 512 repeats per fixture give 16,384 verified
+calls per method/sample at every size, keeping these linear-time workloads
+longer than the tiny recursive-probe batches. Strict clock-error handling and
+the shared pairing/normalization controls remain in use.
+
+The byte kernel includes copying the prepared dividend into its reusable
+in-place output, decoding the variable divisor, and comparing every quotient
+byte and the full remainder. GMP uses preconverted `mpz` inputs, reused result
+objects and complete `mpz_cmp` checks. Those adapter costs differ and remain
+included. Setup, reference generation and cold allocation are outside timing.
+
+The width-pair classifier and three fixture/oracle/ownership tests failed
+against their placeholders. Native `u128` arithmetic checks GMP references
+at 8- and 16-byte dividends, and all accepted payload lengths exercise the
+real kernel, GMP, output canaries and separate quotient/remainder-reference corruption.
+Allocation-failure injection uses 257-byte values to exercise heap-backed
+integer ownership. The CLI check first rejected the missing mode, then passed
+schema, component, work-count and sample checks for every divisor width at
+8, 9, 64 and 65 dividend bytes. No arithmetic dispatch changes accompany this
+probe.
+
+The complete suite passed in 91 seconds of mixed Nix preparation/check time;
+the unit/C-API build phase took 88 seconds including compilation and execution.
+The production build and all-system evaluation passed. This establishes no
+execution-only test-latency result or new arithmetic speedup.
+
+A later complete run, after adding separate remainder-reference corruption,
+failed in the legacy CLI check without diagnostics. A bounded reproduction
+using that exact executable failed on attempt 55 in `single_chunk` with
+`ClockFailed`. Its smoke samples requested only two operations. This establishes
+a legacy failure mode; the original empty log cannot prove the same cause.
+The smoke check now requests 256 operations per sample, asserts that declared
+count and reports failed commands with captured stderr. An injected failure
+checks the diagnostic text and exit status. Strict clock errors and the actual
+benchmark configurations remain unchanged.
+
+All 3,000 invocations in the bounded legacy-mode reproduction passed with
+256 operations per sample. The final complete suite passed in 90 seconds of
+mixed Nix preparation/check time, including an 87-second unit/C-API build
+phase. The production build and all-system evaluation passed. These checks
+qualify the mitigation without identifying the clock's underlying cause.
+
+### Build feedback follow-up
+
+Repeated full checks take roughly 90–120 seconds of mixed preparation and
+execution. The package derivations currently use `src = self`, so documentation
+and benchmark-data commits change their source inputs. The default development
+shell also depends on every performance probe. This makes an otherwise unchanged
+probe enter the build graph again after a report commit. Compilation and actual
+test execution still need separate measurement.
+
+After the current arithmetic experiment, narrow reproducible source closures
+against each artifact's actual inputs and verify that all required tests remain
+reachable. Preserve Nix as the canonical build path and use disposable fixture
+trees for any source-boundary tests. Do not substitute cached verdicts for fresh
+test-execution measurements.
+
 ### Tiny division clock follow-up
 
 The first complete guarded-padding suite failed on a non-advancing process CPU

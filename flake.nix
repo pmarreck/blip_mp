@@ -28,10 +28,9 @@
 				# The core blip_mp library has no external dependencies.
 				buildInputs = [ pkgs.gmp ];
 
-				# A second GMP build with hand-tuned assembly DISABLED, so the
-				# inner mpn_* loops use only the C reference code. This isolates
-				# the BLIP-vs-limb-storage question from Zig-vs-aarch64-asm.
-				# blip_mp vs gmp-noasm = controlled storage-paradigm comparison.
+				# A second GMP build disables hand-tuned assembly as a control.
+				# Algorithms, allocation and compilers still differ, so this
+				# comparison does not isolate the storage representation's cost.
 				# On x86_64, GMP's default 'fat build' (runtime CPU dispatch
 				# across Intel/AMD micro-architectures) is incompatible with
 				# --disable-assembly — configure errors with "when doing a fat
@@ -307,6 +306,17 @@
 					division-probe-cli = pkgs.runCommand "${pname}-division-probe-cli" {
 						nativeBuildInputs = [ pkgs.jq ];
 					} ''
+						trap 'status=$?; printf "division CLI check failed: %s\n" "$BASH_COMMAND" >&2; if test -f stderr; then cat stderr >&2; fi; exit "$status"' ERR
+						trap -p ERR > trap-control
+						cat >> trap-control <<-'CONTROL'
+						printf 'injected diagnostic\n' > stderr
+						false
+						CONTROL
+						if bash trap-control > trap.stdout 2> trap.stderr; then exit 1; else trap_status=$?; fi
+						test "$trap_status" -eq 1
+						test ! -s trap.stdout
+						printf 'division CLI check failed: false\ninjected diagnostic\n' > trap.expected
+						cmp trap.expected trap.stderr
 						mkdir bin
 						cat > bin/nix <<-'STUB'
 						#!${pkgs.bash}/bin/bash
@@ -320,12 +330,12 @@
 						test ! -s stdout
 						test ! -s stderr
 						for kind in byte_2048 chunk_2048 chunk_4096 chunk_8192 single_byte single_chunk; do
-							${self.packages.${system}.division-probe}/bin/blip-mp-division-probe "$kind" 2 > output.json 2> stderr
+							${self.packages.${system}.division-probe}/bin/blip-mp-division-probe "$kind" 256 > output.json 2> stderr
 							test ! -s stderr
 							jq -e --arg kind "$kind" '
 								.schema == "performance-measurement/v1" and .correct == true and
 								.build_mode == "ReleaseFast" and .fixture == $kind and
-								(.rows|length) == 1 and .rows[0].size == 2 and
+								(.rows|length) == 1 and .rows[0].size == 256 and
 								(.rows[0].samples.cpu_ns|length) == 5 and (.rows[0].samples.wall_ns|length) == 5 and
 								all(.rows[0].samples.cpu_ns[], .rows[0].samples.wall_ns[]; . > 0)
 							' output.json > /dev/null
@@ -371,6 +381,26 @@
 									$row.samples.cpu_ns[$i] == ([$row.components[].cpu_ns[$i]]|add/4) and
 									$row.samples.wall_ns[$i] == ([$row.components[].wall_ns[$i]]|add/4)))
 						' competitors.json > /dev/null
+						done
+						for divisor in 1 2 4 8; do
+							if ! ${self.packages.${system}.division-probe}/bin/blip-mp-division-probe single-variable "$divisor" 8,9,64,65 > single.json 2> stderr; then
+								echo "variable single-divisor probe failed: $divisor" >&2
+								cat stderr >&2
+								exit 1
+							fi
+							test ! -s stderr
+							jq -e --argjson divisor "$divisor" '
+								.schema=="performance-measurement/v1" and .correct==true and .build_mode=="ReleaseFast" and
+								.method=="division-single-variable-paired-v1" and .divisor_bytes==$divisor and
+								.divisor_min_bits==$divisor*8-7 and .divisor_max_bits==$divisor*8 and
+								(.gmp_version|length)>0 and [.rows[].size]==[8,9,64,65] and
+								all(.rows[]; . as $row |
+									.fixture_count==32 and .iterations==16384 and .warmup_cases==64 and
+									[.components[].method]==["current","gmp"] and
+									all(.samples[]; length==6 and all(.[]; .>0)) and
+									all(.components[]; (.cpu_ns|length)==6 and (.wall_ns|length)==6 and all(.cpu_ns[],.wall_ns[];.>0)) and
+									all(range(6); . as $i | (($row.samples.cpu_ns[$i]-([$row.components[].cpu_ns[$i]]|add/2))|fabs)<0.001 and (($row.samples.wall_ns[$i]-([$row.components[].wall_ns[$i]]|add/2))|fabs)<0.001))
+							' single.json > /dev/null
 						done
 						for comparison in public leading short short-public carry selected-public guarded-signed; do
 						for geometry in short_quotient one_chunk_limit two_chunk_start balanced long_dividend; do
