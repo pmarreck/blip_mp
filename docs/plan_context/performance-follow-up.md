@@ -130,3 +130,82 @@ separately from compilation. In addition to the five division timing tests,
 `bignum.zig` has an inverse-modulo timing test with correctness assertions.
 Preserve those assertions when moving its repeated timing work out of the unit
 suite. Precise per-test execution attribution remains outstanding.
+
+### Interleaved hardware-counter diagnostic
+
+`profiling-linux-counters.json` defines the next diagnostic using the same
+verified additions, five fresh processes, 250,000 warmup additions per fixture
+and 5,000,000 additions per sample. Each process prepares all three fixtures,
+then measures six rounds. The order rotates through mixed, immediate and
+promoted, giving every fixture two visits to each position. This reduces the
+confounding from running whole fixture campaigns consecutively.
+
+The Linux adapter opens grouped hardware CPU-cycle and retired-instruction
+events for the calling thread, excluding kernel and hypervisor execution. It
+matches returned event IDs, subtracts cumulative snapshots between samples and
+rejects empty, malformed or multiplexed observations. It never scales counts
+or substitutes zero after a failed syscall. CPU duration still uses the process
+clock, while counters cover the calling thread only. The counter interval also
+includes clock reads and the user-space counter-control boundary; no overhead
+is subtracted. Enabled/running durations are retained as raw nanoseconds.
+The [Linux perf API](https://man7.org/linux/man-pages/man2/perf_event_open.2.html)
+defines these scopes and group-read fields.
+
+This is method `interleaved-add-counters-v1`, a separate measurement definition
+from the first campaign. The shared engine compares only the mixed fixture's
+CPU samples. All six CPU, wall, cycle and instruction samples for every fixture
+remain in each raw report as supplemental diagnostics. The one-CPU and 12-CPU
+cases remain single-threaded kernels with different allowed CPU sets. Neither
+case provides a GMP comparison.
+
+Run the Linux diagnostic with an existing writable external history directory:
+
+```bash
+nix develop -c true
+build-budget --project blip_mp -- nix develop -c performance-profile run \
+  --config profiling-linux-counters.json --mode bm --seed 0
+```
+
+Counter access is required; unavailable counters cause a failed diagnostic.
+The command does not change host permissions or scheduling policy. A small
+native qualification run successfully read both hardware events without
+multiplexing. It establishes adapter access, not a timing result. Deterministic
+tests use injected counters and clocks to check sample accounting, rotation,
+failure propagation and cleanup; the complete suite includes them. Live PMU
+measurements remain separate from cached Nix checks.
+
+The first interleaved campaign ran at 02:25 UTC on October 28 (October 27 EDT),
+on the same CPU/compiler with a recorded load average of 18.83. All ten
+processes verified their sums, and all 180 samples had equal enabled/running
+counter durations. Neither cohort needed a retry. Both verdicts were
+`UNBASELINED`; no anchor was approved.
+
+CPU means below come from the process selected by the mixed fixture's median
+process mean. Ranges cover all 30 samples per fixture/cohort. Instructions are
+rounded; the largest observed span was under 0.00005 instructions per addition.
+
+| Fixture | Allowed CPUs | Selected CPU ns/add | CPU range | Cycles/add range | Instructions/add |
+|---|---:|---:|---:|---:|---:|
+| Mixed | 1 | 7.90 | 5.61–8.52 | 22.36–33.81 | 89 |
+| Immediate | 1 | 5.27 | 3.49–5.45 | 13.89–21.57 | 58 |
+| Promoted | 1 | 10.38 | 7.65–11.78 | 30.47–46.72 | 120 |
+| Mixed | 12 | 5.82 | 5.60–7.16 | 22.32–28.50 | 89 |
+| Immediate | 12 | 3.55 | 3.46–4.93 | 13.87–19.60 | 58 |
+| Promoted | 12 | 7.78 | 7.63–9.04 | 30.42–36.02 | 120 |
+
+The one-CPU mixed fixture's cycle/CPU-nanosecond ratio was 3.940–3.987,
+while cycles per instruction ranged from 0.251 to 0.380. The other fixtures
+changed similarly between those processes. This evidence points toward changing
+execution efficiency despite stable instruction counts. Clock-rate variation
+alone is insufficient to explain this campaign. It does not distinguish shared
+core contention, cache behavior or code placement, and it does not establish
+the cause of the historical measurements. The cycle/time ratio is a diagnostic
+ratio with different user/thread and process-clock scopes, not a direct clock
+frequency measurement. Separate contemporaneous controls are still needed.
+
+Observation IDs use prefix `blip-mp-counters-20261028T0225Z-` followed by the
+case names in `profiling-linux-counters.json`. The unchanged source digest was
+`7e0512dc5e8b6a910959e97562fe079b53576a52fd9f1da0be148e907b29bdf8`.
+The complete native suite and production build passed in 148 seconds combined;
+118 seconds were the mixed Nix preparation/check phase. All-system evaluation
+passed; only Linux x86_64 executed these tests and counter measurements.
