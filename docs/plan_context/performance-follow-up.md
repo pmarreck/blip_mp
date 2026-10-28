@@ -1052,6 +1052,88 @@ choice of division algorithm.
 The complete native suite passed in 87 seconds of mixed Nix preparation/check
 time. The optimized production build and all-system evaluation also passed.
 
+### Short-quotient results and selection
+
+Two campaigns measured commit `c6e428fed7d6457d1ee4611cfb198fac5cef4d1a`
+on the same Linux x86_64 hardware and Zig 0.16.0 ReleaseFast build:
+
+- `blip-mp-division-short-20261028T183334Z`: candidate versus fixed leading-block
+  B-Z; 65 correct processes, nine `UNBASELINED` cohorts and one `INCONCLUSIVE`
+  cohort. One-chunk-limit/12-CPU, two-chunk-start/1-CPU and balanced/1-CPU each
+  needed their one permitted variation retry; two-chunk-start/1-CPU remained
+  inconclusive.
+- `blip-mp-division-short-public-20261028T184011Z`: candidate versus current
+  public division; 55 correct processes and ten `UNBASELINED` cohorts.
+  One-chunk-limit/12-CPU needed one retry.
+
+No baseline was approved. Each campaign's source digest stayed unchanged:
+`71f1b9df9b76a74ae596d6ec687f01e1e0c1c37679d0c97d436a0539cb64b10b`
+and `7d3acdb143a4e38778c50a361f9b513a0ed00c7dee922fdc6084b9174fafaed5`,
+respectively. The engine includes the configuration in that digest. Both
+campaigns recorded the same clean commit and probe binary SHA-256,
+`7c6aa6cdce681b4e0948be646d92e2d2a173958283703a09bb4d14528bba3da3`.
+
+Each cell below is a median paired CPU ratio for **1-CPU / 12-CPU affinity**,
+using thirty samples from each selected cohort. Widths are magnitude bytes.
+The first table compares the short-quotient candidate with fixed leading-block
+B-Z. The first two columns exercise the new fallback at even divisor widths;
+the remaining geometries and odd divisor are controls.
+
+| Divisor bytes | Dividend = divisor + 1 | Dividend = divisor + 7 | Dividend = divisor + 8 | Dividend = 2 × divisor | Dividend = 4 × divisor |
+|---:|---:|---:|---:|---:|---:|
+| 8,192 | 0.0383 / 0.0382 | 0.0386 / 0.0398 | 0.994 / 0.991 | 0.997 / 0.996 | 0.999 / 0.998 |
+| 12,288 | 0.0376 / 0.0373 | 0.0365 / 0.0387 | 0.992 / 0.992 | 0.996 / 0.998 | 0.999 / 0.998 |
+| 16,384 | 0.0333 / 0.0334 | 0.0338 / 0.0344 | 0.991 / 0.991 | 0.997 / 0.997 | 0.998 / 0.998 |
+| 16,385 | 1.005 / 1.008 | 1.006 / 1.009 | 1.002 / 1.004 | 0.998 / 0.999 | 1.001 / 1.002 |
+
+The sampled new-fallback medians take about 1/25 to 1/30 of the fixed B-Z
+time. Every process mean, including diagnostics, favors the candidate on those
+rows. Control medians remain within about 1% of parity, while their individual
+process ratios span roughly 0.941–1.069. Small control differences do not
+establish another algorithmic gain. The
+[B-Z comparison summary](../benchmarks/storage-aware/division-short-summary.json)
+retains every process ratio, sample range, selected component and verdict.
+
+The second table compares the candidate with current public `Mp.divMod`, using
+the same corpus and identical canonical-result verification adapters.
+
+| Divisor bytes | Dividend = divisor + 1 | Dividend = divisor + 7 | Dividend = divisor + 8 | Dividend = 2 × divisor | Dividend = 4 × divisor |
+|---:|---:|---:|---:|---:|---:|
+| 8,192 | 1.277 / 1.277 | 1.276 / 1.275 | 33.91 / 33.98 | 0.900 / 0.903 | 0.752 / 0.751 |
+| 12,288 | 1.269 / 1.270 | 1.266 / 1.267 | 35.25 / 35.27 | 0.661 / 0.661 | 0.558 / 0.557 |
+| 16,384 | 1.269 / 1.269 | 1.264 / 1.263 | 39.74 / 39.79 | 0.612 / 0.611 | 0.525 / 0.523 |
+| 16,385 | 1.303 / 1.302 | 1.300 / 1.301 | 1.265 / 1.265 | 1.001 / 1.002 | 1.001 / 1.001 |
+
+The new fallback still takes about 26–30% more CPU time than the public path
+on short quotients. At a length difference of eight, even-width recursion
+takes about 34–40 times the public path's time. Every process mean, including
+retries, agrees with both losing directions. At the sampled recursive widths,
+balanced and long dividends save about 10–39% and 25–48%, respectively; every
+process mean agrees with those gains. The odd fallback stays near parity for
+balanced/long dividends. The
+[public comparison summary](../benchmarks/storage-aware/division-short-public-summary.json)
+preserves all processes and timing details. Neither campaign times GMP.
+
+The default B-Z magnitude divider selects the one-chunk fallback, preserving
+the explicit leading-block and original cutoff-128 controls. Extending the
+allocation classifier to the default entry first fails, then verifies that
+selection. The public integration threshold remains 99,999 bytes. These data
+support a local B-Z improvement while rejecting a simple lower size threshold;
+quotient length and divisor alignment still matter. The eight-byte guard is a
+conservative first cutoff, not an optimum or a claim about every operand shape.
+
+Source inspection suggests a further bounded experiment: the top-level B-Z
+loop already receives each remainder's significant length. A short carried
+remainder can imply a short quotient for the next block, even in a balanced or
+long division. Reuse that length to choose a leaf before recursive work, retain
+the current entry as a fixed comparator, and measure complete signed calls.
+This proposed internal shortcut has not yet been implemented or measured.
+
+After selection, the complete native suite passed in 91 seconds of mixed Nix
+preparation/check time. The optimized production build and all-system evaluation
+also passed. The default entry now passes the same allocation-bound classifier
+as the measured candidate.
+
 ### Exact-capacity remainder regression
 
 Reviewing the B-Z entry point exposed a separate single-byte-divisor bug. With

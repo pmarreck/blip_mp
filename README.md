@@ -77,6 +77,15 @@ These gains support the local shortcut; they do not establish a new GMP win
 or a lower public dispatch threshold. All 45 processes verified their results;
 timing verdicts remain unbaselined or inconclusive.
 
+A [short-quotient fallback](docs/plan_context/performance-follow-up.md#short-quotient-results-and-selection)
+then takes about 1/25 to 1/30 of the selected B-Z path's CPU time on the sampled
+eligible cases. It still takes 26–30% more time than current public division.
+The measured balanced/long-dividend gains over the public path are 10–39% and
+25–48%; a large penalty remains just beyond the short-quotient cutoff. The public
+B-Z threshold therefore stays unchanged. All 120 processes across the two campaigns
+verified their results, with unbaselined/inconclusive timing verdicts. GMP was
+not timed in these campaigns.
+
 ## Quick start
 
 The [verified immediate-add probe](docs/plan_context/performance-follow-up.md#verified-immediate-add-probe-october-27-2026)

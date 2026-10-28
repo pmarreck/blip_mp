@@ -55,7 +55,7 @@ fn parse(args: []const []const u8) !Options {
 }
 
 test "short quotient dispatch classifies the one-chunk length bound before recursive allocation" {
-	for ([_]usize{64,128,256}) |width| {
+	inline for (.{blip.tier3.divModBurnikelZieglerShortQuotient,blip.tier3.divModBurnikelZiegler}) |divide| for ([_]usize{64,128,256}) |width| {
 		var accepted: [16]bool = @splat(false);
 		const expected: [16]bool = .{true,true,true,true,true,true,true,true,false,false,false,false,false,false,false,false};
 		for (0..accepted.len) |extra| {
@@ -69,7 +69,7 @@ test "short quotient dispatch classifies the one-chunk length bound before recur
 			const q = try a.alloc(u8,extra+3); @memset(q,0xa5);
 			const r = try a.alloc(u8,width+2); @memset(r,0xa5);
 			var limited = std.testing.FailingAllocator.init(std.testing.allocator,.{.fail_index=1});
-			if (blip.tier3.divModBurnikelZieglerShortQuotient(u,u.len,v,width,q[1..extra+2],r[1..width+1],limited.allocator())) |got| {
+			if (divide(u,u.len,v,width,q[1..extra+2],r[1..width+1],limited.allocator())) |got| {
 				accepted[extra] = true;
 				try std.testing.expectEqual(extra+1,got.q_len);
 				try std.testing.expectEqual(width-1,got.r_len);
@@ -83,7 +83,7 @@ test "short quotient dispatch classifies the one-chunk length bound before recur
 			try std.testing.expectEqual(limited.allocated_bytes,limited.freed_bytes);
 		}
 		try std.testing.expectEqualSlices(bool,&expected,&accepted);
-	}
+	};
 }
 
 fn balancedSample(state: anytype, comptime batch: anytype, count: usize, repeats: usize, round: usize) !Sample {
