@@ -2,6 +2,7 @@
 const std = @import("std");
 const blip = @import("blip_mp");
 const gmp = @import("gmp.zig");
+test { _ = @import("division_crossover.zig"); }
 pub const Kind = enum { byte_2048, chunk_2048, chunk_4096, chunk_8192, single_byte, single_chunk };
 pub const Options = struct { kind: Kind, iterations: usize };
 pub fn parse(args: []const []const u8) !Options {
@@ -18,6 +19,7 @@ pub fn main(init: std.process.Init) !void {
 		return error.UnoptimizedBuild;
 	}
 	const args = try init.minimal.args.toSlice(init.arena.allocator());
+	if (args.len > 1 and std.mem.eql(u8, args[1], "paired")) return @import("division_crossover.zig").run(init, args[2..]);
 	const options = try parse(args[1..]);
 	var fixture = try Fixture.init(std.heap.c_allocator, options.kind);
 	defer fixture.deinit();

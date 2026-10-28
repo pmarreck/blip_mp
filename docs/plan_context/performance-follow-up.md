@@ -360,6 +360,49 @@ Records use prefix `blip-mp-division-20261028T2310EDT-` plus the configured
 case names. Their actual chronology is the UTC interval above. Source stayed
 `da51a8e8fcdd590ca4098aff7d04c14ec9baf54422abc2abe99269397ca8e7e8`.
 
+### Identical-input division comparison
+
+Run `./bm --verified-division --config profiling-division-paired.json` to compare
+the existing Burnikel–Ziegler and chunk-reading Knuth byte-buffer entry points.
+The `division-paired-kernels-v1` workload uses divisor widths of 64, 128, 256,
+512, 1024 and 2048 bytes, each with a dividend twice as long. These are magnitude
+kernel measurements, including their byte-wrapper setup; public signed-BLIP
+encoding and sign handling are outside this experiment. GMP supplies full
+quotient/remainder reference bytes and is not timed as a competitor.
+
+Each width has 256 deterministic cases seeded by
+`0xB2D151A5 + divisor_bytes*257 + case_index`. Divisor top bytes cover all eight
+normalization shifts, with dense values mixed into the seeded corpus. Both
+methods receive every case and a full warmup pass. Each of five samples repeats
+each case four times, for 1024 divisions per method. ABBA/BAAB half-pool batches
+alternate by sample; the report retains both CPU/wall components and uses their
+mean as its primary engine sample. Mirroring cancels linear drift, but does not
+remove nonlinear interference or code-layout effects.
+
+Fixtures and GMP references are prepared outside timing. Arithmetic allocates
+through one arena reset before every division, with capacity retained after
+warmup for both methods. Arena reset, output poisoning, byte-buffer setup,
+complete quotient/remainder comparisons and canary checks are timed. This
+measures warmed arithmetic allocation behavior, not cold allocation cost.
+The two affinity cohorts each use five processes and a 120-second process
+deadline. No historical baseline is approved.
+
+The allowed-width classifier exhausts widths zero through 4099 and checks
+ordered-list constraints; it failed against an always-rejecting parser. The
+shared fixture tests cover all 16 allowed widths, including odd lengths and
+small-divisor boundaries, and reject corrupted GMP quotients. Partial allocation
+failures are injected through both algorithms. Timing tests first failed against
+empty adapters, then check equal case coverage, normalization, mirrored order,
+linear drift and error propagation. Injected clocks reject stopped/backward CPU
+or wall time. The new CLI report failed before its command was implemented.
+
+This establishes a comparison method before changing native leaf dispatch or
+recursive cutoffs. The existing four-byte recursion cutoff and small byte-Knuth
+leaves are candidates for measurement, not evidence of a particular speedup.
+The complete native suite passed in 112 seconds of mixed Nix preparation/check
+time, with 15,535 integration GMP comparisons unchanged. Production build and
+all-system evaluation also passed.
+
 ## CRT correctness-reference cost
 
 At commit `43c296f`, a fresh diagnostic run split the 100-case CRT fuzz test
