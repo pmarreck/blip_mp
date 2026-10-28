@@ -71,7 +71,7 @@ pub fn main(init: std.process.Init) !void {
 
 const TimeSpec = extern struct { seconds: c_long, nanoseconds: c_long };
 extern "c" fn clock_gettime(clock: c_int, time: *TimeSpec) c_int;
-fn now(clock: std.c.CLOCK) !u64 {
+pub fn now(clock: std.c.CLOCK) !u64 {
 	var time: TimeSpec = .{ .seconds = 0, .nanoseconds = 0 };
 	const status = clock_gettime(@intCast(@intFromEnum(clock)), &time);
 	return timestamp(status, time.seconds, time.nanoseconds);

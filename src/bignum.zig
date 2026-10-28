@@ -6091,26 +6091,16 @@ test "divMod: identity a == q*b + rem on 1000 random i64 pairs" {
 	}
 }
 
-// Quick monotonic-clock helper for the invMod benches.
-fn invModBenchNanos() u64 {
-	var ts: std.c.timespec = undefined;
-	_ = std.c.clock_gettime(.MONOTONIC, &ts);
-	return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
-}
-
-test "bench: invModLehmer vs invModHGCD across bit-widths" {
-	// Microbench. Runs both invModLehmer and invModHGCD on the same fixed
-	// random (a, m) pairs at 1024/2048/4096-bit widths, prints ns/op and
-	// the speedup ratio. Used to validate M10 numbers.
+// Preserve the historical inverse benchmark fixtures as bounded correctness cases.
+// Repeated optimized measurements live in tests/benchmark/inverse.zig.
+test "inverse algorithms agree on the historical benchmark fixtures" {
 	defer tier3.releaseBzArena();
 	defer tier3.releaseMulScratch();
 	defer tier3.releaseDivScratch();
 	defer tier3.releaseVnScratch();
-	const SIZES = [_]usize{ 64, 96, 128, 192, 256, 384, 512, 768, 1024, 2048, 4096, 8192 };
-	const ITERS_BY_SIZE = [_]usize{ 2000, 1500, 1000, 700, 500, 400, 300, 250, 200, 100, 25, 8 };
+	const sizes = [_]usize{ 64, 96, 128, 192, 256, 384, 512, 768, 1024, 2048, 4096, 8192 };
 	var prng = std.Random.DefaultPrng.init(0xBABE_CAFE_F00D);
 	const rand = prng.random();
-
 	var a = Mp.init(testing.allocator);
 	defer a.deinit();
 	var m = Mp.init(testing.allocator);
@@ -6119,14 +6109,10 @@ test "bench: invModLehmer vs invModHGCD across bit-widths" {
 	defer r_l.deinit();
 	var r_h = Mp.init(testing.allocator);
 	defer r_h.deinit();
-
 	var raw_buf: [1024]u8 = undefined;
 	var enc_buf: [1100]u8 = undefined;
-
-	for (SIZES, ITERS_BY_SIZE) |bits, iters| {
-		const byte_len = (bits + 7) / 8;
-		// Build single fixed (a, m) pair; reuse for all iterations so the
-		// comparison is apples-to-apples.
+	for (sizes) |bits| {
+		const byte_len = bits / 8;
 		rand.bytes(raw_buf[0..byte_len]);
 		raw_buf[byte_len - 1] &= 0x7F;
 		const hdr_a = try tier3.writeHeader(&enc_buf, byte_len);
@@ -6138,83 +6124,20 @@ test "bench: invModLehmer vs invModHGCD across bit-widths" {
 		const hdr_m = try tier3.writeHeader(&enc_buf, byte_len);
 		@memcpy(enc_buf[hdr_m..][0..byte_len], raw_buf[0..byte_len]);
 		try m.setBytes(enc_buf[0 .. hdr_m + byte_len]);
-
-		// Warm-up.
-		_ = try Mp.invModLehmer(&r_l, &a, &m);
-		_ = try Mp.invModHGCD(&r_h, &a, &m);
-
-		// Lehmer.
-		const t0 = invModBenchNanos();
-		var i: usize = 0;
-		while (i < iters) : (i += 1) {
-			_ = try Mp.invModLehmer(&r_l, &a, &m);
-			std.mem.doNotOptimizeAway(&r_l);
-		}
-		const t1 = invModBenchNanos();
-		const ns_lehmer = (t1 - t0) / iters;
-
-		// HGCD (wider Lehmer).
-		const t2 = invModBenchNanos();
-		i = 0;
-		while (i < iters) : (i += 1) {
-			_ = try Mp.invModHGCD(&r_h, &a, &m);
-			std.mem.doNotOptimizeAway(&r_h);
-		}
-		const t3 = invModBenchNanos();
-		const ns_hgcd = (t3 - t2) / iters;
-
-		// Recursive HGCD (M11.2) — only bench up to 4096 bits; at 8192+
-		// the recursion's matrix-composition overhead causes catastrophic
-		// regression (lacking sub-quadratic mul). Skip to keep test fast.
-		var r_rec_b = Mp.init(testing.allocator);
-		defer r_rec_b.deinit();
-		var ns_rec: u64 = 0;
-		var speedup_r: f64 = 0;
-		if (bits <= 4096) {
-			_ = try Mp.invModHGCDRecursive(&r_rec_b, &a, &m); // warm-up
-			const t4 = invModBenchNanos();
-			i = 0;
-			while (i < iters) : (i += 1) {
-				_ = try Mp.invModHGCDRecursive(&r_rec_b, &a, &m);
-				std.mem.doNotOptimizeAway(&r_rec_b);
-			}
-			const t5 = invModBenchNanos();
-			ns_rec = (t5 - t4) / iters;
-			speedup_r = @as(f64, @floatFromInt(ns_lehmer)) / @as(f64, @floatFromInt(ns_rec));
-			try testing.expect(Mp.cmp(&r_h, &r_rec_b) == .eq);
-		}
-
-		// Sanity: same result.
+		const ok_l = try Mp.invModLehmer(&r_l, &a, &m);
+		const ok_h = try Mp.invModHGCD(&r_h, &a, &m);
+		try testing.expectEqual(ok_l, ok_h);
 		try testing.expect(Mp.cmp(&r_l, &r_h) == .eq);
-
-		const speedup_h = @as(f64, @floatFromInt(ns_lehmer)) / @as(f64, @floatFromInt(ns_hgcd));
-
-		// Stein's binary GCD (new — M-Stein).
+		if (bits <= 4096) {
+			var r_rec = Mp.init(testing.allocator);
+			defer r_rec.deinit();
+			try testing.expectEqual(ok_h, try Mp.invModHGCDRecursive(&r_rec, &a, &m));
+			try testing.expect(Mp.cmp(&r_h, &r_rec) == .eq);
+		}
 		var r_s = Mp.init(testing.allocator);
 		defer r_s.deinit();
-		_ = try Mp.invModStein(&r_s, &a, &m); // warm-up
-		const ts0 = invModBenchNanos();
-		i = 0;
-		while (i < iters) : (i += 1) {
-			_ = try Mp.invModStein(&r_s, &a, &m);
-			std.mem.doNotOptimizeAway(&r_s);
-		}
-		const ts1 = invModBenchNanos();
-		const ns_stein = (ts1 - ts0) / iters;
-		const speedup_s = @as(f64, @floatFromInt(ns_lehmer)) / @as(f64, @floatFromInt(ns_stein));
+		try testing.expectEqual(ok_l, try Mp.invModStein(&r_s, &a, &m));
 		try testing.expect(Mp.cmp(&r_l, &r_s) == .eq);
-
-		if (bits <= 4096) {
-			std.debug.print(
-				"\n[bench] invMod {d}-bit  Lehmer={d} ns/op  HGCD={d} (x{d:.2})  HGCDRec={d} (x{d:.2})  Stein={d} (x{d:.2})\n",
-				.{ bits, ns_lehmer, ns_hgcd, speedup_h, ns_rec, speedup_r, ns_stein, speedup_s },
-			);
-		} else {
-			std.debug.print(
-				"\n[bench] invMod {d}-bit  Lehmer={d} ns/op  HGCD={d} (x{d:.2})  Stein={d} (x{d:.2})  (HGCDRec skipped)\n",
-				.{ bits, ns_lehmer, ns_hgcd, speedup_h, ns_stein, speedup_s },
-			);
-		}
 	}
 }
 

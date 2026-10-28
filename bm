@@ -6,6 +6,7 @@
 #
 # Usage:
 #   ./bm --verified-add [engine options] # verified CPU/wall immediate-add probes
+#   ./bm --verified-inverse [engine options] # GMP-verified inverse algorithm probes
 #   ./bm                  # full bench: blip_mp + GMP-asm + GMP-noasm,
 #                        # all sizes, with side-by-side ratios where
 #                        # bucket names match
@@ -29,6 +30,10 @@ set -u
 if [ "${1:-}" = "--verified-add" ]; then
 	shift
 	exec nix develop -c performance-profile run --mode bm "$@"
+fi
+if [ "${1:-}" = "--verified-inverse" ]; then
+	shift
+	exec nix develop -c performance-profile run --config profiling-inverse.json --mode bm "$@"
 fi
 
 mode="full"

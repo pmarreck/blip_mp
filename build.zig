@@ -136,6 +136,24 @@ pub fn build(b: *std.Build) void {
 	const probe_step = b.step("add-probe", "Build the verified immediate-add performance probe");
 	probe_step.dependOn(&install_add_probe.step);
 
+	const inverse_module = b.createModule(.{
+		.root_source_file = b.path("tests/benchmark/inverse.zig"),
+		.target = target,
+		.optimize = optimize,
+		.link_libc = true,
+		.imports = &.{.{ .name = "blip_mp", .module = core_module }},
+	});
+	if (gmp_lib_path) |path| inverse_module.addLibraryPath(.{ .cwd_relative = path });
+	inverse_module.linkSystemLibrary("gmp", .{});
+	const inverse_tests = b.addTest(.{ .root_module = inverse_module });
+	const run_inverse_tests = b.addRunArtifact(inverse_tests);
+	const inverse_test_step = b.step("inverse-probe-test", "Check inverse-modulo probe oracles");
+	inverse_test_step.dependOn(&run_inverse_tests.step);
+	test_step.dependOn(&run_inverse_tests.step);
+	const inverse_probe = b.addExecutable(.{ .name = "blip-mp-inverse-probe", .root_module = inverse_module });
+	const install_inverse = b.addInstallArtifact(inverse_probe, .{});
+	b.step("inverse-probe", "Build the GMP-verified inverse-modulo probe").dependOn(&install_inverse.step);
+
 	// Shared monotonic-clock helper module for the benchmark + cross-check exes.
 	const time_util_module = b.createModule(.{
 		.root_source_file = b.path("tests/time_util.zig"),

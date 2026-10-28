@@ -1,0 +1,16 @@
+{
+	"schema": "performance-project/v1",
+	"project": "blip_mp",
+	"history_url": "file:///var/lib/performance-profiling",
+	"identity": {"runtime": "Zig-0.16.0", "build_mode": "ReleaseFast", "concurrency": 1},
+	"cases": [
+		{"name":"inverse_lehmer_1core","definition":"inverse-gmp-verified-v1","cores":1,"processes":5,"mode":"bm","metric":"cpu_ns","comparison":"absolute","command":["blip-mp-inverse-probe","lehmer","{sizes}"],"sizes":[64,96,128,192,256,384,512,768,1024,2048,4096,8192],"bounds":[0.1,10000000000],"policy":{"max_cv":0.1}},
+		{"name":"inverse_lehmer_12core","definition":"inverse-gmp-verified-v1","cores":12,"processes":5,"mode":"bm","metric":"cpu_ns","comparison":"absolute","command":["blip-mp-inverse-probe","lehmer","{sizes}"],"sizes":[64,96,128,192,256,384,512,768,1024,2048,4096,8192],"bounds":[0.1,10000000000],"policy":{"max_cv":0.1}},
+		{"name":"inverse_hgcd_1core","definition":"inverse-gmp-verified-v1","cores":1,"processes":5,"mode":"bm","metric":"cpu_ns","comparison":"absolute","command":["blip-mp-inverse-probe","hgcd","{sizes}"],"sizes":[64,96,128,192,256,384,512,768,1024,2048,4096,8192],"bounds":[0.1,10000000000],"policy":{"max_cv":0.1}},
+		{"name":"inverse_hgcd_12core","definition":"inverse-gmp-verified-v1","cores":12,"processes":5,"mode":"bm","metric":"cpu_ns","comparison":"absolute","command":["blip-mp-inverse-probe","hgcd","{sizes}"],"sizes":[64,96,128,192,256,384,512,768,1024,2048,4096,8192],"bounds":[0.1,10000000000],"policy":{"max_cv":0.1}},
+		{"name":"inverse_recursive_1core","definition":"inverse-gmp-verified-v1","cores":1,"processes":5,"mode":"bm","metric":"cpu_ns","comparison":"absolute","command":["blip-mp-inverse-probe","recursive","{sizes}"],"sizes":[64,96,128,192,256,384,512,768,1024,2048,4096],"bounds":[0.1,10000000000],"policy":{"max_cv":0.1}},
+		{"name":"inverse_recursive_12core","definition":"inverse-gmp-verified-v1","cores":12,"processes":5,"mode":"bm","metric":"cpu_ns","comparison":"absolute","command":["blip-mp-inverse-probe","recursive","{sizes}"],"sizes":[64,96,128,192,256,384,512,768,1024,2048,4096],"bounds":[0.1,10000000000],"policy":{"max_cv":0.1}},
+		{"name":"inverse_stein_1core","definition":"inverse-gmp-verified-v1","cores":1,"processes":5,"mode":"bm","metric":"cpu_ns","comparison":"absolute","command":["blip-mp-inverse-probe","stein","{sizes}"],"sizes":[64,96,128,192,256,384,512,768,1024,2048,4096,8192],"bounds":[0.1,10000000000],"policy":{"max_cv":0.1}},
+		{"name":"inverse_stein_12core","definition":"inverse-gmp-verified-v1","cores":12,"processes":5,"mode":"bm","metric":"cpu_ns","comparison":"absolute","command":["blip-mp-inverse-probe","stein","{sizes}"],"sizes":[64,96,128,192,256,384,512,768,1024,2048,4096,8192],"bounds":[0.1,10000000000],"policy":{"max_cv":0.1}}
+	]
+}

@@ -209,3 +209,64 @@ case names in `profiling-linux-counters.json`. The unchanged source digest was
 The complete native suite and production build passed in 148 seconds combined;
 118 seconds were the mixed Nix preparation/check phase. All-system evaluation
 passed; only Linux x86_64 executed these tests and counter measurements.
+
+## Unit latency and inverse probe
+
+A fresh ReleaseSafe attribution run at source commit `c34cf02` measured the
+502 core unit tests individually using a diagnostic copy of Zig 0.16.0's own
+test runner. Monotonic timestamps surrounded each server-mode test, including
+its setup and allocator cleanup. Assertions, result reporting and leak checks
+were retained. Compiler time was separate: the build summary reported 41
+seconds compiling the core unit executable and 41 seconds running it.
+The measured per-test total was 40.995 seconds; process/protocol overhead is
+outside that sum. This was a diagnostic measurement under the Nix builder,
+not a fresh historical performance gate or a five-second budget pass.
+
+| Test group | Measured wall seconds |
+|---|---:|
+| Repeated inverse-modulo benchmark | 16.813 |
+| CRT multiplication fuzz, 100 iterations at 4096–16384 bytes | 9.946 |
+| Lehmer/classical inverse comparisons | 4.271 |
+| Stein/Lehmer inverse comparisons | 3.801 |
+| Recursive/wider HGCD comparisons | 1.613 |
+| Large asymmetric Burnikel–Ziegler division comparisons | 1.568 |
+| Wider HGCD/Lehmer comparisons | 1.506 |
+| All five division timing tests together | 0.036 |
+
+The inverse timing loop was the largest removable timing-only cost. Its core
+unit test now executes each original algorithm/width combination once, retains
+every result equality assertion and also compares the returned existence flags.
+The 12 widths, fixed random seed and 4096-bit bound for recursive HGCD remain.
+The five division timing tests are still pending migration. Expensive correctness
+cases remain in the complete suite; their coverage has not been reduced to meet
+a timing target.
+
+`./bm --verified-inverse` runs `profiling-inverse.json` through the shared engine.
+It defines one-CPU and 12-CPU affinity cohorts for each of the four algorithms,
+with five fresh processes, five samples per width and the historical iteration
+counts. Fixture construction and GMP inversion happen before timing. Each
+measured iteration checks both inverse existence and the full result against
+GMP; these checks and any kernel allocations are included in CPU/wall timings.
+One warmup call precedes each width. This is method `inverse-gmp-verified-v1`,
+so its numbers are not interchangeable with the old unchecked unit timings.
+
+The safety-enabled probe tests check all 47 supported algorithm/width pairs
+against GMP and reject deliberate wrong values, negative values and incorrect
+existence flags. The optimized CLI protocol checks cover every algorithm,
+multiple width rows, routing through `./bm` and refusal of recursive 8192-bit
+work. Both sets are part of `./test`; live performance runs stay outside cached
+Nix checks. No algorithm dispatch, arithmetic implementation or historical
+baseline changes are part of this migration.
+
+A second fresh attribution run measured the retained inverse fixture test at
+0.272 seconds, down from 16.813 seconds. The same 502 core tests totaled
+24.352 seconds, versus 40.995 before the refactor. The new independent GMP
+probe test executable added 0.277 seconds; immediate-add probe tests took
+0.006 seconds. Core compilation took 44 seconds in that run. These are two
+observations on a shared host, not a general speed guarantee. Arithmetic
+performance was not changed. Core execution alone still exceeds the five-second
+budget, with CRT fuzz remaining the largest test at 9.644 seconds.
+
+The uninstrumented complete suite, optimized CLI protocol checks, 13,111 GMP
+comparisons and production build passed in 109 seconds combined. All-system
+evaluation passed; correctness and attribution execution were Linux x86_64 only.

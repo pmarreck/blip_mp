@@ -5,3 +5,4 @@ checks.x86_64-linux.test
 checks.x86_64-linux.integration
 checks.x86_64-linux.probe-cli
 checks.x86_64-linux.build-driver
+checks.x86_64-linux.inverse-probe-cli

@@ -60,6 +60,11 @@ mixed, immediate and promoted results with separate CPU-affinity cohorts and
 external measurement history. Its checksum overhead makes it a new measurement
 method; it does not replace the historical benchmark numbers above.
 
+`./bm --verified-inverse` measures Lehmer, wider HGCD, recursive HGCD and Stein
+on the historical fixed fixtures. Every result is checked against GMP; CPU and
+wall samples include that comparison. See the [measurement notes](docs/plan_context/performance-follow-up.md#unit-latency-and-inverse-probe)
+for scope and retained correctness coverage.
+
 Requires [Nix](https://nixos.org/) (handles the Zig 0.16.0 toolchain and GMP build for benchmarks).
 
 ```bash

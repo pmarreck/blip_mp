@@ -54,7 +54,7 @@
 				devShells.default = pkgs.mkShell {
 					buildInputs = [ zig pkgs.hyperfine pkgs.gmp
 						performance-profiling.packages.${system}.default
-						self.packages.${system}.add-probe ];
+						self.packages.${system}.add-probe self.packages.${system}.inverse-probe ];
 					shellHook = ''
 						export GMP_INCLUDE_PATH="${pkgs.gmp.dev}/include"
 						export GMP_LIB_PATH="${pkgs.gmp}/lib"
@@ -85,6 +85,13 @@
 						zig build --prefix "$out" -Doptimize=ReleaseFast \
 							-Dgmp-include-path=${pkgs.gmp.dev}/include \
 							-Dgmp-lib-path=${pkgs.gmp}/lib
+					'';
+				};
+				packages.inverse-probe = self.packages.${system}.add-probe.overrideAttrs {
+					pname = "${pname}-inverse-probe";
+					buildPhase = ''
+						${commonBuild}
+						zig build inverse-probe --prefix "$out" -Doptimize=ReleaseFast -Dgmp-lib-path=${pkgs.gmp}/lib
 					'';
 				};
 
@@ -182,6 +189,45 @@
 						'';
 						installPhase = "mkdir -p $out";
 					};
+					inverse-probe-cli = pkgs.runCommand "${pname}-inverse-probe-cli" {
+						nativeBuildInputs = [ pkgs.jq ];
+					} ''
+						mkdir bin
+						cat > bin/nix <<-'STUB'
+						#!${pkgs.bash}/bin/bash
+						printf '%s\n' "$@" > "$ARGV"
+						STUB
+						chmod +x bin/nix
+						export ARGV="$PWD/argv"
+						PATH="$PWD/bin:$PATH" bash ${./bm} --verified-inverse --seed 0 > stdout 2> stderr
+						printf '%s\n' develop -c performance-profile run --config profiling-inverse.json --mode bm --seed 0 > expected
+						cmp expected argv
+						test ! -s stdout
+						test ! -s stderr
+						for algorithm in lehmer hgcd recursive stein; do
+							${self.packages.${system}.inverse-probe}/bin/blip-mp-inverse-probe "$algorithm" 64,96 > output.json 2> stderr
+							test ! -s stderr
+							jq -e --arg algorithm "$algorithm" '
+								.schema == "performance-measurement/v1" and .correct == true and
+								.build_mode == "ReleaseFast" and .algorithm == $algorithm and
+								[.rows[].size] == [64,96] and [.rows[].iterations] == [2000,1500] and
+								all(.rows[]; (.samples.cpu_ns|length) == 5 and (.samples.wall_ns|length) == 5) and
+								all(.rows[].samples.cpu_ns[], .rows[].samples.wall_ns[]; . > 0)
+							' output.json > /dev/null
+						done
+						if ${self.packages.${system}.inverse-probe}/bin/blip-mp-inverse-probe recursive 8192 > output.json 2> stderr; then
+							exit 1
+						fi
+						test ! -s output.json
+						mkdir -p "$out"
+					'';
+					inverse-probe = self.checks.${system}.probe.overrideAttrs {
+						pname = "${pname}-inverse-probe-tests";
+						buildPhase = ''
+							${commonBuild}
+							zig build inverse-probe-test -Doptimize=ReleaseSafe -Dgmp-lib-path=${pkgs.gmp}/lib
+						'';
+					};
 
 					test = pkgs.stdenv.mkDerivation {
 						pname = "${pname}-tests";
@@ -194,7 +240,7 @@
 							${commonBuild}
 							# Keep overlap and bounds checks in the complete correctness suite.
 							failures=0
-							if timeout 600 zig build test -Doptimize=ReleaseSafe; then
+							if timeout 600 zig build test -Doptimize=ReleaseSafe -Dgmp-lib-path=${pkgs.gmp}/lib; then
 								echo "Unit tests passed"
 							else
 								failures=$((failures + 1))
