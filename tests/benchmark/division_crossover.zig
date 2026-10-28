@@ -52,7 +52,7 @@ fn pairedSample(state: anytype, comptime batch: anytype, methods: [2]Method, cou
 	return sample;
 }
 
-fn timedBatch(work: anytype, clock: anytype, method: Method, start: usize, count: usize, repeats: usize) !Timing {
+pub fn timedBatch(work: anytype, clock: anytype, method: anytype, start: usize, count: usize, repeats: usize) !Timing {
 	if (count == 0 or repeats == 0) return error.InvalidArguments;
 	const wall_start = try clock.read(.MONOTONIC);
 	const cpu_start = try clock.read(.PROCESS_CPUTIME_ID);

@@ -1,6 +1,8 @@
 //! GMP's public mpz ABI, confined to independent test and benchmark oracles.
 const std = @import("std");
 pub const Z = extern struct { allocated: c_int, size: c_int, data: ?*anyopaque };
+pub extern const __gmp_version: [*:0]const u8;
+pub extern "c" fn __gmpz_cmp(a: *const Z, b: *const Z) c_int;
 pub extern "c" fn __gmpz_init(value: *Z) void;
 pub extern "c" fn __gmpz_clear(value: *Z) void;
 pub extern "c" fn __gmpz_import(value: *Z, count: usize, order: c_int, size: usize, endian: c_int, nails: usize, bytes: [*]const u8) void;

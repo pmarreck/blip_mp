@@ -628,6 +628,44 @@ of mixed Nix preparation/check time. The production/probe build and all-system
 evaluation also passed. Existing private recursion regressions continue to
 use the original four-byte cutoff so their deeper recursion remains covered.
 
+### Matched division comparison with GMP
+
+Run `./bm --verified-division --config profiling-division-competitors.json`
+to compare public `Mp.divMod`, chunk-reading Knuth, the selected B-Z cutoff,
+and GMP's `mpz_tdiv_qr` on identical positive operands. Divisor magnitude
+widths span 8–16,384 bytes, with a dividend twice as wide. Each width has 64
+deterministic cases covering all eight normalization shifts and dense values.
+The report includes the significant divisor-bit range; byte capacity is not
+an exact bit count.
+
+Inputs are converted into each library's native representation before timing.
+Public BLIP and GMP reuse their output objects. Byte kernels retain warmed
+arena capacity; their arena reset and output poisoning remain inside timing.
+Every call verifies both complete results: canonical-byte comparisons for public
+BLIP, native `mpz_cmp` for GMP, and magnitude/canary checks for the byte kernels.
+Thus these are verified-call costs with different native comparison adapters,
+not isolated arithmetic-instruction timings or serialization measurements.
+
+Eight samples rotate mirrored ABCDDCBA half-pool batches. Each sample visits
+every case equally for every method: 16 repetitions per case through 128-byte
+divisors, one repetition above that. The primary engine value averages all four
+methods; individual components support within-sample ratios. Both affinity
+cohorts use five fresh processes and 120-second process deadlines. No production
+dispatch change is part of this comparison.
+
+The empty adapter failed its width, scheduling, oracle, corruption and cleanup
+controls. The allocation tests also exposed a fixture allocator-lifetime bug;
+retained `Mp` objects now use the stable parent allocator. Small fixtures have
+an independent native `u128` quotient/remainder oracle. The CLI assertion failed
+before its new route was connected. Existing injected-clock tests cover the
+shared timed-batch helper, and the four-method schedule has its own exact
+coverage and normalization controls.
+
+The complete native suite passed in 103 seconds of mixed Nix preparation/check
+time. The optimized production/probe build and all-system evaluation also
+passed. The shared timing helper's cross-module visibility was corrected after
+the optimized CLI build exposed it; this did not change arithmetic.
+
 ### Exact-capacity remainder regression
 
 Reviewing the B-Z entry point exposed a separate single-byte-divisor bug. With

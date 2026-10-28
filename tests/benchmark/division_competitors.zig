@@ -1,0 +1,305 @@
+//! Identical-input division across public BLIP, its kernels, and GMP.
+const std = @import("std");
+const blip = @import("blip_mp");
+const Mp = blip.Mp;
+const gmp = @import("gmp.zig");
+const widths = [_]usize{ 8,16,32,64,128,256,512,1024,2048,4096,8192,16384 };
+const Method = enum { public_blip, knuth, bz128, gmp };
+const Timing = struct { cpu_ns: f64, wall_ns: f64 };
+const Sample = struct { cpu_ns: [4]f64, wall_ns: [4]f64 };
+const Options = struct { sizes: [widths.len]usize, count: usize };
+
+fn parse(args: []const []const u8) !Options {
+	if (args.len != 1) return error.InvalidArguments;
+	var options: Options = .{ .sizes = undefined, .count = 0 };
+	var parts = std.mem.splitScalar(u8,args[0],',');
+	while (parts.next()) |part| {
+		const width = std.fmt.parseInt(usize,part,10) catch return error.InvalidArguments;
+		if (std.mem.indexOfScalar(usize,&widths,width) == null or options.count == widths.len) return error.InvalidArguments;
+		if (options.count > 0 and width <= options.sizes[options.count-1]) return error.InvalidArguments;
+		options.sizes[options.count] = width;
+		options.count += 1;
+	}
+	return options;
+}
+
+fn balancedSample(state: anytype, comptime batch: anytype, count: usize, repeats: usize, round: usize) !Sample {
+	if (count == 0 or count % 2 != 0 or repeats == 0) return error.InvalidArguments;
+	var sample: Sample = .{ .cpu_ns = @splat(0), .wall_ns = @splat(0) };
+	for (0..8) |position| {
+		const index = ((if (position < 4) position else 7-position) + round) % 4;
+		const duration = try batch(state,@enumFromInt(index),if (position < 4) 0 else count/2,count/2,repeats);
+		sample.cpu_ns[index] += duration.cpu_ns;
+		sample.wall_ns[index] += duration.wall_ns;
+	}
+	for (&sample.cpu_ns,&sample.wall_ns) |*cpu,*wall| {
+		cpu.* /= @floatFromInt(count*repeats); wall.* /= @floatFromInt(count*repeats);
+	}
+	return sample;
+}
+
+fn setMagnitude(value: *Mp, bytes: []const u8, allocator: std.mem.Allocator) !void {
+	const magnitude = std.mem.trimEnd(u8,bytes,&.{0});
+	if (magnitude.len == 0) return value.setU64(0);
+	if (magnitude.len == 1 and magnitude[0] < 128) return value.setU64(magnitude[0]);
+	const pad: usize = @intFromBool(magnitude[magnitude.len-1] & 0x80 != 0);
+	const encoded = try allocator.alloc(u8,magnitude.len+pad+16);
+	defer allocator.free(encoded);
+	const header = try blip.tier3.writeHeader(encoded,magnitude.len+pad);
+	@memcpy(encoded[header..][0..magnitude.len],magnitude);
+	if (pad != 0) encoded[header+magnitude.len] = 0;
+	try value.setBytes(encoded[0..header+magnitude.len+pad]);
+}
+
+const Case = struct {
+	dividend: []u8, divisor: []u8, expected_q: []u8, expected_r: []u8,
+	a: Mp, b: Mp, mq: Mp, mr: Mp,
+	ga: gmp.Z, gb: gmp.Z, gq: gmp.Z, gr: gmp.Z,
+	fn init(allocator: std.mem.Allocator, values_allocator: std.mem.Allocator, width: usize, index: usize) !Case {
+		var result: Case = .{
+			.dividend = try allocator.alloc(u8,2*width), .divisor = try allocator.alloc(u8,width),
+			.expected_q = try allocator.alloc(u8,2*width), .expected_r = try allocator.alloc(u8,width),
+			.a = Mp.init(values_allocator), .b = Mp.init(values_allocator), .mq = Mp.init(values_allocator), .mr = Mp.init(values_allocator),
+			.ga = undefined, .gb = undefined, .gq = undefined, .gr = undefined,
+		};
+		inline for (.{&result.ga,&result.gb,&result.gq,&result.gr}) |z| gmp.__gmpz_init(z);
+		errdefer result.deinit();
+		var rng = std.Random.DefaultPrng.init(0xB2D1_51A5 + width*257 + index);
+		rng.random().bytes(result.dividend); rng.random().bytes(result.divisor);
+		if (index%16 == 0) { @memset(result.dividend,255); @memset(result.divisor,255); }
+		result.dividend[2*width-1] |= 0x80;
+		const top = @as(u8,1) << @as(u3,@intCast(index%8));
+		result.divisor[width-1] = (result.divisor[width-1] & (top-1)) | top;
+		try setMagnitude(&result.a,result.dividend,allocator);
+		try setMagnitude(&result.b,result.divisor,allocator);
+		gmp.__gmpz_import(&result.ga,result.dividend.len,-1,1,0,0,result.dividend.ptr);
+		gmp.__gmpz_import(&result.gb,result.divisor.len,-1,1,0,0,result.divisor.ptr);
+		gmp.__gmpz_tdiv_qr(&result.gq,&result.gr,&result.ga,&result.gb);
+		var q_len: usize = 0; var r_len: usize = 0;
+		_ = gmp.__gmpz_export(result.expected_q.ptr,&q_len,-1,1,0,0,&result.gq);
+		_ = gmp.__gmpz_export(result.expected_r.ptr,&r_len,-1,1,0,0,&result.gr);
+		result.expected_q = result.expected_q[0..q_len]; result.expected_r = result.expected_r[0..r_len];
+		try setMagnitude(&result.mq,result.expected_q,allocator);
+		try setMagnitude(&result.mr,result.expected_r,allocator);
+		return result;
+	}
+	fn deinit(self: *@This()) void {
+		inline for (.{&self.ga,&self.gb,&self.gq,&self.gr}) |z| gmp.__gmpz_clear(z);
+		self.a.deinit(); self.b.deinit(); self.mq.deinit(); self.mr.deinit();
+	}
+};
+const Fixture = struct {
+	cases: []Case,
+	arena: std.heap.ArenaAllocator, scratch: std.heap.ArenaAllocator,
+	q: Mp, r: Mp, gq: gmp.Z, gr: gmp.Z,
+	quotient: []u8, remainder: []u8,
+	fn init(parent: std.mem.Allocator, width: usize, count: usize) !Fixture {
+		if (std.mem.indexOfScalar(usize,&widths,width) == null or count == 0 or count > 64) return error.InvalidArguments;
+		var arena = std.heap.ArenaAllocator.init(parent);
+		errdefer arena.deinit();
+		const allocator = arena.allocator();
+		const cases = try allocator.alloc(Case,count);
+		var initialized: usize = 0;
+		errdefer for (cases[0..initialized]) |*case| case.deinit();
+		for (cases,0..) |*case,index| {
+			case.* = try Case.init(allocator,parent,width,index);
+			initialized += 1;
+		}
+		const quotient = try allocator.alloc(u8,2*width+2);
+		const remainder = try allocator.alloc(u8,width+2);
+		var gq: gmp.Z = undefined; gmp.__gmpz_init(&gq);
+		var gr: gmp.Z = undefined; gmp.__gmpz_init(&gr);
+		return .{ .cases = cases, .arena = arena, .scratch = std.heap.ArenaAllocator.init(parent),
+			.q = Mp.init(parent), .r = Mp.init(parent), .gq = gq, .gr = gr, .quotient = quotient, .remainder = remainder };
+	}
+	pub fn run(self: *@This(), method: Method, index: usize) !void {
+		const case = &self.cases[index];
+		switch (method) {
+			.public_blip => {
+				try Mp.divMod(&self.q,&self.r,&case.a,&case.b);
+				if (!std.mem.eql(u8,self.q.bytes(),case.mq.bytes()) or !std.mem.eql(u8,self.r.bytes(),case.mr.bytes())) return error.IncorrectWork;
+			},
+			.gmp => {
+				gmp.__gmpz_tdiv_qr(&self.gq,&self.gr,&case.ga,&case.gb);
+				if (gmp.__gmpz_cmp(&self.gq,&case.gq) != 0 or gmp.__gmpz_cmp(&self.gr,&case.gr) != 0) return error.IncorrectWork;
+			},
+			.knuth, .bz128 => {
+				if (!self.scratch.reset(.retain_capacity)) return error.OutOfMemory;
+				@memset(self.quotient,0xa5); @memset(self.remainder,0xa5);
+				const q = self.quotient[1..self.quotient.len-1]; const r = self.remainder[1..self.remainder.len-1];
+				const q_len, const r_len = if (method == .knuth) blk: {
+					const got = try blip.tier3.divModKnuthU64Bytes(case.dividend,case.dividend.len,case.divisor,case.divisor.len,q,r,self.scratch.allocator());
+					break :blk .{got.q_len,got.r_len};
+				} else blk: {
+					const got = try blip.tier3.divModBurnikelZieglerCutoff128(case.dividend,case.dividend.len,case.divisor,case.divisor.len,q,r,self.scratch.allocator());
+					break :blk .{got.q_len,got.r_len};
+				};
+				if (!std.mem.eql(u8,q[0..q_len],case.expected_q) or !std.mem.eql(u8,r[0..r_len],case.expected_r)) return error.IncorrectWork;
+				if (self.quotient[0] != 0xa5 or self.quotient[self.quotient.len-1] != 0xa5 or self.remainder[0] != 0xa5 or self.remainder[self.remainder.len-1] != 0xa5) return error.CanaryDamaged;
+			},
+		}
+	}
+	fn corruptQuotient(self: *@This(), index: usize) !void {
+		const case = &self.cases[index];
+		case.expected_q[0] ^= 1;
+		try setMagnitude(&case.mq,case.expected_q,self.arena.allocator());
+		gmp.__gmpz_import(&case.gq,case.expected_q.len,-1,1,0,0,case.expected_q.ptr);
+	}
+	fn deinit(self: *@This()) void {
+		blip.tier3.releaseBzArena(); blip.tier3.releaseMulScratch(); blip.tier3.releaseDivScratch(); blip.tier3.releaseVnScratch();
+		self.q.deinit(); self.r.deinit();
+		gmp.__gmpz_clear(&self.gq); gmp.__gmpz_clear(&self.gr);
+		for (self.cases) |*case| case.deinit();
+		self.scratch.deinit(); self.arena.deinit();
+	}
+};
+
+test "competitor widths classify the bounded set and ordered lists" {
+	var accepted: [16400]bool = @splat(false);
+	var expected: [16400]bool = @splat(false);
+	for (widths) |width| expected[width] = true;
+	for (0..accepted.len) |width| {
+		var buffer: [24]u8 = undefined;
+		const input = try std.fmt.bufPrint(&buffer, "{d}", .{width});
+		accepted[width] = if (parse(&.{input})) |_| true else |_| false;
+	}
+	try std.testing.expectEqualSlices(bool, &expected, &accepted);
+	const options = try parse(&.{"8,16,32,64,128,256,512,1024,2048,4096,8192,16384"});
+	try std.testing.expectEqualSlices(usize, &widths, options.sizes[0..options.count]);
+	for ([_][]const u8{ "", "0", "64,", "64,64", "128,64", "-1", "x", "18446744073709551616" }) |invalid| {
+		try std.testing.expectError(error.InvalidArguments, parse(&.{invalid}));
+	}
+	try std.testing.expectError(error.InvalidArguments, parse(&.{}));
+	try std.testing.expectError(error.InvalidArguments, parse(&.{"64","128"}));
+}
+
+test "four-way timing rotates mirrored batches and covers each input once" {
+	const Fake = struct {
+		position: usize = 0,
+		calls: [8]Method = undefined,
+		visits: [4][8]usize = @splat(@splat(0)),
+		fn batch(self: *@This(), method: Method, start: usize, count: usize, repeats: usize) !Timing {
+			const index: usize = @intFromEnum(method);
+			for (start .. start + count) |i| self.visits[index][i] += repeats;
+			self.calls[self.position] = method;
+			const duration: f64 = @floatFromInt((100 - 20 * index + 10 * self.position) * count * repeats);
+			self.position += 1;
+			return .{ .cpu_ns = duration, .wall_ns = duration + @as(f64,@floatFromInt(5*count*repeats)) };
+		}
+	};
+	const orders = [_][8]Method{
+		.{.public_blip,.knuth,.bz128,.gmp,.gmp,.bz128,.knuth,.public_blip},
+		.{.knuth,.bz128,.gmp,.public_blip,.public_blip,.gmp,.bz128,.knuth},
+		.{.bz128,.gmp,.public_blip,.knuth,.knuth,.public_blip,.gmp,.bz128},
+		.{.gmp,.public_blip,.knuth,.bz128,.bz128,.knuth,.public_blip,.gmp},
+	};
+	for (0..8) |round| {
+		var fake: Fake = .{};
+		const got = try balancedSample(&fake, Fake.batch, 8, 3, round);
+		try std.testing.expectEqualSlices(f64, &.{135,115,95,75}, &got.cpu_ns);
+		try std.testing.expectEqualSlices(f64, &.{140,120,100,80}, &got.wall_ns);
+		try std.testing.expectEqualSlices(Method, &orders[round%4], &fake.calls);
+		for (fake.visits) |visits| try std.testing.expectEqualSlices(usize, &@as([8]usize,@splat(3)), &visits);
+	}
+	var fake: Fake = .{};
+	for ([_]usize{0,1,7}) |count| try std.testing.expectError(error.InvalidArguments, balancedSample(&fake, Fake.batch, count, 3, 0));
+	try std.testing.expectError(error.InvalidArguments, balancedSample(&fake, Fake.batch, 8, 0, 0));
+	const Failure = struct {
+		fn batch(_: void, _: Method, _: usize, _: usize, _: usize) error{Injected}!Timing { return error.Injected; }
+	};
+	try std.testing.expectError(error.Injected, balancedSample({}, Failure.batch, 8, 3, 0));
+}
+
+fn nativeBatch(fixture: *Fixture, method: Method, start: usize, count: usize, repeats: usize) !Timing {
+	const Clock = struct {
+		pub fn read(_: *@This(), kind: std.c.CLOCK) !u64 { return @import("immediate_add.zig").now(kind); }
+	};
+	var clock: Clock = .{};
+	const got = try @import("division_crossover.zig").timedBatch(fixture,&clock,method,start,count,repeats);
+	return .{ .cpu_ns = got.cpu_ns, .wall_ns = got.wall_ns };
+}
+
+pub fn run(init: std.process.Init, args: []const []const u8) !void {
+	const options = try parse(args);
+	const count = 64;
+	const Component = struct { method: []const u8, cpu_ns: [8]f64, wall_ns: [8]f64 };
+	const Row = struct {
+		size: usize, fixture_count: usize = count, iterations: usize, warmup_cases: usize = count*4,
+		divisor_min_bits: usize, divisor_max_bits: usize,
+		samples: struct { cpu_ns: [8]f64, wall_ns: [8]f64 }, components: [4]Component,
+	};
+	var rows: [widths.len]Row = undefined;
+	for (options.sizes[0..options.count],0..) |width,row_index| {
+		var fixture = try Fixture.init(std.heap.c_allocator,width,count);
+		defer fixture.deinit();
+		for (0..count) |index| for (std.enums.values(Method)) |method| try fixture.run(method,index);
+		const repeats: usize = if (width <= 128) 16 else 1;
+		var row: Row = .{ .size = width, .iterations = count*repeats, .divisor_min_bits = width*8-7,
+			.divisor_max_bits = width*8, .samples = undefined, .components = undefined };
+		for (&row.components,std.enums.values(Method)) |*component,method| {
+			component.* = .{ .method = @tagName(method), .cpu_ns = undefined, .wall_ns = undefined };
+		}
+		for (0..8) |round| {
+			const sample = try balancedSample(&fixture,nativeBatch,count,repeats,round);
+			var cpu: f64 = 0; var wall: f64 = 0;
+			for (&row.components,0..) |*component,index| {
+				component.cpu_ns[round] = sample.cpu_ns[index]; component.wall_ns[round] = sample.wall_ns[index];
+				cpu += sample.cpu_ns[index]; wall += sample.wall_ns[index];
+			}
+			row.samples.cpu_ns[round] = cpu/4; row.samples.wall_ns[round] = wall/4;
+		}
+		rows[row_index] = row;
+	}
+	const report = .{
+		.schema = "performance-measurement/v1", .correct = true, .build_mode = "ReleaseFast",
+		.compiler = @import("builtin").zig_version_string, .gmp_version = std.mem.span(gmp.__gmp_version),
+		.method = "division-native-competitors-v1",
+		.cpu_clock = "CLOCK_PROCESS_CPUTIME_ID", .wall_clock = "CLOCK_MONOTONIC",
+		.seed_usage = "0xB2D151A5 + divisor_bytes*257 + case_index; eight normalization shifts; engine seed does not alter inputs",
+		.normalization = "rotating ABCDDCBA half-pool batches; eight samples; primary averages four methods per operation; no subtraction",
+		.operation = "positive 2:1 magnitude byte widths; size is divisor bytes; inputs preconverted outside timing; every result fully checked",
+		.verification = "public BLIP compares canonical bytes; GMP uses mpz_cmp; byte kernels compare magnitudes and canaries; comparison costs included",
+		.allocator_coverage = "public BLIP and GMP reuse native results after warmup; byte kernels reset an arena retaining capacity and poison outputs; cold allocation unmeasured",
+		.rows = rows[0..options.count],
+	};
+	const json = try std.json.Stringify.valueAlloc(init.arena.allocator(),report,.{});
+	try std.Io.File.stdout().writeStreamingAll(init.io,json);
+	try std.Io.File.stdout().writeStreamingAll(init.io,"\n");
+}
+
+test "all competitors agree with complete references and reject corrupted quotients" {
+	for (widths) |width| {
+		var fixture = try Fixture.init(std.testing.allocator, width, 8);
+		defer fixture.deinit();
+		for (fixture.cases, 0..) |_, index| {
+			for (std.enums.values(Method)) |method| try fixture.run(method,index);
+			try fixture.corruptQuotient(index);
+			for (std.enums.values(Method)) |method| try std.testing.expectError(error.IncorrectWork, fixture.run(method,index));
+		}
+	}
+}
+
+test "small competitor oracle agrees with independent native division" {
+	var fixture = try Fixture.init(std.testing.allocator,8,8);
+	defer fixture.deinit();
+	for (fixture.cases) |case| {
+		const a = std.mem.readInt(u128,case.dividend[0..16],.little);
+		const b = std.mem.readInt(u64,case.divisor[0..8],.little);
+		var q: [16]u8 = undefined; var r: [16]u8 = undefined;
+		std.mem.writeInt(u128,&q,a/b,.little);
+		std.mem.writeInt(u128,&r,a%b,.little);
+		try std.testing.expectEqualSlices(u8,std.mem.trimEnd(u8,&q,&.{0}),case.expected_q);
+		try std.testing.expectEqualSlices(u8,std.mem.trimEnd(u8,&r,&.{0}),case.expected_r);
+	}
+}
+
+test "competitor fixtures and arithmetic release partial allocations" {
+	const FailureCase = struct {
+		fn run(allocator: std.mem.Allocator) !void {
+			var fixture = try Fixture.init(allocator,16,2);
+			defer fixture.deinit();
+			for (std.enums.values(Method)) |method| try fixture.run(method,0);
+		}
+	};
+	try std.testing.checkAllAllocationFailures(std.testing.allocator,FailureCase.run,.{});
+}

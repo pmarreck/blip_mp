@@ -336,6 +336,21 @@
 							exit 1
 						fi
 						test ! -s output.json
+						${self.packages.${system}.division-probe}/bin/blip-mp-division-probe competitors 8,64 > competitors.json 2> stderr
+						test ! -s stderr
+						jq -e '
+							.schema == "performance-measurement/v1" and .correct == true and
+							.method == "division-native-competitors-v1" and .build_mode == "ReleaseFast" and
+							(.gmp_version|length) > 0 and [.rows[].size] == [8,64] and
+							all(.rows[]; . as $row |
+								.fixture_count == 64 and .iterations == 1024 and .warmup_cases == 256 and
+								[.components[].method] == ["public_blip","knuth","bz128","gmp"] and
+								all(.samples[]; length == 8 and all(.[]; . > 0)) and
+								all(.components[]; (.cpu_ns|length) == 8 and (.wall_ns|length) == 8 and all(.cpu_ns[],.wall_ns[]; . > 0)) and
+								all(range(8); . as $i |
+									$row.samples.cpu_ns[$i] == ([$row.components[].cpu_ns[$i]]|add/4) and
+									$row.samples.wall_ns[$i] == ([$row.components[].wall_ns[$i]]|add/4)))
+						' competitors.json > /dev/null
 						mkdir -p "$out"
 					'';
 
