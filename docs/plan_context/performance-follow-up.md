@@ -1396,6 +1396,42 @@ preparation/check time. Production build and all-system evaluation passed.
 No new arithmetic performance measurement or baseline approval follows from
 this measurement fix.
 
+### Wider quotient fallback qualification
+
+`Mp.divModBurnikelZieglerWideQuotient` and its magnitude kernel expose a
+candidate outer Knuth fallback for canonical divisor widths of at least 4,096
+bytes and dividend gaps through 2,048 bytes. The existing zero, smaller-value,
+equal-value and single-byte cases still precede dispatch. Smaller divisors
+retain the old eight-byte guard. Internal short-carry handling is unchanged,
+and the default divider does not select this candidate during qualification.
+
+A failing-first allocation classifier covers five divisor widths around the
+floor and gaps 0, 7, 8, 2,047, 2,048 and 2,049. With only one allocation allowed,
+the accepted matrix distinguishes the old small-divisor rule, odd-width leaf
+controls and the new inclusive boundary. Independent powers-of-256 identities
+establish complete results, with two high padding bytes, exact quotient capacity,
+canaries and complete cleanup. The old implementation failed the accepted set.
+At 4,096-byte divisors, all four signs, eight normalization shifts, three alias
+arrangements and allocation failures cover gaps 8, 2,048 and 2,049. Native
+boundary, division-by-zero and minimum-integer checks include the signed entry.
+
+`profiling-division-wide-quotient.json` pairs the fixed short-carry kernel with
+the candidate, using method `division-wide-quotient-paired-v1`. Divisor widths
+are 4,094, 4,096, 4,097, 4,098, 8,192, 8,194, 16,384, 16,385 and 16,386 bytes.
+Each tests gaps 7, 8, 2,047, 2,048, 2,049 and a twice-width dividend. This
+includes below-floor, existing-leaf, odd-width, neighboring-even-width and
+balanced controls. Both 1/12-CPU cohorts retain five processes, 32 positive
+cases, six paired samples and a 120-second process deadline. Complete GMP
+references and canaries are checked on every call; GMP and public dispatch
+are not timed. Small CLI fixtures use the corrected repetition policy.
+
+New parser and neighboring-fixture controls failed before implementation;
+placeholder methods failed the full-reference and allocation checks. The CLI
+route also failed before it was connected. The complete suite passed in 91
+seconds of mixed Nix preparation/check time; production build and all-system
+evaluation passed. SIMD remains deferred while the measured algorithm choice
+is being qualified.
+
 ### Exact-capacity remainder regression
 
 Reviewing the B-Z entry point exposed a separate single-byte-divisor bug. With

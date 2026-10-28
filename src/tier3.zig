@@ -2264,6 +2264,8 @@ fn bzDiv3n_2n(
 /// the B-Z path; below, delegates to Knuth D. Tuned later via benchmark;
 /// 64 (= 512-bit divisor) is a conservative starting point.
 const BZ_TOPLEVEL_THRESHOLD: usize = 64;
+const BZ_WIDE_QUOTIENT_MIN_DIVISOR: usize = 4096;
+const BZ_WIDE_QUOTIENT_MAX_GAP: usize = 2048;
 
 const BzOptions = struct {
 	chunk_fallback: bool = true,
@@ -2271,7 +2273,14 @@ const BzOptions = struct {
 	leading_block: bool = false,
 	short_quotient: bool = false,
 	short_carry: bool = false,
+	wide_quotient: bool = false,
 };
+
+/// Experimental wider outer Knuth fallback for large divisors.
+pub fn divModBurnikelZieglerWideQuotient(u: []const u8, u_len: usize, v: []const u8, v_len: usize, q: []u8, r: []u8, allocator: std.mem.Allocator) std.mem.Allocator.Error!struct { q_len: usize, r_len: usize } {
+	const got = try divModBurnikelZieglerImpl(.{.leading_block=true,.short_quotient=true,.short_carry=true,.wide_quotient=true},u,u_len,v,v_len,q,r,allocator);
+	return .{.q_len=got.q_len,.r_len=got.r_len};
+}
 
 /// Experimental leaf selection from each carried remainder's significant length.
 pub fn divModBurnikelZieglerShortCarry(u: []const u8, u_len: usize, v: []const u8, v_len: usize, q: []u8, r: []u8, allocator: std.mem.Allocator) std.mem.Allocator.Error!struct { q_len: usize, r_len: usize } {
@@ -2386,8 +2395,11 @@ fn divModBurnikelZieglerImpl(
 	// eight bytes bounds the quotient to one native chunk. The candidate
 	// uses Knuth before allocating recursive work; other entries stay fixed.
 	const short = options.short_quotient and u_len - v_len < @sizeOf(u64);
+	// Paired crossover measurements motivate this conservative candidate.
+	// The current default and fixed short-carry entry retain the old bound.
+	const wide = options.wide_quotient and v_len >= BZ_WIDE_QUOTIENT_MIN_DIVISOR and u_len - v_len <= BZ_WIDE_QUOTIENT_MAX_GAP;
 	// Knuth also handles small or odd divisor widths (B-Z needs even n).
-	if (short or v_len < BZ_TOPLEVEL_THRESHOLD or (v_len & 1) != 0) {
+	if (short or wide or v_len < BZ_TOPLEVEL_THRESHOLD or (v_len & 1) != 0) {
 		if (options.chunk_fallback) {
 			const leaf = try divModBZLeaf(u, u_len, v, v_len, q_out, r_out, allocator);
 			return .{ .q_len = leaf.q_len, .r_len = leaf.r_len };

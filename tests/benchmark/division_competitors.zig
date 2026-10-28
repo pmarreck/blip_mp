@@ -4,7 +4,7 @@ const blip = @import("blip_mp");
 const Mp = blip.Mp;
 const gmp = @import("gmp.zig");
 const widths = [_]usize{ 8,16,32,64,128,256,512,1024,2048,4096,8192,16384 };
-pub const Method = enum { public_blip, knuth, bz128, gmp, selected_bz };
+pub const Method = enum { public_blip, knuth, bz128, gmp, selected_bz, short_carry, wide_quotient };
 const original_methods = [4]Method{.public_blip,.knuth,.bz128,.gmp};
 const selected_methods = [4]Method{.public_blip,.knuth,.selected_bz,.gmp};
 const Timing = struct { cpu_ns: f64, wall_ns: f64 };
@@ -117,6 +117,43 @@ test "B-Z uses a short carried remainder to avoid recursive allocation" {
 		} else try std.testing.expectEqual(allocations[0],allocations[1]);
 		try std.testing.expectEqual(allocations[1],allocations[2]);
 	};
+}
+
+test "wide quotient fallback classifies divisor floor and dividend gap boundaries" {
+	const test_widths = [_]usize{4094,4095,4096,4097,4098};
+	const gaps = [_]usize{0,7,8,2047,2048,2049};
+	const expected = [_][6]bool{
+		.{true,true,false,false,false,false},
+		.{true,true,true,true,true,true},
+		.{true,true,true,true,true,false},
+		.{true,true,true,true,true,true},
+		.{true,true,true,true,true,false},
+	};
+	var actual: [test_widths.len][gaps.len]bool = @splat(@splat(false));
+	for (test_widths,0..) |width,wi| for (gaps,0..) |gap,gi| {
+		var arena = std.heap.ArenaAllocator.init(std.testing.allocator); defer arena.deinit();
+		const a = arena.allocator();
+		// u=beta^(width+gap)-1; v=beta^(width-1). Include two high zero
+		// bytes so the dispatch must use the significant dividend length.
+		const u = try a.alloc(u8,width+gap+2); @memset(u,255); @memset(u[width+gap..],0);
+		const v = try a.alloc(u8,width); @memset(v,0); v[width-1] = 1;
+		const q = try a.alloc(u8,gap+3); @memset(q,0xa5);
+		const r = try a.alloc(u8,width+2); @memset(r,0xa5);
+		var limited = std.testing.FailingAllocator.init(std.testing.allocator,.{.fail_index=1});
+		if (blip.tier3.divModBurnikelZieglerWideQuotient(u,u.len,v,width,q[1..gap+2],r[1..width+1],limited.allocator())) |got| {
+			actual[wi][gi] = true;
+			try std.testing.expectEqual(gap+1,got.q_len);
+			try std.testing.expectEqual(width-1,got.r_len);
+			for (q[1..gap+2]) |byte| try std.testing.expectEqual(@as(u8,255),byte);
+			for (r[1..width]) |byte| try std.testing.expectEqual(@as(u8,255),byte);
+			try std.testing.expectEqual(@as(u8,0xa5),q[0]);
+			try std.testing.expectEqual(@as(u8,0xa5),q[gap+2]);
+			try std.testing.expectEqual(@as(u8,0xa5),r[0]);
+			try std.testing.expectEqual(@as(u8,0xa5),r[width+1]);
+		} else |err| try std.testing.expectEqual(error.OutOfMemory,err);
+		try std.testing.expectEqual(limited.allocated_bytes,limited.freed_bytes);
+	};
+	for (expected,actual) |want,got| try std.testing.expectEqualSlices(bool,&want,&got);
 }
 
 test "short carry division handles exact blocks followed by zero and small blocks" {
@@ -253,7 +290,8 @@ pub const Fixture = struct {
 		return initSized(parent,width,count,2*width);
 	}
 	pub fn initSized(parent: std.mem.Allocator, width: usize, count: usize, dividend_len: usize) !Fixture {
-		if (std.mem.indexOfScalar(usize,&widths,width) == null or count == 0 or count > 64) return error.InvalidArguments;
+		const neighbors = [_]usize{4094,4097,4098,8194,16385,16386};
+		if ((std.mem.indexOfScalar(usize,&widths,width) == null and std.mem.indexOfScalar(usize,&neighbors,width) == null) or count == 0 or count > 64) return error.InvalidArguments;
 		var arena = std.heap.ArenaAllocator.init(parent);
 		errdefer arena.deinit();
 		const allocator = arena.allocator();
@@ -282,7 +320,7 @@ pub const Fixture = struct {
 				gmp.__gmpz_tdiv_qr(&self.gq,&self.gr,&case.ga,&case.gb);
 				if (gmp.__gmpz_cmp(&self.gq,&case.gq) != 0 or gmp.__gmpz_cmp(&self.gr,&case.gr) != 0) return error.IncorrectWork;
 			},
-			.knuth, .bz128, .selected_bz => {
+			.knuth, .bz128, .selected_bz, .short_carry, .wide_quotient => {
 				if (!self.scratch.reset(.retain_capacity)) return error.OutOfMemory;
 				@memset(self.quotient,0xa5); @memset(self.remainder,0xa5);
 				const q = self.quotient[1..self.quotient.len-1]; const r = self.remainder[1..self.remainder.len-1];
@@ -291,6 +329,12 @@ pub const Fixture = struct {
 					break :blk .{got.q_len,got.r_len};
 				} else if (method == .selected_bz) blk: {
 					const got = try blip.tier3.divModBurnikelZiegler(case.dividend,case.dividend.len,case.divisor,case.divisor.len,q,r,self.scratch.allocator());
+					break :blk .{got.q_len,got.r_len};
+				} else if (method == .short_carry) blk: {
+					const got = try blip.tier3.divModBurnikelZieglerShortCarry(case.dividend,case.dividend.len,case.divisor,case.divisor.len,q,r,self.scratch.allocator());
+					break :blk .{got.q_len,got.r_len};
+				} else if (method == .wide_quotient) blk: {
+					const got = try blip.tier3.divModBurnikelZieglerWideQuotient(case.dividend,case.dividend.len,case.divisor,case.divisor.len,q,r,self.scratch.allocator());
 					break :blk .{got.q_len,got.r_len};
 				} else blk: {
 					const got = try blip.tier3.divModBurnikelZieglerCutoff128(case.dividend,case.dividend.len,case.divisor,case.divisor.len,q,r,self.scratch.allocator());
@@ -483,18 +527,46 @@ test "explicit B-Z allocation failures release memory including optional cache r
 			try std.testing.expectEqualSlices(u8,fixture.cases[0].mq.bytes(),fixture.q.bytes());
 			try std.testing.expectEqualSlices(u8,fixture.cases[0].mr.bytes(),fixture.r.bytes());
 		}
-	};
-	inline for (.{Mp.divModBurnikelZiegler,Mp.divModBurnikelZieglerLeadingBlock,Mp.divModBurnikelZieglerShortQuotient,Mp.divModBurnikelZieglerShortCarry}) |divide| for ([_]usize{16,256}) |width| for ([_]usize{width+1,2*width}) |dividend_len| {
-		var baseline = std.testing.FailingAllocator.init(std.testing.allocator,.{});
-		try Check.run(divide,baseline.allocator(),width,dividend_len);
-		try std.testing.expectEqual(baseline.allocated_bytes,baseline.freed_bytes);
-		for (0..baseline.alloc_index) |index| {
-			var failing = std.testing.FailingAllocator.init(std.testing.allocator,.{ .fail_index = index });
-			Check.run(divide,failing.allocator(),width,dividend_len) catch |err| try std.testing.expectEqual(error.OutOfMemory,err);
-			try std.testing.expect(failing.has_induced_failure);
-			try std.testing.expectEqual(failing.allocated_bytes,failing.freed_bytes);
+		fn verify(comptime divide: anytype, width: usize, dividend_len: usize) !void {
+			var baseline = std.testing.FailingAllocator.init(std.testing.allocator,.{});
+			try @This().run(divide,baseline.allocator(),width,dividend_len);
+			try std.testing.expectEqual(baseline.allocated_bytes,baseline.freed_bytes);
+			for (0..baseline.alloc_index) |index| {
+				var failing = std.testing.FailingAllocator.init(std.testing.allocator,.{.fail_index=index});
+				@This().run(divide,failing.allocator(),width,dividend_len) catch |err| try std.testing.expectEqual(error.OutOfMemory,err);
+				try std.testing.expect(failing.has_induced_failure);
+				try std.testing.expectEqual(failing.allocated_bytes,failing.freed_bytes);
+			}
 		}
 	};
+	inline for (.{Mp.divModBurnikelZiegler,Mp.divModBurnikelZieglerLeadingBlock,Mp.divModBurnikelZieglerShortQuotient,Mp.divModBurnikelZieglerShortCarry,Mp.divModBurnikelZieglerWideQuotient}) |divide| for ([_]usize{16,256}) |width| for ([_]usize{width+1,2*width}) |dividend_len| {
+		try Check.verify(divide,width,dividend_len);
+	};
+	for ([_]usize{8,2048,2049}) |gap| try Check.verify(Mp.divModBurnikelZieglerWideQuotient,4096,4096+gap);
+}
+
+test "wide quotient boundary preserves every sign and input alias" {
+	var zero = Mp.init(std.testing.allocator); defer zero.deinit(); try zero.setI64(0);
+	for ([_]usize{8,2048,2049}) |gap| {
+		var fixture = try Fixture.initSized(std.testing.allocator,4096,32,4096+gap); defer fixture.deinit();
+		for (fixture.cases,0..) |*case,index| {
+			const negative_a = (index/8)%4 == 1 or (index/8)%4 == 3;
+			const negative_b = (index/8)%4 >= 2;
+			if (negative_a) { try case.a.sub(&zero,&case.a); try case.mr.sub(&zero,&case.mr); }
+			if (negative_b) try case.b.sub(&zero,&case.b);
+			if (negative_a != negative_b) try case.mq.sub(&zero,&case.mq);
+			for (0..3) |alias_mode| {
+				var a = Mp.init(std.testing.allocator); defer a.deinit();
+				var b = Mp.init(std.testing.allocator); defer b.deinit();
+				try a.setBytes(case.a.bytes()); try b.setBytes(case.b.bytes());
+				const q = switch (alias_mode) { 0 => &fixture.q, 1 => &a, else => &b };
+				const r = switch (alias_mode) { 0 => &fixture.r, 1 => &b, else => &a };
+				try Mp.divModBurnikelZieglerWideQuotient(q,r,&a,&b);
+				try std.testing.expectEqualSlices(u8,case.mq.bytes(),q.bytes());
+				try std.testing.expectEqualSlices(u8,case.mr.bytes(),r.bytes());
+			}
+		}
+	}
 }
 
 test "explicit public B-Z division preserves signed results and input aliases" {
@@ -510,7 +582,7 @@ test "explicit public B-Z division preserves signed results and input aliases" {
 			}
 			if (negative_b) try case.b.sub(&zero,&case.b);
 			if (negative_a != negative_b) try case.mq.sub(&zero,&case.mq);
-			inline for (.{Mp.divModBurnikelZiegler,Mp.divModBurnikelZieglerLeadingBlock,Mp.divModBurnikelZieglerShortQuotient,Mp.divModBurnikelZieglerShortCarry}) |divide| for (0..3) |alias_mode| {
+			inline for (.{Mp.divModBurnikelZiegler,Mp.divModBurnikelZieglerLeadingBlock,Mp.divModBurnikelZieglerShortQuotient,Mp.divModBurnikelZieglerShortCarry,Mp.divModBurnikelZieglerWideQuotient}) |divide| for (0..3) |alias_mode| {
 				var a = Mp.init(std.testing.allocator); defer a.deinit();
 				var b = Mp.init(std.testing.allocator); defer b.deinit();
 				try a.setBytes(case.a.bytes()); try b.setBytes(case.b.bytes());

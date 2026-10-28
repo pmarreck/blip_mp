@@ -69,6 +69,7 @@ annotate=[
 	profiling-division-selected-competitors.json = Matched public BLIP, selected B-Z kernel, Knuth and GMP cohorts
 	profiling-division-short-public.json = Paired short-quotient B-Z versus current public division
 	profiling-division-short.json = Paired short-quotient fallback versus fixed leading-block B-Z
+	profiling-division-wide-quotient.json = Paired wider quotient fallback with floor, gap and neighboring-alignment controls
 	profiling-division.json = Verified division workloads with separate 1/12 CPU cohorts
 	profiling-goldilocks.json = Paired Goldilocks product and transform-pass timing cohorts
 	profiling-hybrid-boundary.json = Fused-subtree crossover sweep near seven-eighths transform occupancy

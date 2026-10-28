@@ -396,6 +396,22 @@
 								all(.components[]; (.cpu_ns|length)==6 and (.wall_ns|length)==6 and all(.cpu_ns[],.wall_ns[]; .>0)) and
 								all(range(6); . as $i | (($row.samples.cpu_ns[$i] - ([$row.components[].cpu_ns[$i]]|add/2))|fabs)<0.001))
 						' geometry.json > /dev/null
+						for width in 64 4096 4097; do
+							if test "$width" -eq 64; then gaps=7,8,16,32,64; else gaps=7,8,2047,2048,2049,$width; fi
+							${self.packages.${system}.division-probe}/bin/blip-mp-division-probe wide-quotient "$width" "$gaps" > wide.json 2> stderr
+							test ! -s stderr
+							jq -e --argjson width "$width" --arg gaps "$gaps" '
+								.schema == "performance-measurement/v1" and .correct == true and .build_mode == "ReleaseFast" and
+								.method == "division-wide-quotient-paired-v1" and .divisor_bytes == $width and
+								[.rows[].size] == ($gaps|split(",")|map(tonumber)) and all(.rows[]; . as $row |
+									.dividend_bytes == $width+.size and .fixture_count == 32 and .iterations == (if $width <=128 then 512 else 32 end) and .warmup_cases == 64 and
+									[.components[].method] == ["short_carry","wide_quotient"] and
+									all(.components[]; (.cpu_ns|length)==6 and (.wall_ns|length)==6 and all(.cpu_ns[],.wall_ns[]; .>0)) and
+									all(range(6); . as $i | (($row.samples.cpu_ns[$i] - ([$row.components[].cpu_ns[$i]]|add/2))|fabs)<0.001 and (($row.samples.wall_ns[$i] - ([$row.components[].wall_ns[$i]]|add/2))|fabs)<0.001))
+							' wide.json > /dev/null
+						done
+						if ${self.packages.${system}.division-probe}/bin/blip-mp-division-probe wide-quotient 4097 8192 > wide.json 2> stderr; then exit 1; fi
+						test ! -s wide.json
 						mkdir -p "$out"
 					'';
 
