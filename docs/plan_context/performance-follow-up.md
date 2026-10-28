@@ -2179,6 +2179,43 @@ The complete suite passed in 89 seconds of mixed Nix preparation/check time;
 the unit/C-API build phase took 87 seconds. Production build and all-system
 evaluation passed. This is correctness qualification, not a performance verdict.
 
+### Reciprocal small-divisor results
+
+Reciprocal reuse reduces the current BLIP kernel's CPU time for every sampled
+dividend length from 64 through 4,097 bytes. At 64 bytes it saves 20–27%; at
+256 bytes, 44–45%; at 4,096 bytes, 51–52%. Every process mean, including
+diagnostic attempts, favors the candidate at those longer lengths. This
+compares BLIP kernels; GMP is only the correctness oracle for this campaign.
+
+| Divisor bytes | 8-byte dividend: reciprocal / current | 16-byte dividend | 64-byte dividend | 256-byte dividend | 4,096-byte dividend |
+|---:|---:|---:|---:|---:|---:|
+| 1 | 1.397 / 1.399* | 1.708 / 1.660* | 0.797 / 0.796* | 0.558 / 0.558* | 0.484 / 0.485* |
+| 2 | 1.365 / 1.363* | 1.564 / 1.592* | 0.780 / 0.781* | 0.559 / 0.557* | 0.486 / 0.485* |
+| 4 | 1.275 / 1.272 | 1.534 / 1.531 | 0.753 / 0.755 | 0.555 / 0.554 | 0.487 / 0.488 |
+| 8 | 0.927 / 1.003 | 1.266 / 1.276 | 0.726 / 0.733 | 0.548 / 0.547 | 0.492 / 0.492 |
+
+Cells give paired medians for 1-CPU / 12-CPU affinity cohorts. Starred cohorts
+remain inconclusive after their single permitted variation retry; the other
+six are unbaselined. Five cohorts retried once, for 65 correct processes in
+total. No baseline is accepted. The [sanitized summary](../benchmarks/storage-aware/division-single-reciprocal-summary.json)
+retains all 96 size/cohort cells and diagnostic process ratios.
+
+Short inputs often lose substantially: at 16 bytes, the candidate takes
+1.27–1.71 times the fixed kernel's CPU time. The apparent 8-byte-divisor win
+at an 8-byte dividend is inconsistent across cohorts and processes. Do not
+replace the kernel unconditionally. A conservative experimental signed path
+can retain the current kernel below 64 magnitude bytes, then measure full
+public-wrapper costs and direct GMP comparisons before selecting anything.
+This proposed boundary is the lowest sampled winning length, not a proven
+optimal crossover; intervening lengths remain unmeasured.
+
+Campaign `blip-mp-recip-20261028T233037Z` measured commit
+`3d47f7e94c7fd5e2bf9dbba61a59f3c7166ffddb` on the same Linux x86_64,
+Threadripper 3990X, Zig 0.16.0 ReleaseFast and GMP 6.3.0 configuration. Its
+executable SHA-256 was `9470b41d80526ac94d5fc8bd0fbd3b6672ac42b29bbcccb29b09eeea9e9cc11b`;
+source digest `ce75ccbdb70ec3934d543f1fbb8c7403d019cc5cae1538b0c198fb63b23f0f79`
+stayed unchanged. Exact-commit CI passed. Public dispatch is unchanged.
+
 ### Build feedback follow-up
 
 Repeated full checks take roughly 90–120 seconds of mixed preparation and

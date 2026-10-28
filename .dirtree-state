@@ -50,6 +50,7 @@ annotate=[
 	docs/benchmarks/storage-aware/division-selected-public-summary.json = Corrected selected signed B-Z versus public division across five geometries
 	docs/benchmarks/storage-aware/division-short-public-summary.json = Short-quotient candidate versus public division ratios across five geometries
 	docs/benchmarks/storage-aware/division-short-summary.json = Short-quotient fallback versus fixed B-Z ratios and timing verdicts
+	docs/benchmarks/storage-aware/division-single-reciprocal-summary.json = Reciprocal versus fixed small-divisor ratios, including short-input regressions
 	docs/benchmarks/storage-aware/division-single-variable-summary.json = Variable small-divisor byte kernel versus GMP with all-process CPU ratios
 	docs/benchmarks/storage-aware/division-wide-quotient-summary.json = Paired wider quotient fallback results and neighboring-width regressions
 	docs/benchmarks/storage-aware/inverse-paired-summary.json = Exact-width recursive versus wider-window inverse CPU ratios and verdicts
