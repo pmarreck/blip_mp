@@ -2,9 +2,10 @@
 const std = @import("std");
 const blip = @import("blip_mp");
 const fft = blip.fft;
-const Layout = enum { stockham, paired, fused, truncated, hybrid };
-const Mode = enum { product, passes, truncated, hybrid };
+const Layout = enum { stockham, paired, fused, truncated, hybrid, centered };
+const Mode = enum { product, passes, truncated, hybrid, centered };
 fn layouts(mode: Mode) [3]Layout {
+	if (mode == .centered) return .{ .paired, .fused, .centered };
 	if (mode == .hybrid) return .{ .fused, .truncated, .hybrid };
 	return if (mode == .truncated) .{ .stockham, .fused, .truncated } else .{ .stockham, .paired, .fused };
 }
@@ -48,7 +49,7 @@ pub fn main(init: std.process.Init) !void {
 	const report = .{
 		.schema = "performance-measurement/v1", .correct = true, .build_mode = "ReleaseFast",
 		.compiler = @import("builtin").zig_version_string,
-		.method = switch (options.mode) { .hybrid => "gold-hybrid-products-v1", .truncated => "gold-truncated-products-v1", else => "gold-paired-layouts-v1" }, .mode = @tagName(options.mode),
+		.method = switch (options.mode) { .centered => "gold-centered-products-v1", .hybrid => "gold-hybrid-products-v1", .truncated => "gold-truncated-products-v1", else => "gold-paired-layouts-v1" }, .mode = @tagName(options.mode),
 		.cpu_clock = "CLOCK_PROCESS_CPUTIME_ID", .wall_clock = "CLOCK_MONOTONIC",
 		.seed_usage = "fixed 0x601D_B3AC; identical inputs across layouts; engine seed does not alter inputs",
 		.normalization = "rotating ABCCBA batches; primary samples average all layouts per operation; components preserve individual means; no subtraction",
@@ -156,6 +157,7 @@ const Fixture = struct {
 	n: usize,
 	a: []u8, b: []u8, out: []u8,
 	pa: []u8, pb: []u8, tw_fwd: []u8, tw_inv: []u8, scratch: []u8,
+	centered: []u8,
 	expected: []u8,
 	fn init(parent: std.mem.Allocator, mode: Mode, size: usize) !Fixture {
 		if (!validSize(mode, size)) return error.InvalidArguments;
@@ -167,6 +169,8 @@ const Fixture = struct {
 		const bytes = n * fft.gold_residue.slot_bytes;
 		const work = try allocator.alloc(u8, 4 * bytes);
 		@memset(work, 0xa5);
+		const centered = try allocator.alloc(u8, if (mode == .centered) 3 * n * fft.gold_centered_residue.slot_bytes else 0);
+		@memset(centered, 0xa5);
 		const pa = work[0..bytes];
 		const tw_fwd = work[2 * bytes .. 5 * bytes / 2];
 		const tw_inv = work[5 * bytes / 2 .. 3 * bytes];
@@ -198,21 +202,25 @@ const Fixture = struct {
 				fft.gold_residue.write(expected, i, @intCast((@as(u128, value) * n) % fft.GOLDILOCKS_P));
 			}
 		}
-		return .{ .arena = arena, .mode = mode, .n = n, .a = a, .b = b, .out = out, .expected = expected,
+		return .{ .arena = arena, .mode = mode, .n = n, .a = a, .b = b, .out = out, .expected = expected, .centered = centered,
 			.pa = pa, .pb = work[bytes .. 2 * bytes], .tw_fwd = tw_fwd, .tw_inv = tw_inv, .scratch = work[3 * bytes ..] };
 	}
 	fn run(self: *@This(), layout: Layout) !void {
 		inline for (std.enums.values(Layout)) |method| {
 			if (layout == method) {
 				if (self.mode != .passes) {
-					const len = if (method == .hybrid)
+					if (method == .centered and self.mode != .centered) return error.InvalidArguments;
+					const centered_bytes = self.n * fft.gold_centered_residue.slot_bytes;
+					const len = if (method == .centered)
+						fft.goldMulMagnitudesCentered(self.a, self.b, self.out, self.centered[0..centered_bytes], self.centered[centered_bytes .. 2 * centered_bytes], self.centered[2 * centered_bytes ..][0..centered_bytes / 2], self.centered[5 * centered_bytes / 2 ..])
+					else if (method == .hybrid)
 						fft.goldMulMagnitudesTruncatedFused(self.a, self.b, self.out, self.pa, self.pb, self.tw_fwd, self.tw_inv)
 					else if (method == .truncated)
 						fft.goldMulMagnitudesTruncated(self.a, self.b, self.out, self.pa, self.pb, self.tw_fwd, self.tw_inv)
 					else fft.goldMulMagnitudesWithLayout(@enumFromInt(@intFromEnum(method)), self.a, self.b, self.out, self.pa, self.pb, self.tw_fwd, self.tw_inv, if (method == .stockham) self.scratch else &.{});
 					if (!std.mem.eql(u8, self.expected, self.out[0..len])) return error.IncorrectWork;
 				} else {
-					if (method == .truncated or method == .hybrid) return error.InvalidArguments;
+					if (method == .truncated or method == .hybrid or method == .centered) return error.InvalidArguments;
 					@memcpy(self.pa, self.a);
 					if (method == .stockham) {
 						fft.goldNttStockham(self.pa, self.scratch, self.tw_fwd);
@@ -230,6 +238,14 @@ const Fixture = struct {
 	}
 	fn deinit(self: *@This()) void { self.arena.deinit(); }
 };
+
+test "Goldilocks centered comparison has explicit storage controls" {
+	const options = try parse(&.{"centered", "1024,4096", "8"});
+	try std.testing.expectEqualStrings("centered", @tagName(options.mode));
+	for (layouts(options.mode), [_][]const u8{"paired", "fused", "centered"}) |method, name| {
+		try std.testing.expectEqualStrings(name, @tagName(method));
+	}
+}
 
 test "Goldilocks probe classifies modes sizes and bounded iteration counts" {
 	for (std.enums.values(Mode)) |mode| {

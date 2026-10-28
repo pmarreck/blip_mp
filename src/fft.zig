@@ -12,6 +12,7 @@
 const std = @import("std");
 pub const residue = @import("fft_residue.zig").Small;
 pub const gold_residue = @import("fft_residue.zig").Gold;
+pub const gold_centered_residue = @import("fft_residue.zig").CenteredGold;
 pub const shifted_residue = @import("fft_residue.zig").Shifted(P);
 
 // ── Field parameters (single-prime variant) ──────────────────────────────────
@@ -2869,15 +2870,27 @@ pub fn goldNttStockham(a: []u8, scratch: []u8, twiddles: []const u8) void {
 }
 
 /// Natural-order input to bit-reversed output. Pair with the unscaled inverse.
-pub fn goldNttForwardPaired(comptime fused: bool, a: []u8, twiddles: []const u8) void {
-	const n = a.len / gold_residue.slot_bytes;
-	std.debug.assert(n != 0 and n & (n - 1) == 0 and a.len % gold_residue.slot_bytes == 0);
-	std.debug.assert(twiddles.len / gold_residue.slot_bytes >= n / 2);
-	goldNttForwardPairedInner(fused, false, a, twiddles, 1);
+pub fn goldNttForwardWithCodec(comptime Codec: type, comptime fused: bool, a: []u8, twiddles: []const u8) void {
+	const n = a.len / Codec.slot_bytes;
+	std.debug.assert(n != 0 and n & (n - 1) == 0 and a.len % Codec.slot_bytes == 0);
+	std.debug.assert(twiddles.len / Codec.slot_bytes >= n / 2);
+	goldNttForwardPairedInner(Codec, fused, false, a, twiddles, 1);
 }
 
-fn goldNttForwardPairedInner(comptime fused: bool, comptime strided: bool, a: []u8, twiddles: []const u8, stride: usize) void {
-	const n = a.len / gold_residue.slot_bytes;
+/// Bit-reversed input to natural-order output, without the final N^-1 scale.
+pub fn goldNttInverseWithCodec(comptime Codec: type, comptime fused: bool, a: []u8, twiddles: []const u8) void {
+	const n = a.len / Codec.slot_bytes;
+	std.debug.assert(n != 0 and n & (n - 1) == 0 and a.len % Codec.slot_bytes == 0);
+	std.debug.assert(twiddles.len / Codec.slot_bytes >= n / 2);
+	goldNttInversePairedInner(Codec, fused, false, a, twiddles, 1);
+}
+
+pub fn goldNttForwardPaired(comptime fused: bool, a: []u8, twiddles: []const u8) void {
+	goldNttForwardWithCodec(gold_residue, fused, a, twiddles);
+}
+
+fn goldNttForwardPairedInner(comptime Codec: type, comptime fused: bool, comptime strided: bool, a: []u8, twiddles: []const u8, stride: usize) void {
+	const n = a.len / Codec.slot_bytes;
 	var m = n;
 	while (m > 1) : (m >>= 1) {
 		if (fused and m >= 4) {
@@ -2886,19 +2899,19 @@ fn goldNttForwardPairedInner(comptime fused: bool, comptime strided: bool, a: []
 			var base: usize = 0;
 			while (base < n) : (base += m) {
 				for (0..quarter) |j| {
-					const x0 = gold_residue.read(a, base + j);
-					const x1 = gold_residue.read(a, base + j + quarter);
-					const x2 = gold_residue.read(a, base + j + 2 * quarter);
-					const x3 = gold_residue.read(a, base + j + 3 * quarter);
+					const x0 = Codec.read(a, base + j);
+					const x1 = Codec.read(a, base + j + quarter);
+					const x2 = Codec.read(a, base + j + 2 * quarter);
+					const x3 = Codec.read(a, base + j + 3 * quarter);
 					const sum0 = goldAddMod(x0, x2);
 					const sum1 = goldAddMod(x1, x3);
-					const diff0 = goldMulMod(goldSubMod(x0, x2), gold_residue.read(twiddles, j * step));
-					const diff1 = goldMulMod(goldSubMod(x1, x3), gold_residue.read(twiddles, (j + quarter) * step));
-					const w2 = gold_residue.read(twiddles, 2 * j * step);
-					gold_residue.write(a, base + j, goldAddMod(sum0, sum1));
-					gold_residue.write(a, base + j + quarter, goldMulMod(goldSubMod(sum0, sum1), w2));
-					gold_residue.write(a, base + j + 2 * quarter, goldAddMod(diff0, diff1));
-					gold_residue.write(a, base + j + 3 * quarter, goldMulMod(goldSubMod(diff0, diff1), w2));
+					const diff0 = goldMulMod(goldSubMod(x0, x2), Codec.read(twiddles, j * step));
+					const diff1 = goldMulMod(goldSubMod(x1, x3), Codec.read(twiddles, (j + quarter) * step));
+					const w2 = Codec.read(twiddles, 2 * j * step);
+					Codec.write(a, base + j, goldAddMod(sum0, sum1));
+					Codec.write(a, base + j + quarter, goldMulMod(goldSubMod(sum0, sum1), w2));
+					Codec.write(a, base + j + 2 * quarter, goldAddMod(diff0, diff1));
+					Codec.write(a, base + j + 3 * quarter, goldMulMod(goldSubMod(diff0, diff1), w2));
 				}
 			}
 			m >>= 1; // The loop update completes the two-stage advance.
@@ -2909,11 +2922,11 @@ fn goldNttForwardPairedInner(comptime fused: bool, comptime strided: bool, a: []
 		var base: usize = 0;
 		while (base < n) : (base += m) {
 			for (0..half) |j| {
-				const x = gold_residue.read(a, base + j);
-				const y = gold_residue.read(a, base + j + half);
-				const w = gold_residue.read(twiddles, j * step);
-				gold_residue.write(a, base + j, goldAddMod(x, y));
-				gold_residue.write(a, base + j + half, goldMulMod(goldSubMod(x, y), w));
+				const x = Codec.read(a, base + j);
+				const y = Codec.read(a, base + j + half);
+				const w = Codec.read(twiddles, j * step);
+				Codec.write(a, base + j, goldAddMod(x, y));
+				Codec.write(a, base + j + half, goldMulMod(goldSubMod(x, y), w));
 			}
 		}
 	}
@@ -2921,14 +2934,11 @@ fn goldNttForwardPairedInner(comptime fused: bool, comptime strided: bool, a: []
 
 /// Bit-reversed input to natural-order output, without the final N^-1 scale.
 pub fn goldNttInversePaired(comptime fused: bool, a: []u8, twiddles: []const u8) void {
-	const n = a.len / gold_residue.slot_bytes;
-	std.debug.assert(n != 0 and n & (n - 1) == 0 and a.len % gold_residue.slot_bytes == 0);
-	std.debug.assert(twiddles.len / gold_residue.slot_bytes >= n / 2);
-	goldNttInversePairedInner(fused, false, a, twiddles, 1);
+	goldNttInverseWithCodec(gold_residue, fused, a, twiddles);
 }
 
-fn goldNttInversePairedInner(comptime fused: bool, comptime strided: bool, a: []u8, twiddles: []const u8, stride: usize) void {
-	const n = a.len / gold_residue.slot_bytes;
+fn goldNttInversePairedInner(comptime Codec: type, comptime fused: bool, comptime strided: bool, a: []u8, twiddles: []const u8, stride: usize) void {
+	const n = a.len / Codec.slot_bytes;
 	var m: usize = 2;
 	while (m <= n) : (m <<= 1) {
 		if (fused and m <= n / 2) {
@@ -2938,19 +2948,19 @@ fn goldNttInversePairedInner(comptime fused: bool, comptime strided: bool, a: []
 			var base: usize = 0;
 			while (base < n) : (base += width) {
 				for (0..quarter) |j| {
-					const w2 = gold_residue.read(twiddles, 2 * j * step);
-					const x0 = gold_residue.read(a, base + j);
-					const x1 = goldMulMod(gold_residue.read(a, base + j + quarter), w2);
-					const x2 = gold_residue.read(a, base + j + 2 * quarter);
-					const x3 = goldMulMod(gold_residue.read(a, base + j + 3 * quarter), w2);
+					const w2 = Codec.read(twiddles, 2 * j * step);
+					const x0 = Codec.read(a, base + j);
+					const x1 = goldMulMod(Codec.read(a, base + j + quarter), w2);
+					const x2 = Codec.read(a, base + j + 2 * quarter);
+					const x3 = goldMulMod(Codec.read(a, base + j + 3 * quarter), w2);
 					const sum0 = goldAddMod(x0, x1);
 					const diff0 = goldSubMod(x0, x1);
-					const sum1 = goldMulMod(goldAddMod(x2, x3), gold_residue.read(twiddles, j * step));
-					const diff1 = goldMulMod(goldSubMod(x2, x3), gold_residue.read(twiddles, (j + quarter) * step));
-					gold_residue.write(a, base + j, goldAddMod(sum0, sum1));
-					gold_residue.write(a, base + j + 2 * quarter, goldSubMod(sum0, sum1));
-					gold_residue.write(a, base + j + quarter, goldAddMod(diff0, diff1));
-					gold_residue.write(a, base + j + 3 * quarter, goldSubMod(diff0, diff1));
+					const sum1 = goldMulMod(goldAddMod(x2, x3), Codec.read(twiddles, j * step));
+					const diff1 = goldMulMod(goldSubMod(x2, x3), Codec.read(twiddles, (j + quarter) * step));
+					Codec.write(a, base + j, goldAddMod(sum0, sum1));
+					Codec.write(a, base + j + 2 * quarter, goldSubMod(sum0, sum1));
+					Codec.write(a, base + j + quarter, goldAddMod(diff0, diff1));
+					Codec.write(a, base + j + 3 * quarter, goldSubMod(diff0, diff1));
 				}
 			}
 			m <<= 1;
@@ -2961,10 +2971,10 @@ fn goldNttInversePairedInner(comptime fused: bool, comptime strided: bool, a: []
 		var base: usize = 0;
 		while (base < n) : (base += m) {
 			for (0..half) |j| {
-				const x = gold_residue.read(a, base + j);
-				const y = goldMulMod(gold_residue.read(a, base + j + half), gold_residue.read(twiddles, j * step));
-				gold_residue.write(a, base + j, goldAddMod(x, y));
-				gold_residue.write(a, base + j + half, goldSubMod(x, y));
+				const x = Codec.read(a, base + j);
+				const y = goldMulMod(Codec.read(a, base + j + half), Codec.read(twiddles, j * step));
+				Codec.write(a, base + j, goldAddMod(x, y));
+				Codec.write(a, base + j + half, goldSubMod(x, y));
 			}
 		}
 	}
@@ -3001,44 +3011,47 @@ test "paired Goldilocks transforms match a direct field DFT and canonical bytes"
 	defer zero.deinit();
 	try zero.setI64(0);
 	var rng = std.Random.DefaultPrng.init(0x601D_F053);
-	for ([_]usize{ 1, 2, 4, 8, 16, 32, 64 }) |n| {
-		const backing = try testing.allocator.alloc(u8, n * gold_residue.slot_bytes + 2);
+	inline for (.{ gold_residue, @import("fft_residue.zig").CenteredGold }) |Codec| for ([_]usize{ 1, 2, 4, 8, 16, 32, 64 }) |n| {
+		const backing = try testing.allocator.alloc(u8, n * Codec.slot_bytes + 2);
 		defer testing.allocator.free(backing);
 		const actual = backing[1 .. backing.len - 1];
 		const input = try testing.allocator.alloc(u8, actual.len);
 		defer testing.allocator.free(input);
-		const tw = try testing.allocator.alloc(u8, n / 2 * gold_residue.slot_bytes);
+		const tw = try testing.allocator.alloc(u8, n / 2 * Codec.slot_bytes);
 		defer testing.allocator.free(tw);
 		for (0..4) |pattern| {
-			for (0..n) |i| gold_residue.write(input, i, switch (pattern) {
+			for (0..n) |i| Codec.write(input, i, switch (pattern) {
 				0 => 0, 1 => @intFromBool(i == n - 1), 2 => GOLDILOCKS_P - 1,
 				else => rng.random().uintLessThan(u64, GOLDILOCKS_P),
 			});
 			inline for (.{ false, true }) |inverse| {
 				const root = Oracle.pow(7, (GOLDILOCKS_P - 1) / n);
 				const omega = if (inverse) Oracle.pow(root, GOLDILOCKS_P - 2) else root;
-				for (0..n / 2) |i| gold_residue.write(tw, i, Oracle.pow(omega, i));
+				for (0..n / 2) |i| Codec.write(tw, i, Oracle.pow(omega, i));
 				inline for (.{ false, true }) |fused| {
 					@memset(backing, 0xa5);
-					for (0..n) |i| gold_residue.write(actual, if (inverse) Oracle.reverse(i, n) else i, gold_residue.read(input, i));
-					if (inverse) goldNttInversePaired(fused, actual, tw) else goldNttForwardPaired(fused, actual, tw);
+					for (0..n) |i| Codec.write(actual, if (inverse) Oracle.reverse(i, n) else i, Codec.read(input, i));
+					if (inverse) goldNttInverseWithCodec(Codec, fused, actual, tw) else goldNttForwardWithCodec(Codec, fused, actual, tw);
 					for (0..n) |k| {
 						var sum: u64 = 0;
 						for (0..n) |j| {
-							const term = Oracle.mul(gold_residue.read(input, j), Oracle.pow(omega, j * k));
+							const term = Oracle.mul(Codec.read(input, j), Oracle.pow(omega, j * k));
 							sum = @intCast((@as(u128, sum) + term) % GOLDILOCKS_P);
 						}
 						const index = if (inverse) k else Oracle.reverse(k, n);
-						try testing.expectEqual(sum, gold_residue.read(actual, index));
-						try expected.addU64(&zero, sum);
-						try testing.expectEqualSlices(u8, expected.bytes(), gold_residue.encoded(actual, index));
+						try testing.expectEqual(sum, Codec.read(actual, index));
+						if (Codec == gold_residue) try expected.addU64(&zero, sum) else {
+							const centered: i128 = if (sum <= GOLDILOCKS_P / 2) sum else @as(i128, sum) - GOLDILOCKS_P;
+							try expected.setI64(@intCast(centered));
+						}
+						try testing.expectEqualSlices(u8, expected.bytes(), Codec.encoded(actual, index));
 					}
 					try testing.expectEqual(@as(u8, 0xa5), backing[0]);
 					try testing.expectEqual(@as(u8, 0xa5), backing[backing.len - 1]);
 				}
 			}
 		}
-	}
+	};
 }
 
 /// Truncate partial regions and fuse complete transform subtrees.
@@ -3066,7 +3079,7 @@ fn goldTftInner(comptime fused: bool, a: []u8, twiddles: []const u8, active: usi
 	const n = a.len / gold_residue.slot_bytes;
 	if (n == 1 or active == 0 or count == 0) return;
 	if (fused and active == n and count == n) {
-		goldNttForwardPairedInner(true, true, a, twiddles, stride);
+		goldNttForwardPairedInner(gold_residue, true, true, a, twiddles, stride);
 		return;
 	}
 	const half = n >> 1;
@@ -3099,7 +3112,7 @@ fn goldItftInner(comptime fused: bool, a: []u8, tw_fwd: []const u8, tw_inv: []co
 	const n = a.len / gold_residue.slot_bytes;
 	if (n == 1 or count == 0) return;
 	if (fused and count == n) {
-		goldNttInversePairedInner(true, true, a, tw_inv, stride);
+		goldNttInversePairedInner(gold_residue, true, true, a, tw_inv, stride);
 		return;
 	}
 	const half = n >> 1;
@@ -3241,20 +3254,25 @@ pub const GOLD_MAX_FFT_COMBINED_LEN: usize = 524288;
 
 pub const GoldLayout = enum { stockham, paired, fused };
 
+/// Experimental full fused transform with nine-byte centered BLIP slots.
+pub fn goldMulMagnitudesCentered(a: []const u8, b: []const u8, out: []u8, pa: []u8, pb: []u8, tw_fwd: []u8, tw_inv: []u8) usize {
+	return goldMulMagnitudesImpl(@import("fft_residue.zig").CenteredGold, .fused, false, false, a, b, out, pa, pb, tw_fwd, tw_inv, &.{});
+}
+
 /// Experimental input/output-truncated product with no Stockham scratch.
 /// N is the next power of two at least ceil(a.len/2)+ceil(b.len/2)-1.
 /// Data buffers need N encoded slots; each twiddle table needs N/2 slots.
 pub fn goldMulMagnitudesTruncated(a: []const u8, b: []const u8, out: []u8, pa: []u8, pb: []u8, tw_fwd: []u8, tw_inv: []u8) usize {
-	return goldMulMagnitudesImpl(.paired, true, false, a, b, out, pa, pb, tw_fwd, tw_inv, &.{});
+	return goldMulMagnitudesImpl(gold_residue, .paired, true, false, a, b, out, pa, pb, tw_fwd, tw_inv, &.{});
 }
 
 pub fn goldMulMagnitudesTruncatedFused(a: []const u8, b: []const u8, out: []u8, pa: []u8, pb: []u8, tw_fwd: []u8, tw_inv: []u8) usize {
-	return goldMulMagnitudesImpl(.paired, true, true, a, b, out, pa, pb, tw_fwd, tw_inv, &.{});
+	return goldMulMagnitudesImpl(gold_residue, .paired, true, true, a, b, out, pa, pb, tw_fwd, tw_inv, &.{});
 }
 
 /// Experimental layout selection; paired layouts require no Stockham scratch.
 pub fn goldMulMagnitudesWithLayout(comptime layout: GoldLayout, a: []const u8, b: []const u8, out: []u8, pa: []u8, pb: []u8, tw_fwd: []u8, tw_inv: []u8, stockham_scratch: []u8) usize {
-	return goldMulMagnitudesImpl(layout, false, false, a, b, out, pa, pb, tw_fwd, tw_inv, stockham_scratch);
+	return goldMulMagnitudesImpl(gold_residue, layout, false, false, a, b, out, pa, pb, tw_fwd, tw_inv, stockham_scratch);
 }
 
 test "truncated Goldilocks products match GMP across packing and carry boundaries" {
@@ -3284,9 +3302,13 @@ test "truncated Goldilocks products match GMP across packing and carry boundarie
 				if (pattern == 2) a[a.len - 1] = 1;
 			}
 			const expected_len = try @import("gmp_test_support").product(a, b, expected);
-			inline for (0..5) |method| {
+			inline for (0..6) |method| {
 				@memset(result, 0xa5); @memset(storage, 0xa5);
-				const len = if (method == 4)
+				const centered_bytes = n * @import("fft_residue.zig").CenteredGold.slot_bytes;
+				const centered_tw_bytes = n / 2 * @import("fft_residue.zig").CenteredGold.slot_bytes;
+				const len = if (method == 5)
+					goldMulMagnitudesCentered(a, b, result[1 .. result.len - 1], work[0..centered_bytes], work[centered_bytes .. 2 * centered_bytes], work[2 * centered_bytes ..][0..centered_tw_bytes], work[2 * centered_bytes + centered_tw_bytes ..][0..centered_tw_bytes])
+				else if (method == 4)
 					goldMulMagnitudesTruncatedFused(a, b, result[1 .. result.len - 1], work[0..bytes], work[bytes .. 2 * bytes], work[2 * bytes ..][0..tw_bytes], work[2 * bytes + tw_bytes ..][0..tw_bytes])
 				else if (method == 3)
 					goldMulMagnitudesTruncated(a, b, result[1 .. result.len - 1], work[0..bytes], work[bytes .. 2 * bytes], work[2 * bytes ..][0..tw_bytes], work[2 * bytes + tw_bytes ..][0..tw_bytes])
@@ -3310,6 +3332,8 @@ test "truncated Goldilocks products match GMP across packing and carry boundarie
 	try testing.expectEqual(@as(u8, 0xa5), empty_out[0]);
 	try testing.expectEqual(@as(usize, 0), goldMulMagnitudesTruncatedFused(&.{}, &.{1}, &empty_out, &.{}, &.{}, &.{}, &.{}));
 	try testing.expectEqual(@as(usize, 0), goldMulMagnitudesTruncatedFused(&.{1}, &.{}, &empty_out, &.{}, &.{}, &.{}, &.{}));
+	try testing.expectEqual(@as(usize, 0), goldMulMagnitudesCentered(&.{}, &.{1}, &empty_out, &.{}, &.{}, &.{}, &.{}));
+	try testing.expectEqual(@as(usize, 0), goldMulMagnitudesCentered(&.{1}, &.{}, &empty_out, &.{}, &.{}, &.{}, &.{}));
 	try testing.expectEqual(@as(u8, 0xa5), empty_out[0]);
 }
 
@@ -3331,10 +3355,11 @@ pub fn goldMulMagnitudesWithScratch(
 	tw_inv: []u8,
 	stockham_scratch: []u8,
 ) usize {
-	return goldMulMagnitudesImpl(.stockham, false, false, a, b, out, pa, pb, tw_fwd, tw_inv, stockham_scratch);
+	return goldMulMagnitudesImpl(gold_residue, .stockham, false, false, a, b, out, pa, pb, tw_fwd, tw_inv, stockham_scratch);
 }
 
 fn goldMulMagnitudesImpl(
+	comptime Codec: type,
 	comptime layout: GoldLayout,
 	comptime truncated: bool,
 	comptime fused_truncated: bool,
@@ -3347,6 +3372,7 @@ fn goldMulMagnitudesImpl(
 	tw_inv: []u8,
 	stockham_scratch: []u8,
 ) usize {
+	if ((truncated or layout == .stockham) and Codec != gold_residue) @compileError("centered experiment requires a full paired transform");
 	if (a.len == 0 or b.len == 0) return 0;
 	const need_byte_len = a.len + b.len;
 	std.debug.assert(out.len >= need_byte_len);
@@ -3361,41 +3387,41 @@ fn goldMulMagnitudesImpl(
 	if (truncated) @memset(out[0..need_byte_len], 0);
 	var N: usize = 1;
 	while (N < need_digit_len) N <<= 1;
-	std.debug.assert((pa.len / gold_residue.slot_bytes) >= N);
-	std.debug.assert((pb.len / gold_residue.slot_bytes) >= N);
-	std.debug.assert((tw_fwd.len / gold_residue.slot_bytes) >= N / 2);
-	std.debug.assert((tw_inv.len / gold_residue.slot_bytes) >= N / 2);
+	std.debug.assert((pa.len / Codec.slot_bytes) >= N);
+	std.debug.assert((pb.len / Codec.slot_bytes) >= N);
+	std.debug.assert((tw_fwd.len / Codec.slot_bytes) >= N / 2);
+	std.debug.assert((tw_inv.len / Codec.slot_bytes) >= N / 2);
 
-	if (layout == .stockham) std.debug.assert((stockham_scratch.len / gold_residue.slot_bytes) >= N);
+	if (layout == .stockham) std.debug.assert((stockham_scratch.len / Codec.slot_bytes) >= N);
 
-	const pa_n = pa[(0) * gold_residue.slot_bytes .. (N) * gold_residue.slot_bytes];
-	const pb_n = pb[(0) * gold_residue.slot_bytes .. (N) * gold_residue.slot_bytes];
-	const tw_fwd_n = tw_fwd[(0) * gold_residue.slot_bytes .. (N / 2) * gold_residue.slot_bytes];
-	const tw_inv_n = tw_inv[(0) * gold_residue.slot_bytes .. (N / 2) * gold_residue.slot_bytes];
-	const sc_n = if (layout == .stockham) stockham_scratch[0 .. N * gold_residue.slot_bytes] else &.{};
+	const pa_n = pa[(0) * Codec.slot_bytes .. (N) * Codec.slot_bytes];
+	const pb_n = pb[(0) * Codec.slot_bytes .. (N) * Codec.slot_bytes];
+	const tw_fwd_n = tw_fwd[(0) * Codec.slot_bytes .. (N / 2) * Codec.slot_bytes];
+	const tw_inv_n = tw_inv[(0) * Codec.slot_bytes .. (N / 2) * Codec.slot_bytes];
+	const sc_n = if (layout == .stockham) stockham_scratch[0 .. N * Codec.slot_bytes] else &.{};
 
 	// Precompute twiddles.
 	const omega_n = goldNthRootOfUnity(N);
 	const omega_n_inv = goldInvMod(omega_n);
 	if (N > 1) {
-		gold_residue.write(tw_fwd_n, 0, 1);
-		gold_residue.write(tw_inv_n, 0, 1);
+		Codec.write(tw_fwd_n, 0, 1);
+		Codec.write(tw_inv_n, 0, 1);
 	}
 	var j: usize = 1;
 	while (j < N / 2) : (j += 1) {
-		gold_residue.write(tw_fwd_n, j, goldMulMod(gold_residue.read(tw_fwd_n, j - 1), omega_n));
-		gold_residue.write(tw_inv_n, j, goldMulMod(gold_residue.read(tw_inv_n, j - 1), omega_n_inv));
+		Codec.write(tw_fwd_n, j, goldMulMod(Codec.read(tw_fwd_n, j - 1), omega_n));
+		Codec.write(tw_inv_n, j, goldMulMod(Codec.read(tw_inv_n, j - 1), omega_n_inv));
 	}
 
 	// Pack bytes into 16-bit digits (LE within each digit).
-	gold_residue.clear(pa_n);
-	gold_residue.clear(pb_n);
+	Codec.clear(pa_n);
+	Codec.clear(pb_n);
 	{
 		var i: usize = 0;
 		while (i * 2 < a.len) : (i += 1) {
 			const lo: u64 = a[i * 2];
 			const hi: u64 = if (i * 2 + 1 < a.len) @as(u64, a[i * 2 + 1]) else 0;
-			gold_residue.write(pa_n, i, lo | (hi << 8));
+			Codec.write(pa_n, i, lo | (hi << 8));
 		}
 	}
 	{
@@ -3403,7 +3429,7 @@ fn goldMulMagnitudesImpl(
 		while (i * 2 < b.len) : (i += 1) {
 			const lo: u64 = b[i * 2];
 			const hi: u64 = if (i * 2 + 1 < b.len) @as(u64, b[i * 2 + 1]) else 0;
-			gold_residue.write(pb_n, i, lo | (hi << 8));
+			Codec.write(pb_n, i, lo | (hi << 8));
 		}
 	}
 
@@ -3415,15 +3441,15 @@ fn goldMulMagnitudesImpl(
 		goldNttStockham(pa_n, sc_n, tw_fwd_n);
 		goldNttStockham(pb_n, sc_n, tw_fwd_n);
 	} else {
-		goldNttForwardPaired(layout == .fused, pa_n, tw_fwd_n);
-		goldNttForwardPaired(layout == .fused, pb_n, tw_fwd_n);
+		goldNttForwardWithCodec(Codec, layout == .fused, pa_n, tw_fwd_n);
+		goldNttForwardWithCodec(Codec, layout == .fused, pb_n, tw_fwd_n);
 	}
-	for (0..if (truncated) coefficients else N) |i| gold_residue.write(pa_n, i, goldMulMod(gold_residue.read(pa_n, i), gold_residue.read(pb_n, i)));
+	for (0..if (truncated) coefficients else N) |i| Codec.write(pa_n, i, goldMulMod(Codec.read(pa_n, i), Codec.read(pb_n, i)));
 	if (truncated) {
 		// The inverse's remaining entries are known scaled coefficients, all zero.
-		gold_residue.clear(pa_n[coefficients * gold_residue.slot_bytes ..]);
+		Codec.clear(pa_n[coefficients * Codec.slot_bytes ..]);
 		goldItftDispatch(fused_truncated, pa_n, tw_fwd_n, tw_inv_n, coefficients);
-	} else if (layout == .stockham) goldNttStockham(pa_n, sc_n, tw_inv_n) else goldNttInversePaired(layout == .fused, pa_n, tw_inv_n);
+	} else if (layout == .stockham) goldNttStockham(pa_n, sc_n, tw_inv_n) else goldNttInverseWithCodec(Codec, layout == .fused, pa_n, tw_inv_n);
 	const n_inv = goldInvMod(@intCast(N));
 
 	// Carry propagation: each digit holds a value up to ~2^43; emit 16 bits
@@ -3431,7 +3457,7 @@ fn goldMulMagnitudesImpl(
 	var carry: u64 = 0;
 	var out_pos: usize = 0;
 	for (0..N) |i| {
-		const val = goldMulMod(gold_residue.read(pa_n, i), n_inv) +% carry; // u64 add (carry adds < 2^48, val fits)
+		const val = goldMulMod(Codec.read(pa_n, i), n_inv) +% carry; // u64 add (carry adds < 2^48, val fits)
 		// Emit low 16 bits as 2 bytes (LE).
 		if (out_pos < out.len) out[out_pos] = @truncate(val & 0xFF);
 		if (out_pos + 1 < out.len) out[out_pos + 1] = @truncate((val >> 8) & 0xFF);

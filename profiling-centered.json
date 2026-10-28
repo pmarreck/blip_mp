@@ -1,0 +1,74 @@
+{
+  "schema": "performance-project/v1",
+  "project": "blip_mp",
+  "history_url": "file:///var/lib/performance-profiling",
+  "identity": {
+    "runtime": "Zig-0.16.0",
+    "build_mode": "ReleaseFast",
+    "concurrency": 1
+  },
+  "cases": [
+    {
+      "name": "gold_centered_1core",
+      "definition": "gold-centered-products-v1",
+      "cores": 1,
+      "processes": 5,
+      "mode": "bm",
+      "metric": "cpu_ns",
+      "comparison": "absolute",
+      "command": [
+        "blip-mp-gold-probe",
+        "centered",
+        "{sizes}",
+        "2"
+      ],
+      "sizes": [
+        1024,
+        16384,
+        65536,
+        100000,
+        131072,
+        262144
+      ],
+      "bounds": [
+        0.1,
+        1000000000
+      ],
+      "policy": {
+        "max_cv": 0.1
+      },
+      "timeout_ms": 120000
+    },
+    {
+      "name": "gold_centered_12core",
+      "definition": "gold-centered-products-v1",
+      "cores": 12,
+      "processes": 5,
+      "mode": "bm",
+      "metric": "cpu_ns",
+      "comparison": "absolute",
+      "command": [
+        "blip-mp-gold-probe",
+        "centered",
+        "{sizes}",
+        "2"
+      ],
+      "sizes": [
+        1024,
+        16384,
+        65536,
+        100000,
+        131072,
+        262144
+      ],
+      "bounds": [
+        0.1,
+        1000000000
+      ],
+      "policy": {
+        "max_cv": 0.1
+      },
+      "timeout_ms": 120000
+    }
+  ]
+}

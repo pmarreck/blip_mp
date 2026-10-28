@@ -426,16 +426,16 @@
 							test ! -s stdout
 							test ! -s stderr
 						done
-						for mode in product passes truncated hybrid; do
+						for mode in product passes truncated hybrid centered; do
 							${self.packages.${system}.gold-probe}/bin/blip-mp-gold-probe "$mode" 1024,2048 8 > output.json 2> stderr
 							test ! -s stderr
 							jq -e --arg mode "$mode" '
 								.schema == "performance-measurement/v1" and .correct == true and
 								.build_mode == "ReleaseFast" and .mode == $mode and
-								.method == (if $mode == "hybrid" then "gold-hybrid-products-v1" elif $mode == "truncated" then "gold-truncated-products-v1" else "gold-paired-layouts-v1" end) and
+								.method == (if $mode == "centered" then "gold-centered-products-v1" elif $mode == "hybrid" then "gold-hybrid-products-v1" elif $mode == "truncated" then "gold-truncated-products-v1" else "gold-paired-layouts-v1" end) and
 								[.rows[].size] == [1024,2048] and [.rows[].transform_length] == [1024,2048] and
 								all(.rows[]; . as $row | .iterations == 8 and
-									[.components[].layout] == (if $mode == "hybrid" then ["fused","truncated","hybrid"] elif $mode == "truncated" then ["stockham","fused","truncated"] else ["stockham","paired","fused"] end) and
+									[.components[].layout] == (if $mode == "centered" then ["paired","fused","centered"] elif $mode == "hybrid" then ["fused","truncated","hybrid"] elif $mode == "truncated" then ["stockham","fused","truncated"] else ["stockham","paired","fused"] end) and
 									all(.samples[]; length == 6 and all(.[]; . > 0)) and
 									all(.components[]; (.cpu_ns|length) == 6 and (.wall_ns|length) == 6 and all(.cpu_ns[], .wall_ns[]; . > 0)) and
 									all(range(6); . as $i |

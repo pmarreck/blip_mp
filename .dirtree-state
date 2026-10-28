@@ -40,6 +40,7 @@ annotate=[
 	docs/plan_context/legacy-roadmap.md = Preserved roadmap decisions, experiments and unresolved tasks
 	docs/plan_context/performance-follow-up.md = Measurement gaps and reconciled benchmark follow-up scope
 	docs/plan_context/roadmap-reconciliation.md = Current dispositions and evidence for unchecked historical roadmap tasks
+	profiling-centered.json = Paired positive and centered signed-BLIP Goldilocks product measurements
 	profiling-division.json = Verified division workloads with separate 1/12 CPU cohorts
 	profiling-goldilocks.json = Paired Goldilocks product and transform-pass timing cohorts
 	profiling-hybrid-boundary.json = Fused-subtree crossover sweep near seven-eighths transform occupancy

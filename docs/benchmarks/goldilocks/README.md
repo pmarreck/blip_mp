@@ -1,5 +1,53 @@
 # Paired and fused Goldilocks transforms
 
+## Centered storage experiment
+
+For the Goldilocks prime `p = 2^64 - 2^32 + 1`, each field element has a unique
+representative in `[-floor(p/2), floor(p/2)]`. Store `r` when `r <= p/2` and
+`r-p` otherwise. Both endpoints fit in signed 64 bits, so their canonical BLIP
+encodings need at most eight payload bytes plus one header byte. The positive
+codec sometimes needs a ninth payload byte for sign extension.
+
+The experimental centered codec therefore reserves nine bytes per slot rather
+than ten. The representation stays variable length, zero remains an immediate,
+and every stored integer represents the same field element modulo `p`. Reading
+a negative representative adds `p` before the existing unsigned field arithmetic.
+This differs from biasing every value by a constant, which would change its
+residue. No new BLIP symbol or format rule is needed.
+
+The hypothesis is that 10% less residue capacity and fewer sign-extension writes
+can outweigh the sign conversion on each read/write. Nine-byte stride alignment
+and extra conversion instructions may instead make it slower. Qualification
+starts with independent signed-BLIP and DFT checks, then compares complete fused
+products with the existing positive codec in the same executable. Production
+keeps the positive codec until measurements support a change. Allocated capacity
+alone does not establish a resident-memory or runtime improvement.
+
+The codec passed 10,050 independently constructed signed values with both round
+trips, all signed payload boundaries, poisoned capacity and unaligned canaries.
+The direct DFT corpus now checks both codecs, both directions and fused/unfused
+stages at lengths 1–64. Forty additional centered products match GMP across
+packing, zero, dense-carry and one-point-transform boundaries. The codec,
+transform and product tests each failed against their empty implementations.
+
+Run `./bm --verified-goldilocks --config profiling-centered.json` for complete
+products at 1024, 16384, 65536, 100000, 131072 and 262144 bytes per operand.
+The `gold-centered-products-v1` mode compares positive radix-2, positive fused
+and centered fused products using rotating ABCCBA batches. Each sample retains
+all three CPU/wall components; compare centered fused with positive fused to
+isolate storage. Packing, twiddle preparation, transforms, carry output and
+GMP-derived byte verification are timed. Prepared scratch allocations are not.
+Each affinity cohort uses five processes, six samples per process, two products
+per batch and a 120-second process deadline. No historical baseline is approved.
+
+The new parser mode first failed its test. Fixture corruption and allocation
+failure controls cover the new mode, and the CLI verifies component names,
+positive samples and normalization. The complete native suite passed in 100
+seconds of mixed Nix preparation/check time, with 15,535 integration GMP
+comparisons unchanged. Production build and all-system evaluation passed.
+
+## Existing layout measurements
+
 This experiment follows the [blocked multiplication measurements](../storage-aware/RESEARCH.md).
 It compares three layouts with the same Goldilocks field arithmetic and canonical
 signed-BLIP residue codec. The October 28 comparison supports selecting the fused
