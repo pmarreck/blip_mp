@@ -213,3 +213,59 @@ sides of seven-eighths occupancy. That threshold is a hypothesis to test, not
 an accepted crossover. The separate boundary cases use 120-second per-process
 deadlines for their larger operands. The original inconclusive result stays
 in history; the new sweep answers a different dispatch question.
+
+## Occupancy dispatch
+
+Campaign `blip-mp-hybrid-boundary-20261028T064355Z` measured commit
+`3644b1f89d1e62025943a6c5ae6f8c986795a55a`. Its source hash stayed
+`4e5e3beade4bbc2fc5b02dab667bb0ab7a195c5f583a8fa29a72ddbe10b5800f`.
+All 15 processes verified their products. The one-CPU cohort was again
+`INCONCLUSIVE` after its allowed retry; the 12-CPU cohort was `UNBASELINED`.
+The campaign waited about two and a half minutes for admission and ran for
+about eleven minutes. Neither cohort passes a historical performance gate.
+
+| Bytes per operand | Combined/full-fused CPU ratio, 1 CPU | Combined/full-fused CPU ratio, 12 CPUs |
+|---:|---:|---:|
+| 100000 | 0.846 | 0.844 |
+| 106496 | 0.876 | 0.878 |
+| 114688 | 0.927 | 0.926 |
+| 114689 | 0.945 | 0.949 |
+| 122880 | 0.981 | 0.985 |
+| 126976 | 1.016 | 1.016 |
+| 131073 | 0.605 | 0.596 |
+| 196608 | 0.813 | 0.809 |
+| 212992 | 0.887 | 0.881 |
+| 229376 | 0.929 | 0.929 |
+| 229377 | 0.942 | 0.952 |
+| 245760 | 0.989 | 0.998 |
+
+Each ratio is the upper median of 30 paired samples in the final five
+processes. The [complete boundary summary](hybrid-boundary-summary.jsonl)
+retains all 16 sizes and all three method comparisons. At fifteen-sixteenths
+occupancy, individual process means crossed one. Seven-eighths retains a
+larger margin, so it is a conservative selection point rather than a claim
+of the exact optimum.
+
+Across all attempts, the 100000-byte process-mean ratios ranged from 0.838 to
+0.965; at 114688 bytes they ranged from 0.836 to 0.976. At 229376 bytes one
+process in the earlier inconclusive attempt reached 1.009, while the final
+cohorts' medians were both 0.929. The cutoff is supported by repeated median
+gains, not a guarantee that every process wins.
+
+Production selects fused-subtree truncation when the convolution coefficient
+count is at most seven-eighths of the transform length, within the measured
+131072- and 262144-point transforms. The existing 99999-byte Goldilocks entry
+threshold remains. Other sizes use full fusion. With equal-length operands,
+this selects payload widths 99999–114688 and 131073–229376 bytes. The coefficient
+count is `2*ceil(width/2)-1`, which matters at odd/even boundaries.
+
+This is a layout choice inside the existing Goldilocks backend. It establishes
+no new crossover against Toom, another FFT backend or GMP, and no measured
+benefit on other architectures. Larger transforms retain their existing path.
+
+The dispatch classifier first failed with the full-fusion-only implementation.
+It now exhausts 424,292 payload widths against independently listed selection
+intervals. Public GMP checks cover both signs and both operand-alias orders at
+nine boundary widths, including transitions back to full fusion. The complete
+native suite passed with 13,231 GMP comparisons in 89 seconds of mixed Nix
+preparation/check time; this is not a test-execution-only duration.

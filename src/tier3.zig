@@ -124,6 +124,25 @@ pub fn releaseGoldFftScratch() void {
 /// Retained Goldilocks dispatch threshold for equal-length operands.
 /// The fused layout comparison does not establish a new Toom/GMP crossover.
 pub const GOLD_FFT_THRESHOLD: usize = 99999;
+
+fn goldUseTruncated(payload_len: usize, transform_len: usize) bool {
+	// Qualified at two transform lengths; retain full fusion above that range.
+	// Seven-eighths occupancy keeps a margin before the measured crossover.
+	if (payload_len < GOLD_FFT_THRESHOLD or transform_len > 262144) return false;
+	const coefficients = payload_len - 1 + payload_len % 2;
+	return coefficients <= transform_len - transform_len / 8;
+}
+
+test "Goldilocks truncated dispatch classifies measured occupancy intervals" {
+	// Independently specified byte intervals, including the unmeasured-size cap.
+	for (99998..524290) |width| {
+		var n: usize = 1;
+		while (n < width) n <<= 1;
+		const expected = (width >= 99999 and width <= 114688) or
+			(width >= 131073 and width <= 229376);
+		try std.testing.expectEqual(expected, goldUseTruncated(width, n));
+	}
+}
 // 2026-05-18 Phase 2 result: empirically loses to Toom-3 across all bench sizes
 // on aarch64. The bandwidth-escape model (Phase 1 projected 1.50× speedup) is
 // blocked by an architectural ceiling: Goldilocks's mulMod needs a u64×u64=u128
@@ -3720,7 +3739,13 @@ pub fn mulRawBlip(
 		while (N_gold < need_digit_len) N_gold <<= 1;
 		try gold_fft_scratch.ensureCapacity(fft_alloc.?, N_gold);
 		@memset(scratch_r[0..r_len], 0);
-		_ = fft.goldMulMagnitudesWithLayout(
+		if (goldUseTruncated(a_pay.len, N_gold)) {
+			_ = fft.goldMulMagnitudesTruncatedFused(
+				a_mag, b_mag, scratch_r[0..r_len],
+				gold_fft_scratch.pa, gold_fft_scratch.pb,
+				gold_fft_scratch.tw_fwd, gold_fft_scratch.tw_inv,
+			);
+		} else _ = fft.goldMulMagnitudesWithLayout(
 			.fused,
 			a_mag,
 			b_mag,

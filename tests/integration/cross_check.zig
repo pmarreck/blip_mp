@@ -1092,7 +1092,7 @@ pub fn main() !u8 {
 	std.debug.print("  PASS asymmetric public/aliasing products: 24 GMP comparisons\n", .{});
 
 	// Exact payload widths exercise both sides of the Goldilocks dispatch.
-	for ([_]usize{ 99998, 99999, 100000 }) |width| {
+	for ([_]usize{ 99998, 99999, 100000, 114688, 114689, 131072, 131073, 229376, 229377 }) |width| {
 		const encoded = try allocator.alloc(u8, width + 16);
 		defer allocator.free(encoded);
 		const header = try blip_mp.tier3.writeHeader(encoded, width);
@@ -1128,7 +1128,7 @@ pub fn main() !u8 {
 			}
 		}
 	}
-	std.debug.print("  PASS Goldilocks public/sign/aliasing boundaries: 24 GMP comparisons\n", .{});
+	std.debug.print("  PASS Goldilocks public/sign/aliasing boundaries: 72 GMP comparisons\n", .{});
 
 	std.debug.print("\n=== Summary ===\n", .{});
 	std.debug.print("Total checks: {d}\n", .{total_checks});

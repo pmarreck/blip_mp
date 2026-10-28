@@ -89,12 +89,15 @@ notes retain the unbaselined and inconclusive cohort verdicts.
 [truncated product](docs/benchmarks/goldilocks/TRUNCATED.md) against Stockham
 and fusion around transform-padding boundaries.
 Its first measurements saved 15–22% CPU time just above sampled padding jumps
-but lost elsewhere, so production continues to use fusion.
+but lost elsewhere, motivating fusion inside complete subtrees.
 `./bm --verified-hybrid` tests whether fusing complete subtrees recovers those
 losses while retaining truncation's padding-boundary gains.
 Its first paired medians saved about 15% at 100000 bytes and 34–40% just above
-padding jumps; nearly full transforms still lost. A crossover sweep remains
-necessary, and the one-CPU cohort remained inconclusive after its allowed retry.
+padding jumps; nearly full transforms still lost. The subsequent crossover
+sweep supports selecting it up to seven-eighths occupancy in the measured
+131072- and 262144-point transforms. Full fusion remains the fallback. The
+one-CPU cohort remained inconclusive after its allowed retry; these paired
+observations do not establish a passed historical gate or a new GMP win.
 
 Requires [Nix](https://nixos.org/) (handles the Zig 0.16.0 toolchain and GMP build for benchmarks).
 
