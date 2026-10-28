@@ -76,6 +76,12 @@ Every result is checked against GMP; CPU and
 wall samples include that comparison. See the [measurement notes](docs/plan_context/performance-follow-up.md#unit-latency-and-inverse-probe)
 for scope and retained correctness coverage.
 
+The separate [exact-width paired inverse campaign](docs/plan_context/performance-follow-up.md#paired-exact-width-inverse-results-october-28-2026)
+crosses the recursive threshold. Recursive inverse takes 3.3–3.4× wider-window
+HGCD's CPU time at 4,096 and 4,097 bits, with near-parity at the 4,095-bit
+fallback control. Public dispatch remains unchanged. All results agree with
+GMP; timing verdicts remain unbaselined/inconclusive.
+
 `./bm --verified-division` measures the retained division fixtures with complete
 GMP quotient/remainder checks. Repeated timing work runs outside the unit suite;
 its [probe checks and method](docs/plan_context/performance-follow-up.md#division-probes)

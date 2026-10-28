@@ -982,15 +982,11 @@ pub const Mp = struct {
 		//                ~2× more single-precision EEA steps per multi-precision
 		//                matrix-apply, giving 1.06–1.6× speedup at RSA sizes.
 		//
-		// Note (M11.2): invModHGCDRecursive (sub-quadratic HGCD primitive)
-		// is implemented and correctness-validated against invModHGCD at
-		// 256–4096 bits, but is NOT wired into the dispatcher. Reason:
-		// without sub-quadratic multiplication (FFT), the recursion's
-		// matrix-composition overhead grows faster than its EEA-batching
-		// savings — the form regresses ~5–18% at 1024–2048 bits and
-		// catastrophically (~60×) at 8192 bits. It will become a clear win
-		// once FFT mul lands; until then, M10 wider-window Lehmer is the
-		// practical optimum.
+		// The explicit recursive entry point is not selected here. Paired
+		// exact-width measurements near its 4096-bit entry threshold favor
+		// wider-window Lehmer. Historical nominal-width fixtures below that
+		// threshold exercised a fallback rather than recursive HGCD. See
+		// docs/plan_context/performance-follow-up.md for current evidence.
 		const m_bits = m.bitLen();
 		if (m_bits < 96) return invModClassical(r, a, m);
 		// Stein's binary GCD wins at 128-bit (2.5× over Lehmer in internal
@@ -2352,15 +2348,15 @@ pub const Mp = struct {
 	/// O(n / 124) to O(log n).
 	///
 	/// Falls back to `invModHGCD` (M10 wider-window Lehmer) for moduli below
-	/// the recursive HGCD threshold (~1024 bits) where the recursive
-	/// matrix-composition overhead doesn't yet amortize.
+	/// the recursive entry threshold (4096 significant bits). This boundary
+	/// is not a measured profitability crossover; public `invMod` retains
+	/// wider-window Lehmer at these sizes.
 	pub fn invModHGCDRecursive(r: *Mp, a: *const Mp, m: *const Mp) ArithError!bool {
 		if (m.cached_sign == 0) return error.DivisionByZero;
 		const allocator = r.allocator;
 
-		// Threshold: only profitable above ~4096 bits where matrix-composition
-		// cost amortizes across many EEA steps. Below, defer to wider-window
-		// Lehmer (M10) which itself defers to classical Lehmer below 256 bits.
+		// Preserve the explicit recursive entry boundary for controlled
+		// comparisons. Below it, use wider-window Lehmer (M10).
 		const HGCD_REC_THRESHOLD: usize = 4096;
 		if (m.bitLen() < HGCD_REC_THRESHOLD) return invModHGCD(r, a, m);
 

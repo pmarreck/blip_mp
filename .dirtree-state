@@ -35,6 +35,7 @@ annotate=[
 	docs/benchmarks/storage-aware/division-cutoff-summary.json = Paired recursive division cutoff ratios, controls and cohort verdicts
 	docs/benchmarks/storage-aware/division-fallback-summary.json = Paired chunk versus byte division fallback ratios and cohort verdicts
 	docs/benchmarks/storage-aware/division-paired-summary.json = Identical-input Burnikel-Ziegler versus Knuth baseline ratios and verdicts
+	docs/benchmarks/storage-aware/inverse-paired-summary.json = Exact-width recursive versus wider-window inverse CPU ratios and verdicts
 	docs/benchmarks/storage-aware/paired-tail-summary.jsonl = Paired final-block timing components and process ratios
 	docs/benchmarks/storage-aware/powm-baseline-summary.json = Verified powm baseline process means and cohort verdicts
 	docs/benchmarks/storage-aware/powm-boundary-summary.json = Paired small-width Montgomery timings, process ratios and verdicts

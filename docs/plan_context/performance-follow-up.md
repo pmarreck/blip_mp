@@ -374,6 +374,42 @@ The thirteen inverse-probe tests execute in 511 ms after 32 seconds of
 compilation. The complete native suite passed in 106 seconds of mixed Nix
 preparation/check time. The production build and all-system evaluation passed.
 
+### Paired exact-width inverse results, October 28, 2026
+
+Campaign `blip-mp-inverse-exact-paired-20261028T171403Z` measured commit
+`6638200dfb1a1715ad7f84f07a001c5b68576b1c` on Linux x86_64, Threadripper
+3990X, Zig 0.16.0 ReleaseFast. All fifteen processes, including the variation
+retry, verified every result against GMP. The source digest remained
+`2ba265d52bea4e6aa98fbf80bd0d767c295432fe805a52a213d8d5b66a519f13`.
+The single-CPU cohort is `UNBASELINED` after one attempt; the 12-CPU affinity
+cohort is `INCONCLUSIVE` after two attempts. No baseline was approved. The
+campaign waited about four and a half minutes for shared resource admission;
+that wait is outside the timings. Measurements were recorded at 17:18:42–44 UTC.
+
+Median within-sample recursive/wider-window CPU ratios across five selected
+processes and six samples per process are:
+
+| Significant modulus bits | Invertible cases / 16 | 1-CPU ratio | 12-CPU affinity ratio |
+|---:|---:|---:|---:|
+| 4,095 | 13 | 1.003 | 1.000 |
+| 4,096 | 14 | 3.379 | 3.380 |
+| 4,097 | 12 | 3.324 | 3.328 |
+
+The 4,095-bit row invokes the same wider-window algorithm through both entry
+points and remains near parity. At 4,096 and 4,097 bits, every process mean,
+including diagnostics, favors wider-window HGCD. Recursive/wider-window ratios
+range from 3.229 to 3.504. This supports retaining current public inverse
+dispatch; it does not establish behavior at much larger widths or prove which
+operation dominates recursive cost. The experiment does not time GMP.
+
+The [summary](../benchmarks/storage-aware/inverse-paired-summary.json) preserves
+component timings, paired ranges, and all process-mean ratios. Full samples
+remain in external history under the campaign prefix and
+`inverse_exact_paired_1core` / `inverse_exact_paired_12core` suffixes. The stale
+source comments describing a 1,024-bit boundary and promising a future FFT
+win have been corrected. The explicit recursive entry boundary remains 4,096
+bits for controlled comparison; it is not a measured profitability crossover.
+
 ## Division probes
 
 `./bm --verified-division` runs the six workloads formerly embedded in five

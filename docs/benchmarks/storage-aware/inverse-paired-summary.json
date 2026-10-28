@@ -1,0 +1,263 @@
+[
+  {
+    "case": "inverse_exact_paired_1core",
+    "verdict": "UNBASELINED",
+    "attempts": 1,
+    "source": "2ba265d52bea4e6aa98fbf80bd0d767c295432fe805a52a213d8d5b66a519f13",
+    "source_after": "2ba265d52bea4e6aa98fbf80bd0d767c295432fe805a52a213d8d5b66a519f13",
+    "cores": 1,
+    "modulus_bits": 4095,
+    "inverse_count": 13,
+    "selected_components": [
+      {
+        "method": "hgcd",
+        "cpu_ns": 195536.61458333334,
+        "wall_ns": 199455.73958333334
+      },
+      {
+        "method": "recursive",
+        "cpu_ns": 195167.25,
+        "wall_ns": 198370.45833333334
+      }
+    ],
+    "recursive_to_hgcd": {
+      "paired_median": 1.0027338365387455,
+      "sample_min": 0.9422129029858989,
+      "sample_max": 1.2490110856082435,
+      "process_means": [
+        1.0570446596208176,
+        1.011013703262673,
+        1.0053439834648383,
+        0.9981110208739145,
+        0.9833815682694499
+      ],
+      "all_attempt_process_means": [
+        1.0570446596208176,
+        1.011013703262673,
+        1.0053439834648383,
+        0.9981110208739145,
+        0.9833815682694499
+      ]
+    }
+  },
+  {
+    "case": "inverse_exact_paired_1core",
+    "verdict": "UNBASELINED",
+    "attempts": 1,
+    "source": "2ba265d52bea4e6aa98fbf80bd0d767c295432fe805a52a213d8d5b66a519f13",
+    "source_after": "2ba265d52bea4e6aa98fbf80bd0d767c295432fe805a52a213d8d5b66a519f13",
+    "cores": 1,
+    "modulus_bits": 4096,
+    "inverse_count": 14,
+    "selected_components": [
+      {
+        "method": "hgcd",
+        "cpu_ns": 193522.77083333334,
+        "wall_ns": 196607.0625
+      },
+      {
+        "method": "recursive",
+        "cpu_ns": 655711.84375,
+        "wall_ns": 666239.7083333334
+      }
+    ],
+    "recursive_to_hgcd": {
+      "paired_median": 3.3792590076354974,
+      "sample_min": 3.215919444167538,
+      "sample_max": 4.507235481780377,
+      "process_means": [
+        3.3344952889430735,
+        3.503902884890187,
+        3.4009892799277646,
+        3.3882929689690906,
+        3.393499507659968
+      ],
+      "all_attempt_process_means": [
+        3.3344952889430735,
+        3.503902884890187,
+        3.4009892799277646,
+        3.3882929689690906,
+        3.393499507659968
+      ]
+    }
+  },
+  {
+    "case": "inverse_exact_paired_1core",
+    "verdict": "UNBASELINED",
+    "attempts": 1,
+    "source": "2ba265d52bea4e6aa98fbf80bd0d767c295432fe805a52a213d8d5b66a519f13",
+    "source_after": "2ba265d52bea4e6aa98fbf80bd0d767c295432fe805a52a213d8d5b66a519f13",
+    "cores": 1,
+    "modulus_bits": 4097,
+    "inverse_count": 12,
+    "selected_components": [
+      {
+        "method": "hgcd",
+        "cpu_ns": 192634.48958333334,
+        "wall_ns": 195748.10416666666
+      },
+      {
+        "method": "recursive",
+        "cpu_ns": 643023.125,
+        "wall_ns": 651910.3958333334
+      }
+    ],
+    "recursive_to_hgcd": {
+      "paired_median": 3.3242387530668536,
+      "sample_min": 2.758267915651669,
+      "sample_max": 3.580654430603718,
+      "process_means": [
+        3.228507889046814,
+        3.309700275957961,
+        3.3576924440509273,
+        3.3380477524603887,
+        3.3021382510837474
+      ],
+      "all_attempt_process_means": [
+        3.228507889046814,
+        3.309700275957961,
+        3.3576924440509273,
+        3.3380477524603887,
+        3.3021382510837474
+      ]
+    }
+  },
+  {
+    "case": "inverse_exact_paired_12core",
+    "verdict": "INCONCLUSIVE",
+    "attempts": 2,
+    "source": "2ba265d52bea4e6aa98fbf80bd0d767c295432fe805a52a213d8d5b66a519f13",
+    "source_after": "2ba265d52bea4e6aa98fbf80bd0d767c295432fe805a52a213d8d5b66a519f13",
+    "cores": 12,
+    "modulus_bits": 4095,
+    "inverse_count": 13,
+    "selected_components": [
+      {
+        "method": "hgcd",
+        "cpu_ns": 173214.26041666666,
+        "wall_ns": 181533.8125
+      },
+      {
+        "method": "recursive",
+        "cpu_ns": 177919.4375,
+        "wall_ns": 182787.96875
+      }
+    ],
+    "recursive_to_hgcd": {
+      "paired_median": 1.0001843458740802,
+      "sample_min": 0.8182818765598273,
+      "sample_max": 1.2496242273055391,
+      "process_means": [
+        0.9756034361381968,
+        1.0434164443293603,
+        1.027163912901946,
+        0.9685062330171061,
+        1.0034216800046214
+      ],
+      "all_attempt_process_means": [
+        0.9756034361381968,
+        1.0434164443293603,
+        1.027163912901946,
+        0.9685062330171061,
+        1.0034216800046214,
+        1.0000320730543997,
+        0.9994991698494466,
+        1.0114463331611734,
+        1.0177140486465894,
+        0.9766436993669364
+      ]
+    }
+  },
+  {
+    "case": "inverse_exact_paired_12core",
+    "verdict": "INCONCLUSIVE",
+    "attempts": 2,
+    "source": "2ba265d52bea4e6aa98fbf80bd0d767c295432fe805a52a213d8d5b66a519f13",
+    "source_after": "2ba265d52bea4e6aa98fbf80bd0d767c295432fe805a52a213d8d5b66a519f13",
+    "cores": 12,
+    "modulus_bits": 4096,
+    "inverse_count": 14,
+    "selected_components": [
+      {
+        "method": "hgcd",
+        "cpu_ns": 135165.76041666666,
+        "wall_ns": 135936.19791666666
+      },
+      {
+        "method": "recursive",
+        "cpu_ns": 456614.1041666667,
+        "wall_ns": 459633.53125
+      }
+    ],
+    "recursive_to_hgcd": {
+      "paired_median": 3.379537953948989,
+      "sample_min": 3.3237180833615625,
+      "sample_max": 3.4452277298739973,
+      "process_means": [
+        3.3771385575449697,
+        3.3843616706426927,
+        3.3781787840285307,
+        3.3815681503269825,
+        3.377811118310366
+      ],
+      "all_attempt_process_means": [
+        3.3771385575449697,
+        3.3843616706426927,
+        3.3781787840285307,
+        3.3815681503269825,
+        3.377811118310366,
+        3.325569160850994,
+        3.374119757247385,
+        3.407331067431608,
+        3.369313720285021,
+        3.365517677299424
+      ]
+    }
+  },
+  {
+    "case": "inverse_exact_paired_12core",
+    "verdict": "INCONCLUSIVE",
+    "attempts": 2,
+    "source": "2ba265d52bea4e6aa98fbf80bd0d767c295432fe805a52a213d8d5b66a519f13",
+    "source_after": "2ba265d52bea4e6aa98fbf80bd0d767c295432fe805a52a213d8d5b66a519f13",
+    "cores": 12,
+    "modulus_bits": 4097,
+    "inverse_count": 12,
+    "selected_components": [
+      {
+        "method": "hgcd",
+        "cpu_ns": 135195.59375,
+        "wall_ns": 136417.94791666666
+      },
+      {
+        "method": "recursive",
+        "cpu_ns": 449854.8541666667,
+        "wall_ns": 452622.4270833333
+      }
+    ],
+    "recursive_to_hgcd": {
+      "paired_median": 3.327602975676477,
+      "sample_min": 3.2938043499312455,
+      "sample_max": 3.360873722554871,
+      "process_means": [
+        3.330308088542759,
+        3.3271655334002777,
+        3.327437246205864,
+        3.333198638102089,
+        3.3176572780350395
+      ],
+      "all_attempt_process_means": [
+        3.330308088542759,
+        3.3271655334002777,
+        3.327437246205864,
+        3.333198638102089,
+        3.3176572780350395,
+        3.3201585677742083,
+        3.3195924277722995,
+        3.323727027996708,
+        3.3271724804463227,
+        3.3281197943478733
+      ]
+    }
+  }
+]
