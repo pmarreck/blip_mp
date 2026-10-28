@@ -404,7 +404,7 @@ fn runWith(comptime selected: bool, init: std.process.Init, args: []const []cons
 		var fixture = try Fixture.init(std.heap.c_allocator,width,count);
 		defer fixture.deinit();
 		for (0..count) |index| for (methods) |method| try fixture.run(method,index);
-		const repeats: usize = if (width <= 128) 16 else 1;
+		const repeats = @import("division_crossover.zig").nativeRepeats(width);
 		var row: Row = .{ .size = width, .iterations = count*repeats, .divisor_min_bits = width*8-7,
 			.divisor_max_bits = width*8, .samples = undefined, .components = undefined };
 		for (&row.components,methods) |*component,method| {

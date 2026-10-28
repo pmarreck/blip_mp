@@ -124,6 +124,9 @@ GMP; timing verdicts remain unbaselined/inconclusive.
 GMP quotient/remainder checks. Repeated timing work runs outside the unit suite;
 its [probe checks and method](docs/plan_context/performance-follow-up.md#division-probes)
 remain part of `./test`.
+The [small-fixture clock fix](docs/plan_context/performance-follow-up.md#tiny-division-clock-batches)
+versions the public/geometry probes to v2 and increases their small-batch
+repetitions; large-case work counts and historical results remain intact.
 The [paired fallback experiment](docs/plan_context/performance-follow-up.md#fallback-result-and-selection)
 measured about 6–19× faster B-Z fallback calls at the sampled small and odd
 divisor widths by reusing chunk-reading Knuth. The default fallback now uses

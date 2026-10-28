@@ -1160,7 +1160,9 @@ time; the optimized production build and all-system evaluation passed too.
 Two preceding CLI-check attempts stopped with `ClockFailed`. All 25 signed
 mode/geometry combinations subsequently passed outside the sandbox and under
 syscall tracing inside it; temporary raw-clock instrumentation also passed.
-The cause remains unestablished. Instrumentation was removed before the final
+At that checkpoint the cause was unestablished; the later
+[small-batch diagnosis](#tiny-division-clock-batches) captured a native failure.
+Instrumentation was removed before the final
 suite, and failure context now identifies the mode and geometry. Clock checks
 remain strict; these diagnostic runs are not performance observations.
 
@@ -1359,6 +1361,40 @@ not an optimum or a proof about unmeasured widths. Keep the current entry fixed,
 qualify the new boundary and adjacent divisor alignments, and measure the
 candidate before selecting it. The internal short-carry leaf and public
 dispatch threshold remain unchanged by this measurement.
+
+### Tiny division clock batches
+
+CI for results commit `ad18de70c12efd805a1fba8599070d391a3c1b96` failed
+the division CLI check in `short one_chunk_limit`, while its production build
+and core tests passed. A failure-only diagnostic now retains wall-start,
+CPU-start, CPU-end and wall-end readings. Synthetic stopped/backward clocks
+first failed the recording test, then verified both complete context and strict
+error rejection. Successful batches leave the diagnostic buffer untouched.
+
+A bounded Nix-sandbox reproduction failed on attempt 70. The short-quotient
+method had executed sixteen calls; wall time advanced 6,312 ns, but both
+process-CPU readings were 1,159,784 ns. Thus a real small batch failed because
+its CPU timestamps did not advance. This does not establish an operating-system
+defect or the nominal resolution of the clock.
+
+Public and geometry probes now use sixteen repetitions for divisor widths
+through 128 bytes, matching the existing native competitor policy. A small
+paired sample therefore performs 512 verified calls per method; large samples
+still perform 32. Their `iterations` fields and normalization descriptions
+record the actual work. The affected methods and configuration definitions
+are versioned as `paired-v2`; historical v1 observations remain intact.
+The native competitor probe reuses the same policy helper with unchanged work
+counts and method version. No timing tolerance, zero fallback or hidden retry
+was introduced. Future clock failures in the signed public probe retain the
+diagnostic context.
+
+The same 500-attempt bounded reproduction passed with the corrected binary.
+That is finite qualification evidence, not a guarantee that clocks cannot fail.
+The complete suite includes deterministic repetition-boundary, clock-error and
+CLI iteration-count checks; it passed in 85 seconds of mixed Nix
+preparation/check time. Production build and all-system evaluation passed.
+No new arithmetic performance measurement or baseline approval follows from
+this measurement fix.
 
 ### Exact-capacity remainder regression
 

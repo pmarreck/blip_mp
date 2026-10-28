@@ -38,6 +38,16 @@ test "division comparison selects the intended algorithm pairs" {
 const Timing = struct { cpu_ns: f64, wall_ns: f64 };
 const Sample = struct { cpu_ns: [2]f64, wall_ns: [2]f64 };
 
+pub fn nativeRepeats(width: usize) usize { return if (width <= 128) 16 else 1; }
+
+test "native repetitions distinguish small fixtures and the 128-byte boundary" {
+	const sizes = [_]usize{8,9,16,31,32,63,64,65,127,128,129,256,512,1024,2048,4096,8192,12288,16384,16385};
+	const expected = [_]usize{16,16,16,16,16,16,16,16,16,16,1,1,1,1,1,1,1,1,1,1};
+	var actual: [sizes.len]usize = undefined;
+	for (sizes,0..) |size,index| actual[index] = nativeRepeats(size);
+	try std.testing.expectEqualSlices(usize,&expected,&actual);
+}
+
 pub fn pairedSample(state: anytype, comptime batch: anytype, methods: anytype, count: usize, repeats: usize, round: usize) !Sample {
 	if (count == 0 or count % 2 != 0 or repeats == 0) return error.InvalidArguments;
 	const order: [4]usize = if (round % 2 == 0) .{0,1,1,0} else .{1,0,0,1};
@@ -53,6 +63,12 @@ pub fn pairedSample(state: anytype, comptime batch: anytype, methods: anytype, c
 }
 
 pub fn timedBatch(work: anytype, clock: anytype, method: anytype, start: usize, count: usize, repeats: usize) !Timing {
+	return timedBatchWithReadings(work,clock,method,start,count,repeats,null);
+}
+
+/// On a non-advancing clock, retain wall-start/CPU-start/CPU-end/wall-end.
+/// Successful measurements do not write diagnostics or add work inside timing.
+pub fn timedBatchWithReadings(work: anytype, clock: anytype, method: anytype, start: usize, count: usize, repeats: usize, readings: ?*[4]u64) !Timing {
 	if (count == 0 or repeats == 0) return error.InvalidArguments;
 	const wall_start = try clock.read(.MONOTONIC);
 	const cpu_start = try clock.read(.PROCESS_CPUTIME_ID);
@@ -62,7 +78,10 @@ pub fn timedBatch(work: anytype, clock: anytype, method: anytype, start: usize, 
 	};
 	const cpu_end = try clock.read(.PROCESS_CPUTIME_ID);
 	const wall_end = try clock.read(.MONOTONIC);
-	if (cpu_end <= cpu_start or wall_end <= wall_start) return error.ClockFailed;
+	if (cpu_end <= cpu_start or wall_end <= wall_start) {
+		if (readings) |out| out.* = .{wall_start,cpu_start,cpu_end,wall_end};
+		return error.ClockFailed;
+	}
 	return .{ .cpu_ns = @floatFromInt(cpu_end - cpu_start), .wall_ns = @floatFromInt(wall_end - wall_start) };
 }
 
@@ -136,6 +155,11 @@ test "division timing checks work counts clock resolution and failures" {
 	try std.testing.expectEqual(@as(f64, 400), timing.cpu_ns);
 	try std.testing.expectEqual(@as(f64, 800), timing.wall_ns);
 	work = .{}; clock = .{};
+	var unchanged: [4]u64 = @splat(9);
+	const observed = try timedBatchWithReadings(&work,&clock,.knuth,2,4,3,&unchanged);
+	try std.testing.expectEqual(timing,observed);
+	try std.testing.expectEqualSlices(u64,&.{9,9,9,9},&unchanged);
+	work = .{}; clock = .{};
 	try std.testing.expectError(error.InvalidArguments, timedBatch(&work, &clock, .knuth, 2, 0, 3));
 	try std.testing.expectError(error.InvalidArguments, timedBatch(&work, &clock, .knuth, 2, 4, 0));
 	work = .{ .fail = true }; clock = .{};
@@ -145,6 +169,10 @@ test "division timing checks work counts clock resolution and failures" {
 	for ([_][4]u64{ .{100,200,200,900}, .{100,200,199,900}, .{100,200,600,100}, .{100,200,600,99} }) |times| {
 		work = .{}; clock = .{ .times = times };
 		try std.testing.expectError(error.ClockFailed, timedBatch(&work, &clock, .knuth, 2, 4, 3));
+		work = .{}; clock = .{ .times = times };
+		var readings: [4]u64 = @splat(0);
+		try std.testing.expectError(error.ClockFailed,timedBatchWithReadings(&work,&clock,.knuth,2,4,3,&readings));
+		try std.testing.expectEqualSlices(u64,&times,&readings);
 	}
 }
 

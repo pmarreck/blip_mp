@@ -96,13 +96,14 @@ pub fn run(init: std.process.Init, args: []const []const u8) !void {
 	};
 	var rows: [extras.len]Row = undefined;
 	for (options.sizes[0..options.count],0..) |extra,index| {
+		const repeats = @import("division_crossover.zig").nativeRepeats(options.width);
 		var fixture = try Fixture.initSized(std.heap.c_allocator,options.width,32,options.width+extra);
 		defer fixture.deinit();
 		for (0..32) |i| for (methods) |method| try fixture.run(method,i);
-		var row: Row = .{.size=extra,.dividend_bytes=options.width+extra,.samples=undefined,.components=undefined};
+		var row: Row = .{.size=extra,.dividend_bytes=options.width+extra,.iterations=32*repeats,.samples=undefined,.components=undefined};
 		for (&row.components,methods) |*component,method| component.* = .{.method=@tagName(method),.cpu_ns=undefined,.wall_ns=undefined};
 		for (0..6) |round| {
-			const sample = try @import("division_crossover.zig").pairedSample(&fixture,competitors.nativeBatch,methods,32,1,round);
+			const sample = try @import("division_crossover.zig").pairedSample(&fixture,competitors.nativeBatch,methods,32,repeats,round);
 			for (&row.components,0..) |*component,i| {
 				component.cpu_ns[round] = sample.cpu_ns[i]; component.wall_ns[round] = sample.wall_ns[i];
 			}
@@ -113,11 +114,11 @@ pub fn run(init: std.process.Init, args: []const []const u8) !void {
 	}
 	const report = .{
 		.schema="performance-measurement/v1",.correct=true,.build_mode="ReleaseFast",
-		.compiler=@import("builtin").zig_version_string,.method="division-geometry-paired-v1",
+		.compiler=@import("builtin").zig_version_string,.method="division-geometry-paired-v2",
 		.divisor_bytes=options.width,.cpu_clock="CLOCK_PROCESS_CPUTIME_ID",.wall_clock="CLOCK_MONOTONIC",
 		.seed_usage="0xB2D151A5 + divisor_bytes*257 + index; eight normalization shifts; engine seed does not alter inputs",
 		.operation="positive magnitude byte buffers; size is dividend bytes minus divisor bytes, not actual quotient width; paired Knuth and selected B-Z",
-		.normalization="six ABBA/BAAB half-pool samples; 32 verified calls per method/sample; primary averages both methods; no subtraction",
+		.normalization="six ABBA/BAAB half-pool samples; iterations gives verified calls per method/sample; 16 repeats at widths <=128, otherwise one; primary averages both methods; no subtraction",
 		.verification="GMP references outside timing; full quotient and remainder magnitude comparison plus output canaries on every call",
 		.allocator_coverage="prepared inputs and warmed scratch; each byte kernel resets an arena retaining capacity and poisons outputs; arithmetic allocation included; cold allocation unmeasured",
 		.rows=rows[0..options.count],

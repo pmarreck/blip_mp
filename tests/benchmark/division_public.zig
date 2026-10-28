@@ -123,7 +123,11 @@ fn nativeBatch(pool: *Pool, method: Method, start: usize, count: usize, repeats:
 		pub fn read(_: *@This(), kind: std.c.CLOCK) !u64 { return @import("immediate_add.zig").now(kind); }
 	};
 	var clock: Clock = .{};
-	const duration = try timing.timedBatch(pool,&clock,method,start,count,repeats);
+	var readings: [4]u64 = @splat(0);
+	const duration = timing.timedBatchWithReadings(pool,&clock,method,start,count,repeats,&readings) catch |err| {
+		if (err == error.ClockFailed) std.debug.print("clock failure: method={s} start={d} count={d} repeats={d} wall_start/cpu_start/cpu_end/wall_end={any}\n",.{@tagName(method),start,count,repeats,readings});
+		return err;
+	};
 	return .{ .cpu_ns = duration.cpu_ns, .wall_ns = duration.wall_ns };
 }
 
@@ -157,15 +161,16 @@ fn runPair(comptime comparison: Comparison, init: std.process.Init, args: []cons
 	};
 	var rows: [widths.len]Row = undefined;
 	for (options.sizes[0..options.count],0..) |width,index| {
+		const repeats = timing.nativeRepeats(width);
 		var pool = try Pool.init(std.heap.c_allocator,options.geometry,width,32); defer pool.deinit();
 		for (0..32) |i| for (pair) |method| try pool.run(method,i);
-		var row: Row = .{ .size = width, .dividend_bytes = dividendBytes(options.geometry,width), .samples = undefined,
+		var row: Row = .{ .size = width, .dividend_bytes = dividendBytes(options.geometry,width), .iterations=32*repeats, .samples = undefined,
 			.components = .{
 				.{ .method = @tagName(pair[0]), .cpu_ns = undefined, .wall_ns = undefined },
 				.{ .method = @tagName(pair[1]), .cpu_ns = undefined, .wall_ns = undefined },
 			} };
 		for (0..6) |round| {
-			const sample = try timing.pairedSample(&pool,nativeBatch,pair,32,1,round);
+			const sample = try timing.pairedSample(&pool,nativeBatch,pair,32,repeats,round);
 			for (&row.components,0..) |*component,i| {
 				component.cpu_ns[round] = sample.cpu_ns[i]; component.wall_ns[round] = sample.wall_ns[i];
 			}
@@ -178,9 +183,9 @@ fn runPair(comptime comparison: Comparison, init: std.process.Init, args: []cons
 		.schema = "performance-measurement/v1", .correct = true, .build_mode = "ReleaseFast",
 		.compiler = @import("builtin").zig_version_string,
 		.method = switch (comparison) {
-			.public => "division-public-paired-v1", .leading => "division-leading-block-paired-v1",
-			.short => "division-short-quotient-paired-v1", .short_public => "division-short-public-paired-v1",
-			.carry => "division-short-carry-paired-v1",
+			.public => "division-public-paired-v2", .leading => "division-leading-block-paired-v2",
+			.short => "division-short-quotient-paired-v2", .short_public => "division-short-public-paired-v2",
+			.carry => "division-short-carry-paired-v2",
 		}, .geometry = @tagName(options.geometry),
 		.cpu_clock = "CLOCK_PROCESS_CPUTIME_ID", .wall_clock = "CLOCK_MONOTONIC",
 		.seed_usage = "0xB2D151A5 + divisor_bytes*257 + index; four sign combinations crossed with eight normalization shifts; engine seed does not alter inputs",
@@ -191,7 +196,7 @@ fn runPair(comptime comparison: Comparison, init: std.process.Init, args: []cons
 			.short_public => "current public signed division versus short-quotient B-Z; magnitude byte widths; identical canonical BLIP input/output comparison adapters",
 			.carry => "fixed short-quotient B-Z versus carried-remainder leaf selection; magnitude byte widths; identical canonical BLIP input/output comparison adapters",
 		},
-		.normalization = "six ABBA/BAAB half-pool samples; 32 verified calls per method/sample; primary averages both methods; no subtraction",
+		.normalization = "six ABBA/BAAB half-pool samples; iterations gives verified calls per method/sample; 16 repeats at widths <=128, otherwise one; primary averages both methods; no subtraction",
 		.verification = "GMP quotient/remainder magnitudes with truncated sign rules outside timing; full canonical-byte comparison on every call",
 		.allocator_coverage = "prepared inputs, reused outputs and warmed thread-local scratch; arithmetic allocation included; cold allocation unmeasured",
 		.rows = rows[0..options.count],

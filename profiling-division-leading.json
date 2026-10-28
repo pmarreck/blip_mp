@@ -10,7 +10,7 @@
   "cases": [
     {
       "name": "division_leading_block_short_quotient_1core",
-      "definition": "division-leading-block-paired-v1-short_quotient",
+      "definition": "division-leading-block-paired-v2-short_quotient",
       "cores": 1,
       "processes": 5,
       "mode": "bm",
@@ -39,7 +39,7 @@
     },
     {
       "name": "division_leading_block_short_quotient_12core",
-      "definition": "division-leading-block-paired-v1-short_quotient",
+      "definition": "division-leading-block-paired-v2-short_quotient",
       "cores": 12,
       "processes": 5,
       "mode": "bm",
@@ -68,7 +68,7 @@
     },
     {
       "name": "division_leading_block_balanced_1core",
-      "definition": "division-leading-block-paired-v1-balanced",
+      "definition": "division-leading-block-paired-v2-balanced",
       "cores": 1,
       "processes": 5,
       "mode": "bm",
@@ -97,7 +97,7 @@
     },
     {
       "name": "division_leading_block_balanced_12core",
-      "definition": "division-leading-block-paired-v1-balanced",
+      "definition": "division-leading-block-paired-v2-balanced",
       "cores": 12,
       "processes": 5,
       "mode": "bm",
@@ -126,7 +126,7 @@
     },
     {
       "name": "division_leading_block_long_dividend_1core",
-      "definition": "division-leading-block-paired-v1-long_dividend",
+      "definition": "division-leading-block-paired-v2-long_dividend",
       "cores": 1,
       "processes": 5,
       "mode": "bm",
@@ -155,7 +155,7 @@
     },
     {
       "name": "division_leading_block_long_dividend_12core",
-      "definition": "division-leading-block-paired-v1-long_dividend",
+      "definition": "division-leading-block-paired-v2-long_dividend",
       "cores": 12,
       "processes": 5,
       "mode": "bm",
