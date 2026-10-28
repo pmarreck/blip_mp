@@ -253,6 +253,20 @@
 							exit 1
 						fi
 						test ! -s output.json
+						${self.packages.${system}.inverse-probe}/bin/blip-mp-inverse-probe paired 4095,4096,4097 > output.json 2> stderr
+						test ! -s stderr
+						jq -e '
+							.method == "inverse-exact-paired-v1" and .correct == true and
+							[.rows[].size] == [4095,4096,4097] and
+							all(.rows[]; .modulus_bits == .size and .fixture_count == 16 and .iterations == 16 and
+								.inverse_count > 0 and .inverse_count < 16 and .warmup_cases == 32 and
+								[.components[].method] == ["hgcd","recursive"] and
+								(.samples.cpu_ns|length) == 6 and
+								all(.components[]; (.cpu_ns|length) == 6 and (.wall_ns|length) == 6) and
+								all(.components[].cpu_ns[],.components[].wall_ns[]; . > 0) and
+								(. as $row | all(range(6); . as $i |
+									(($row.samples.cpu_ns[$i] - (($row.components[0].cpu_ns[$i]+$row.components[1].cpu_ns[$i])/2))|fabs) < 0.001)))
+						' output.json > /dev/null
 						mkdir -p "$out"
 					'';
 					inverse-probe = self.checks.${system}.probe.overrideAttrs {

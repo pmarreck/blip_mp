@@ -2,6 +2,7 @@
 const std = @import("std");
 const blip = @import("blip_mp");
 const Mp = blip.Mp;
+test { _ = @import("inverse_paired.zig"); }
 
 pub const Algorithm = enum { lehmer, hgcd, recursive, stein };
 pub const widths = [_]usize{ 64, 96, 128, 192, 256, 384, 512, 768, 1024, 2048, 4096, 8192 };
@@ -29,6 +30,7 @@ pub fn main(init: std.process.Init) !void {
 		return error.UnoptimizedBuild;
 	}
 	const args = try init.minimal.args.toSlice(init.arena.allocator());
+	if (args.len >= 2 and std.mem.eql(u8,args[1],"paired")) return @import("inverse_paired.zig").run(init,args[2..]);
 	const options = try parse(args[1..]);
 	defer blip.tier3.releaseBzArena();
 	defer blip.tier3.releaseMulScratch();
@@ -159,8 +161,8 @@ pub const Fixture = struct {
 	m: Mp,
 	expected: []u8,
 	has_inverse: bool,
-	pub fn initExact(allocator: std.mem.Allocator, bits: usize) !Fixture {
-		if (bits < 4095 or bits > 4097) return error.InvalidArguments;
+	pub fn initExactCase(allocator: std.mem.Allocator, bits: usize, index: usize) !Fixture {
+		if (bits < 4095 or bits > 4097 or index >= 16) return error.InvalidArguments;
 		var a = Mp.init(allocator);
 		errdefer a.deinit();
 		var m = Mp.init(allocator);
@@ -169,11 +171,15 @@ pub const Fixture = struct {
 		defer allocator.free(raw);
 		const encoded = try allocator.alloc(u8, raw.len + 16);
 		defer allocator.free(encoded);
-		var rng = std.Random.DefaultPrng.init(0xEAC7_4096 ^ @as(u64, @intCast(bits)));
+		var rng = std.Random.DefaultPrng.init((0xEAC7_4096 ^ @as(u64, @intCast(bits))) + index*65537);
 		try setExactPositive(&a, rng.random(), bits - 1, false, raw, encoded);
 		try setExactPositive(&m, rng.random(), bits, true, raw, encoded);
+		if (index >= 14) try a.setU64(if (index == 14) 1 else 0);
 		const oracle = try inverseOracle(allocator, &a, &m, raw);
 		return .{ .allocator = allocator, .a = a, .m = m, .expected = oracle.bytes, .has_inverse = oracle.exists };
+	}
+	pub fn initExact(allocator: std.mem.Allocator, bits: usize) !Fixture {
+		return initExactCase(allocator,bits,0);
 	}
 	pub fn init(allocator: std.mem.Allocator, bits: usize) !Fixture {
 		if (std.mem.indexOfScalar(usize, &widths, bits) == null) return error.InvalidArguments;
@@ -241,6 +247,36 @@ test "exact inverse fixture widths classify the complete bounded set" {
 	}
 	try std.testing.expectEqualSlices(bool, &expected, &accepted);
 	try std.testing.expectError(error.InvalidArguments, Fixture.initExact(std.testing.allocator, std.math.maxInt(usize)));
+}
+
+test "expanded exact inverse corpus preserves widths, distinct inputs and existence controls" {
+	defer blip.tier3.releaseBzArena();
+	defer blip.tier3.releaseMulScratch();
+	defer blip.tier3.releaseDivScratch();
+	defer blip.tier3.releaseVnScratch();
+	var result = Mp.init(std.testing.allocator);
+	defer result.deinit();
+	for ([_]usize{4095,4096,4097}) |bits| {
+		var previous: ?Fixture = null;
+		defer if (previous) |*value| value.deinit();
+		for (0..16) |index| {
+			var fixture = try Fixture.initExactCase(std.testing.allocator,bits,index);
+			errdefer fixture.deinit();
+			try std.testing.expectEqual(bits,fixture.m.bitLen());
+			try std.testing.expectEqual(if (index == 14) @as(usize,1) else if (index == 15) @as(usize,0) else bits-1,fixture.a.bitLen());
+			if (index == 14) try std.testing.expect(fixture.has_inverse);
+			if (index == 15) try std.testing.expect(!fixture.has_inverse);
+			if (previous) |*value| {
+				try std.testing.expect(!std.mem.eql(u8,value.m.bytes(),fixture.m.bytes()));
+			}
+			if (index < 2 or index >= 14) for ([_]Algorithm{.hgcd,.recursive}) |algorithm| {
+				try verify(&result,try run(algorithm,&result,&fixture),fixture.expected,fixture.has_inverse);
+			};
+			if (previous) |*value| value.deinit();
+			previous = fixture;
+		}
+	}
+	try std.testing.expectError(error.InvalidArguments,Fixture.initExactCase(std.testing.allocator,4096,16));
 }
 
 test "exact inverse fixtures release partial allocations" {

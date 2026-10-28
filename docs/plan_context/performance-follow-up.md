@@ -341,6 +341,39 @@ The complete native suite then passed in 91 seconds of mixed Nix
 preparation/check time, including the accepted-width and allocation-failure
 controls. Production/probe builds and all-system evaluation also passed.
 
+### Paired exact-width inverse probe
+
+Run `./bm --verified-inverse --config profiling-inverse-paired.json` to compare
+wider-window HGCD and recursive inverse calls on the same exact-width corpus.
+Each 4095-, 4096- and 4097-bit odd modulus width has sixteen deterministic
+cases. Fourteen use a positive operand one bit smaller; the final two use
+one and zero to guarantee invertible and noninvertible controls. The original
+single-pair fixture is preserved as case zero. Fixture seeds are
+`(0xEAC74096 XOR modulus_bits) + index*65537`.
+
+Each method visits every case once per sample, with six alternating ABBA/BAAB
+half-pool samples after a complete warmup. The previously tested paired timing
+helper now accepts either algorithm enum. Its injected-clock, work-count and
+linear-drift controls are shared with division. Inputs and GMP references are
+prepared before timing; arithmetic allocation and full inverse/existence
+verification remain inside timing. The result object is reused. Primary engine
+values average both methods; component ratios compare them within each sample.
+This experiment does not time GMP. Both affinity cohorts use five fresh
+processes with a 120-second deadline per process and one permitted variation
+retry. SIMD work remains deferred until this comparison establishes which
+algorithmic path warrants profiling.
+
+The corpus test failed when the placeholder repeated the old fixture. Parser,
+pool verification and allocation-cleanup tests then failed against their
+placeholders, and the CLI check failed before the new route was connected.
+The corruption control changes the known inverse of one and requires both
+methods to reject it. Width tests cover the complete bounded acceptance set.
+No arithmetic or public dispatch change is part of the probe.
+
+The thirteen inverse-probe tests execute in 511 ms after 32 seconds of
+compilation. The complete native suite passed in 106 seconds of mixed Nix
+preparation/check time. The production build and all-system evaluation passed.
+
 ## Division probes
 
 `./bm --verified-division` runs the six workloads formerly embedded in five

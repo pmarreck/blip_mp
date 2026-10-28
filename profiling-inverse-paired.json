@@ -1,0 +1,66 @@
+{
+  "schema": "performance-project/v1",
+  "project": "blip_mp",
+  "history_url": "file:///var/lib/performance-profiling",
+  "identity": {
+    "runtime": "Zig-0.16.0/GMP-6.3.0",
+    "build_mode": "ReleaseFast",
+    "concurrency": 1
+  },
+  "cases": [
+    {
+      "name": "inverse_exact_paired_1core",
+      "definition": "inverse-exact-paired-v1",
+      "cores": 1,
+      "processes": 5,
+      "mode": "bm",
+      "metric": "cpu_ns",
+      "comparison": "absolute",
+      "command": [
+        "blip-mp-inverse-probe",
+        "paired",
+        "{sizes}"
+      ],
+      "sizes": [
+        4095,
+        4096,
+        4097
+      ],
+      "bounds": [
+        0.1,
+        1000000000
+      ],
+      "policy": {
+        "max_cv": 0.1
+      },
+      "timeout_ms": 120000
+    },
+    {
+      "name": "inverse_exact_paired_12core",
+      "definition": "inverse-exact-paired-v1",
+      "cores": 12,
+      "processes": 5,
+      "mode": "bm",
+      "metric": "cpu_ns",
+      "comparison": "absolute",
+      "command": [
+        "blip-mp-inverse-probe",
+        "paired",
+        "{sizes}"
+      ],
+      "sizes": [
+        4095,
+        4096,
+        4097
+      ],
+      "bounds": [
+        0.1,
+        1000000000
+      ],
+      "policy": {
+        "max_cv": 0.1
+      },
+      "timeout_ms": 120000
+    }
+  ]
+}

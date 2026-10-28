@@ -38,7 +38,7 @@ test "division comparison selects the intended algorithm pairs" {
 const Timing = struct { cpu_ns: f64, wall_ns: f64 };
 const Sample = struct { cpu_ns: [2]f64, wall_ns: [2]f64 };
 
-fn pairedSample(state: anytype, comptime batch: anytype, methods: [2]Method, count: usize, repeats: usize, round: usize) !Sample {
+pub fn pairedSample(state: anytype, comptime batch: anytype, methods: anytype, count: usize, repeats: usize, round: usize) !Sample {
 	if (count == 0 or count % 2 != 0 or repeats == 0) return error.InvalidArguments;
 	const order: [4]usize = if (round % 2 == 0) .{0,1,1,0} else .{1,0,0,1};
 	var sample: Sample = .{ .cpu_ns = @splat(0), .wall_ns = @splat(0) };
