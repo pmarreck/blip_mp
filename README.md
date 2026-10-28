@@ -97,6 +97,13 @@ The fused layout reduced complete-product CPU time by about 23–25% versus
 Stockham in the sampled sizes and is selected at the existing large-input
 threshold. This comparison establishes no new GMP crossover; the measurement
 notes retain the unbaselined and inconclusive cohort verdicts.
+
+The [centered-residue experiment](docs/benchmarks/goldilocks/README.md#common-header-result-and-disposition)
+reduced Goldilocks slot capacity from ten bytes to nine, but complete-product
+CPU medians remained 20–27% slower even with a common-header shortcut.
+Production retains positive BLIP representatives; the experiment's
+inconclusive/unbaselined verdicts remain recorded.
+
 `./bm --verified-truncated` compares the experimental
 [truncated product](docs/benchmarks/goldilocks/TRUNCATED.md) against Stockham
 and fusion around transform-padding boundaries.

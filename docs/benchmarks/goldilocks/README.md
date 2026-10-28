@@ -94,6 +94,45 @@ and the new probe mode first failed its parser test. Full native tests passed
 in 136 seconds of mixed Nix preparation/check time, including 15,535 integration
 GMP comparisons. Production build and all-system evaluation also passed.
 
+### Common-header result and disposition
+
+Campaign `blip-mp-centered-fast-20261028T090136Z` measured commit
+`303d1039e99a61405e37120feaee5af36b8bfa4f`, with source hash
+`edeea703538b988fc4c9955c64a75771b2a4efcd9667dfbd1a26a7ea5d040b88`
+unchanged. All 15 processes, including the one-CPU retry, verified their products.
+The one-CPU cohort remained `INCONCLUSIVE`; the twelve-CPU cohort was
+`UNBASELINED` after one attempt. Neither verdict establishes an approved gate.
+
+| Operand bytes | Fast/positive, 1 CPU | Fast/original centered, 1 CPU | Fast/positive, 12 CPUs | Fast/original centered, 12 CPUs |
+|---:|---:|---:|---:|---:|
+| 1024 | 1.263 | 0.926 | 1.266 | 0.926 |
+| 16384 | 1.250 | 0.949 | 1.269 | 0.902 |
+| 65536 | 1.256 | 0.911 | 1.263 | 0.899 |
+| 100000 | 1.246 | 0.893 | 1.254 | 0.883 |
+| 131072 | 1.245 | 0.893 | 1.252 | 0.891 |
+| 262144 | 1.204 | 0.918 | 1.236 | 0.893 |
+
+These are medians of 30 paired sample ratios from each final attempt. The
+[summary](centered-fast-summary.json) preserves all process ratios, including
+the earlier attempt. Some process means favored the original centered reader;
+one 262144-byte process even favored the fast centered reader over positive
+storage. Those variations do not erase the broad median regression against
+positive storage or override the engine's inconclusive verdict.
+
+The common-header check saves roughly 5–12% relative to the original centered
+reader at these medians, but still costs roughly 20–27% against positive fused
+products. Keep positive representatives in production. The two centered
+variants remain explicit experimental controls; no further centered tuning or
+truncated-transform integration follows from this result.
+
+The final executable had SHA-256
+`fff7388dd0fddfbeb8777b27d928c3467223f40a32e4ff54652d34408d01c290`.
+Its fast centered forward transform occupied 2295 bytes, versus 2195 for the
+original centered reader and 1946 for positive storage. Disassembly confirms
+that `CMP 0x88` and a conditional jump skip the variable sign-extension shifts;
+the sign-mask/add sequence remains. The equality check reaches the generated
+code, but its measured saving does not justify the storage tradeoff here.
+
 ## Existing layout measurements
 
 This experiment follows the [blocked multiplication measurements](../storage-aware/RESEARCH.md).
