@@ -1819,6 +1819,61 @@ preparation/check time, plus the production build and all-system evaluation.
 The focused probe's combined compilation/execution phase took 36 seconds.
 These durations do not isolate test execution or establish its latency budget.
 
+### Padding shape results
+
+The expanded sweep supports testing a conservative guard based on the odd
+leaf reached by repeatedly halving the original divisor width. Require that
+leaf to be at least 6 KiB and the dividend to be at least twice the divisor's
+byte length. This guard excludes the measured losses at widths 6,146 and
+8,194, whose odd leaves are 3,073 and 4,097 bytes. It also excludes short
+quotients that do not justify the added recursion. The 6 KiB bound is a
+conservative candidate, not an optimal crossover estimate; the sampled
+6,143-byte odd divisor also benefits on balanced and long inputs.
+
+| Divisor bytes | Odd leaf bytes | Padding / fixed CPU, balanced | Padding / fixed CPU, 4:1 dividend |
+|---:|---:|---:|---:|
+| 6,145 | 6,145 | 0.836 / 0.838 | 0.822 / 0.826 |
+| 8,191 | 8,191 | 0.687 / 0.689 | 0.673 / 0.674 |
+| 8,193 | 8,193 | 0.738 / 0.738 | 0.733 / 0.729 |
+| 12,287 | 12,287 | 0.516 / 0.515 | 0.505 / 0.505 |
+| 12,289 | 12,289 | 0.591 / 0.593 | 0.584 / 0.586 |
+| 12,290 | 6,145 | 0.917 / 0.916 | 0.919 / 0.922 |
+| 16,383 | 16,383 | 0.489 / 0.490 | 0.480 / 0.482 |
+| 16,385 | 16,385 | 0.520 / 0.527 | 0.513 / 0.524 |
+| 16,386 | 8,193 | 0.829 / 0.828 | 0.839 / 0.830 |
+
+Cells give paired medians for 1-CPU / 12-CPU affinity cohorts, against the
+same fixed quotient-1024 BLIP kernel. The proposed guard covers 36 measured
+cells with median CPU savings of 8–52%. All process-mean ratios in those cells
+favor padding except one diagnostic process at width 16,386 and a balanced
+dividend, which took 1.00456 times the fixed kernel's CPU time. That cohort's
+selected attempt and its earlier campaign favor padding. Preserve this
+exception rather than describing the result as an every-process win.
+
+Half-width gaps have mixed results: width 6,145 loses about 5%, while 12,290
+has a small median gain but individual processes lose up to 3%. Quarter-width
+gaps usually lose, though the largest odd widths benefit. The conservative
+guard leaves some measured gains unused to avoid a more complicated rule.
+Aligned widths remain near parity. Arithmetic dispatch is still unchanged;
+qualify the guarded entry and its signed wrapper before any selection, and
+do not extrapolate this sweep into a performance claim above its tested range.
+
+Campaign `blip-mp-shape-20261028T214046Z` measured commit
+`5f9341344542c56dcfcca6b441117828a9a96c85` with
+`profiling-division-padding-shape.json`. All 165 processes verified their
+results, including one five-process timing retry at width 16,386 in the
+1-CPU cohort. All 32 cohorts are unbaselined; no baseline was approved.
+The [summary](../benchmarks/storage-aware/division-padding-shape-summary.json)
+retains the smaller-gap losses, paired samples and all process-mean ratios.
+GMP supplies references outside timing, so these remain BLIP-to-BLIP results.
+
+The Linux x86_64 / Threadripper 3990X / Zig 0.16.0 ReleaseFast configuration
+is unchanged. Source digest
+`054174534ffc91b216eef371f8f7073ae66c98d56b29d862b888190ed92c3bcc`
+remained stable, and the probe SHA-256 was
+`590169437e62ef5c9c765fed404ef47af150423b29a82939355d956f5eeef2e7`.
+Exact-commit CI passed in 187 seconds.
+
 ### Exact-capacity remainder regression
 
 Reviewing the B-Z entry point exposed a separate single-byte-divisor bug. With

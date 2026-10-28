@@ -126,6 +126,13 @@ cutoff and at some other balanced widths. It remains experimental. All 180
 processes verified their results; 22 cohorts are unbaselined and four
 inconclusive. This experiment does not time GMP.
 
+A [relative-shape follow-up](docs/plan_context/performance-follow-up.md#padding-shape-results)
+supports a narrower candidate guard: an odd recursion leaf of at least 6 KiB
+and a dividend at least twice the divisor's byte length. Its sampled cases
+save 8–52% median CPU versus the fixed BLIP kernel, with one diagnostic
+process losing 0.5%. All 165 processes verified results; all 32 cohorts are
+unbaselined. The guard is not yet selected.
+
 ## Quick start
 
 The [verified immediate-add probe](docs/plan_context/performance-follow-up.md#verified-immediate-add-probe-october-27-2026)
