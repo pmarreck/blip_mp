@@ -6,9 +6,9 @@ const Case = @import("division_competitors.zig").Case;
 const timing = @import("division_crossover.zig");
 const widths = [_]usize{64,65,8192,12288,16384,16385};
 const Geometry = enum { short_quotient, one_chunk_limit, two_chunk_start, balanced, long_dividend };
-const Method = enum { current, burnikel_ziegler, leading_block, short_quotient, short_carry };
+const Method = enum { current, burnikel_ziegler, leading_block, short_quotient, short_carry, selected };
 const methods = [2]Method{.current,.burnikel_ziegler};
-const Comparison = enum { public, leading, short, short_public, carry };
+const Comparison = enum { public, leading, short, short_public, carry, selected_public };
 const Options = struct { geometry: Geometry, sizes: [widths.len]usize, count: usize };
 
 fn parse(args: []const []const u8) !Options {
@@ -62,10 +62,25 @@ const Pool = struct {
 			.leading_block => try Mp.divModBurnikelZieglerLeadingBlock(&self.q,&self.r,&case.a,&case.b),
 			.short_quotient => try Mp.divModBurnikelZieglerShortQuotient(&self.q,&self.r,&case.a,&case.b),
 			.short_carry => try Mp.divModBurnikelZieglerShortCarry(&self.q,&self.r,&case.a,&case.b),
+			.selected => try Mp.divModBurnikelZieglerSelected(&self.q,&self.r,&case.a,&case.b),
 		}
 		if (!std.mem.eql(u8,self.q.bytes(),case.mq.bytes()) or !std.mem.eql(u8,self.r.bytes(),case.mr.bytes())) return error.IncorrectWork;
 	}
 };
+
+test "selected signed probe avoids the old short-carry recursion at an eight-byte gap" {
+	var allocated: [2]usize = undefined;
+	for ([_]Method{.short_carry,.selected},0..) |method,mi| {
+		var counted = std.testing.FailingAllocator.init(std.testing.allocator,.{});
+		var pool = try Pool.init(counted.allocator(),.two_chunk_start,8192,1);
+		const before = counted.allocated_bytes;
+		pool.run(method,0) catch |err| { pool.deinit(); return err; };
+		allocated[mi] = counted.allocated_bytes-before;
+		pool.deinit();
+		try std.testing.expectEqual(counted.allocated_bytes,counted.freed_bytes);
+	}
+	try std.testing.expect(allocated[1] < allocated[0]);
+}
 
 test "public division parser classifies complete width and geometry sets" {
 	for (std.enums.values(Geometry)) |geometry| {
@@ -147,11 +162,16 @@ pub fn runCarry(init: std.process.Init, args: []const []const u8) !void {
 	return runPair(.carry,init,args);
 }
 
+pub fn runSelected(init: std.process.Init, args: []const []const u8) !void {
+	return runPair(.selected_public,init,args);
+}
+
 fn runPair(comptime comparison: Comparison, init: std.process.Init, args: []const []const u8) !void {
 	const pair: [2]Method = switch (comparison) {
 		.public => methods, .leading => .{.burnikel_ziegler,.leading_block},
 		.short => .{.leading_block,.short_quotient}, .short_public => .{.current,.short_quotient},
 		.carry => .{.short_quotient,.short_carry},
+		.selected_public => .{.current,.selected},
 	};
 	const options = try parse(args);
 	const Component = struct { method: []const u8, cpu_ns: [6]f64, wall_ns: [6]f64 };
@@ -186,6 +206,7 @@ fn runPair(comptime comparison: Comparison, init: std.process.Init, args: []cons
 			.public => "division-public-paired-v2", .leading => "division-leading-block-paired-v2",
 			.short => "division-short-quotient-paired-v2", .short_public => "division-short-public-paired-v2",
 			.carry => "division-short-carry-paired-v2",
+			.selected_public => "division-selected-public-paired-v1",
 		}, .geometry = @tagName(options.geometry),
 		.cpu_clock = "CLOCK_PROCESS_CPUTIME_ID", .wall_clock = "CLOCK_MONOTONIC",
 		.seed_usage = "0xB2D151A5 + divisor_bytes*257 + index; four sign combinations crossed with eight normalization shifts; engine seed does not alter inputs",
@@ -195,6 +216,7 @@ fn runPair(comptime comparison: Comparison, init: std.process.Init, args: []cons
 			.short => "fixed leading-block B-Z versus short-quotient fallback; magnitude byte widths; identical canonical BLIP input/output comparison adapters",
 			.short_public => "current public signed division versus short-quotient B-Z; magnitude byte widths; identical canonical BLIP input/output comparison adapters",
 			.carry => "fixed short-quotient B-Z versus carried-remainder leaf selection; magnitude byte widths; identical canonical BLIP input/output comparison adapters",
+			.selected_public => "current public signed division versus selected B-Z kernel; magnitude byte widths; identical canonical BLIP input/output comparison adapters",
 		},
 		.normalization = "six ABBA/BAAB half-pool samples; iterations gives verified calls per method/sample; 16 repeats at widths <=128, otherwise one; primary averages both methods; no subtraction",
 		.verification = "GMP quotient/remainder magnitudes with truncated sign rules outside timing; full canonical-byte comparison on every call",

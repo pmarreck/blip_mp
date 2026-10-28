@@ -1534,7 +1534,90 @@ the production build and all-system evaluation passed. The feedback budget
 remains unmet; this duration includes compilation and is not a measured
 test-execution-only time. `profiling-division-selected-public.json` prepares
 the next paired signed comparison against current public division at five
-geometries, using the existing public-v2 method and unchanged fixture policy.
+geometries. Its initial binding was incorrect, as documented below.
+
+### Signed selected-kernel probe binding correction
+
+The first `profiling-division-selected-public.json` configuration called the
+existing `public` mode. That mode intentionally invokes the fixed cutoff-128
+`Mp.divModBurnikelZiegler` comparator, rather than the selected magnitude
+kernel. The experiment's name was wrong; its method and component tags correctly
+reported the older path. Campaign
+`blip-mp-division-selected-public-20261028T203310Z`, measured at clean commit
+`52e980f5ca55d2dcf25ab8405f324fc5120b73aa`, is therefore retained as a
+[fixed-comparator recheck](../benchmarks/storage-aware/division-fixed-public-recheck-summary.json).
+It is not evidence about the selected signed kernel and cannot justify changing
+public dispatch. All 55 processes returned correct results; all ten cohorts
+were unbaselined, with one variation retry. Its source digest stayed
+`83e848e1840035e4277d36b1e6bd692c71fdcda98aea095ad0eed95f76de1d5f`.
+
+The signed boundary tests added with the 1,024-byte selection also named this
+fixed wrapper. The raw allocation classifier did exercise the selected kernel;
+the explicit 2,048-byte wrapper covered the shared leaf implementation, but
+neither established the intended signed binding. Those signed boundary and
+allocation-failure tests now call `Mp.divModBurnikelZieglerSelected`, which
+explicitly uses the same selected kernel as production's large-input path.
+Native signed boundaries, zero-divisor checks, aliasing and corruption controls
+include the new entry. The historical wrapper remains fixed.
+
+A resource regression exercises the probe adapter at an eight-byte dividend
+gap and an 8,192-byte divisor. It compares fresh allocator traffic against
+the fixed short-carry method and requires lower allocation traffic, while
+checking complete GMP-derived results and cleanup. It failed when
+the new entry delegated to the old wrapper. A new `selected-public` CLI route
+also failed before implementation. Its distinct method is
+`division-selected-public-paired-v1`, with components `current` and `selected`;
+the configuration now names that route. The original public-v2 mode remains
+unchanged. Corrected timing results require a fresh campaign.
+
+After correction, the complete suite passed in 87 seconds of mixed Nix
+preparation/check time. The production build, all-system evaluation and tracked
+flake-input check passed. Public arithmetic dispatch is unchanged.
+
+### GMP refresh after bounded quotient selection
+
+Campaign `blip-mp-division-bounded-competitors-20261028T203951Z` measured clean
+commit `52e980f5ca55d2dcf25ab8405f324fc5120b73aa`. This four-way probe invokes
+the selected magnitude kernel directly and is unaffected by the signed-mode
+binding error above. It keeps the existing positive 2:1 dividend/divisor corpus,
+64 fixtures, eight rotating four-way samples and ordinary GMP 6.3.0, under
+Zig 0.16.0 ReleaseFast on Linux x86_64. These are verified-call timings;
+the BLIP and GMP verification adapters differ. Results are CPU-time ratios,
+with 1/12-CPU paired medians separated by a slash.
+
+| Divisor bytes | Public BLIP / GMP | Selected B-Z / GMP | Selected B-Z / Knuth |
+|---:|---:|---:|---:|
+| 8 | 2.17 / 2.17 | 7.91 / 7.71 | 4.452 / 4.501 |
+| 16 | 2.68 / 2.68 | 3.44 / 3.41 | 1.074 / 1.102 |
+| 32 | 2.32 / 2.32 | 3.21 / 3.22 | 1.051 / 1.069 |
+| 64 | 2.54 / 2.54 | 10.14 / 10.17 | 3.220 / 3.251 |
+| 128 | 2.71 / 2.71 | 12.06 / 12.01 | 3.711 / 3.697 |
+| 256 | 2.35 / 2.31 | 9.39 / 9.17 | 3.476 / 3.468 |
+| 512 | 2.54 / 2.51 | 7.67 / 7.52 | 2.762 / 2.765 |
+| 1,024 | 3.07 / 2.98 | 6.37 / 6.17 | 1.982 / 1.979 |
+| 2,048 | 3.97 / 3.81 | 5.56 / 5.28 | 1.369 / 1.368 |
+| 4,096 | 5.26 / 5.14 | 5.31 / 5.18 | 0.997 / 0.996 |
+| 8,192 | 7.14 / 7.03 | 5.13 / 5.10 | 0.714 / 0.721 |
+| 16,384 | 11.17 / 11.10 | 5.76 / 5.74 | 0.514 / 0.516 |
+
+GMP wins every process mean at every width against all three BLIP paths.
+At 8,192/16,384 bytes, selected B-Z saves 28–29%/48–49% against Knuth in the
+paired medians. All process means, including diagnostic attempts, favor B-Z
+over Knuth at those two widths. The new 1,024-byte gap guard does not change
+algorithm selection for these twice-width dividends; differences from the
+preceding campaign do not establish a new arithmetic improvement.
+
+All fifteen processes verified full results. The one-CPU cohort is unbaselined;
+the 12-CPU cohort remains inconclusive after its single variation retry. No
+baseline was approved. Source digest
+`fc867769e1f0c917a42acc06524ca71a639890224d127012c2d937b6971e5bba`
+stayed fixed. Probe SHA-256
+`4915dc3cd2f3d3712c108f27173ef722813f36e5b7c3b3d1a02221016d5701e9`
+also matches the fixed signed-comparator recheck. The
+[summary](../benchmarks/storage-aware/division-bounded-competitors-summary.json)
+preserves every process mean, sample range and timing verdict; configuration
+remains `profiling-division-selected-competitors.json` and method
+`division-selected-competitors-v1`. Public integration remains unchanged.
 
 ### Exact-capacity remainder regression
 

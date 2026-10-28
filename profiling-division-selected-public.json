@@ -10,7 +10,7 @@
   "cases": [
     {
       "name": "division_selected_public_short_quotient_1core",
-      "definition": "division-public-paired-v2-selected-short_quotient",
+      "definition": "division-selected-public-paired-v1-short_quotient",
       "cores": 1,
       "processes": 5,
       "mode": "bm",
@@ -18,7 +18,7 @@
       "comparison": "absolute",
       "command": [
         "blip-mp-division-probe",
-        "public",
+        "selected-public",
         "short_quotient",
         "{sizes}"
       ],
@@ -39,7 +39,7 @@
     },
     {
       "name": "division_selected_public_short_quotient_12core",
-      "definition": "division-public-paired-v2-selected-short_quotient",
+      "definition": "division-selected-public-paired-v1-short_quotient",
       "cores": 12,
       "processes": 5,
       "mode": "bm",
@@ -47,7 +47,7 @@
       "comparison": "absolute",
       "command": [
         "blip-mp-division-probe",
-        "public",
+        "selected-public",
         "short_quotient",
         "{sizes}"
       ],
@@ -68,7 +68,7 @@
     },
     {
       "name": "division_selected_public_one_chunk_limit_1core",
-      "definition": "division-public-paired-v2-selected-one_chunk_limit",
+      "definition": "division-selected-public-paired-v1-one_chunk_limit",
       "cores": 1,
       "processes": 5,
       "mode": "bm",
@@ -76,7 +76,7 @@
       "comparison": "absolute",
       "command": [
         "blip-mp-division-probe",
-        "public",
+        "selected-public",
         "one_chunk_limit",
         "{sizes}"
       ],
@@ -97,7 +97,7 @@
     },
     {
       "name": "division_selected_public_one_chunk_limit_12core",
-      "definition": "division-public-paired-v2-selected-one_chunk_limit",
+      "definition": "division-selected-public-paired-v1-one_chunk_limit",
       "cores": 12,
       "processes": 5,
       "mode": "bm",
@@ -105,7 +105,7 @@
       "comparison": "absolute",
       "command": [
         "blip-mp-division-probe",
-        "public",
+        "selected-public",
         "one_chunk_limit",
         "{sizes}"
       ],
@@ -126,7 +126,7 @@
     },
     {
       "name": "division_selected_public_two_chunk_start_1core",
-      "definition": "division-public-paired-v2-selected-two_chunk_start",
+      "definition": "division-selected-public-paired-v1-two_chunk_start",
       "cores": 1,
       "processes": 5,
       "mode": "bm",
@@ -134,7 +134,7 @@
       "comparison": "absolute",
       "command": [
         "blip-mp-division-probe",
-        "public",
+        "selected-public",
         "two_chunk_start",
         "{sizes}"
       ],
@@ -155,7 +155,7 @@
     },
     {
       "name": "division_selected_public_two_chunk_start_12core",
-      "definition": "division-public-paired-v2-selected-two_chunk_start",
+      "definition": "division-selected-public-paired-v1-two_chunk_start",
       "cores": 12,
       "processes": 5,
       "mode": "bm",
@@ -163,7 +163,7 @@
       "comparison": "absolute",
       "command": [
         "blip-mp-division-probe",
-        "public",
+        "selected-public",
         "two_chunk_start",
         "{sizes}"
       ],
@@ -184,7 +184,7 @@
     },
     {
       "name": "division_selected_public_balanced_1core",
-      "definition": "division-public-paired-v2-selected-balanced",
+      "definition": "division-selected-public-paired-v1-balanced",
       "cores": 1,
       "processes": 5,
       "mode": "bm",
@@ -192,7 +192,7 @@
       "comparison": "absolute",
       "command": [
         "blip-mp-division-probe",
-        "public",
+        "selected-public",
         "balanced",
         "{sizes}"
       ],
@@ -213,7 +213,7 @@
     },
     {
       "name": "division_selected_public_balanced_12core",
-      "definition": "division-public-paired-v2-selected-balanced",
+      "definition": "division-selected-public-paired-v1-balanced",
       "cores": 12,
       "processes": 5,
       "mode": "bm",
@@ -221,7 +221,7 @@
       "comparison": "absolute",
       "command": [
         "blip-mp-division-probe",
-        "public",
+        "selected-public",
         "balanced",
         "{sizes}"
       ],
@@ -242,7 +242,7 @@
     },
     {
       "name": "division_selected_public_long_dividend_1core",
-      "definition": "division-public-paired-v2-selected-long_dividend",
+      "definition": "division-selected-public-paired-v1-long_dividend",
       "cores": 1,
       "processes": 5,
       "mode": "bm",
@@ -250,7 +250,7 @@
       "comparison": "absolute",
       "command": [
         "blip-mp-division-probe",
-        "public",
+        "selected-public",
         "long_dividend",
         "{sizes}"
       ],
@@ -271,7 +271,7 @@
     },
     {
       "name": "division_selected_public_long_dividend_12core",
-      "definition": "division-public-paired-v2-selected-long_dividend",
+      "definition": "division-selected-public-paired-v1-long_dividend",
       "cores": 12,
       "processes": 5,
       "mode": "bm",
@@ -279,7 +279,7 @@
       "comparison": "absolute",
       "command": [
         "blip-mp-division-probe",
-        "public",
+        "selected-public",
         "long_dividend",
         "{sizes}"
       ],

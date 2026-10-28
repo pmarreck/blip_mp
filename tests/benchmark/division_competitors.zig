@@ -556,11 +556,11 @@ test "explicit B-Z allocation failures release memory including optional cache r
 			}
 		}
 	};
-	inline for (.{Mp.divModBurnikelZiegler,Mp.divModBurnikelZieglerLeadingBlock,Mp.divModBurnikelZieglerShortQuotient,Mp.divModBurnikelZieglerShortCarry,Mp.divModBurnikelZieglerWideQuotient}) |divide| for ([_]usize{16,256}) |width| for ([_]usize{width+1,2*width}) |dividend_len| {
+	inline for (.{Mp.divModBurnikelZiegler,Mp.divModBurnikelZieglerLeadingBlock,Mp.divModBurnikelZieglerShortQuotient,Mp.divModBurnikelZieglerShortCarry,Mp.divModBurnikelZieglerWideQuotient,Mp.divModBurnikelZieglerSelected}) |divide| for ([_]usize{16,256}) |width| for ([_]usize{width+1,2*width}) |dividend_len| {
 		try Check.verify(divide,width,dividend_len);
 	};
 	for ([_]usize{8,2048,2049}) |gap| try Check.verify(Mp.divModBurnikelZieglerWideQuotient,4096,4096+gap);
-	for ([_]usize{4096,4098}) |width| for ([_]usize{1024,1025}) |gap| try Check.verify(Mp.divModBurnikelZiegler,width,width+gap);
+	for ([_]usize{4096,4098}) |width| for ([_]usize{1024,1025}) |gap| try Check.verify(Mp.divModBurnikelZieglerSelected,width,width+gap);
 }
 
 test "wide quotient boundary preserves every sign and input alias" {
@@ -568,7 +568,7 @@ test "wide quotient boundary preserves every sign and input alias" {
 }
 
 test "selected quotient boundary preserves every sign and input alias" {
-	for ([_]usize{4096,4098}) |width| try checkSignedOuterBoundary(Mp.divModBurnikelZiegler,width,&.{1023,1024,1025});
+	for ([_]usize{4096,4098}) |width| try checkSignedOuterBoundary(Mp.divModBurnikelZieglerSelected,width,&.{1023,1024,1025});
 }
 
 fn checkSignedOuterBoundary(comptime divide: anytype, width: usize, gaps: []const usize) !void {
@@ -608,7 +608,7 @@ test "explicit public B-Z division preserves signed results and input aliases" {
 			}
 			if (negative_b) try case.b.sub(&zero,&case.b);
 			if (negative_a != negative_b) try case.mq.sub(&zero,&case.mq);
-			inline for (.{Mp.divModBurnikelZiegler,Mp.divModBurnikelZieglerLeadingBlock,Mp.divModBurnikelZieglerShortQuotient,Mp.divModBurnikelZieglerShortCarry,Mp.divModBurnikelZieglerWideQuotient}) |divide| for (0..3) |alias_mode| {
+			inline for (.{Mp.divModBurnikelZiegler,Mp.divModBurnikelZieglerLeadingBlock,Mp.divModBurnikelZieglerShortQuotient,Mp.divModBurnikelZieglerShortCarry,Mp.divModBurnikelZieglerWideQuotient,Mp.divModBurnikelZieglerSelected}) |divide| for (0..3) |alias_mode| {
 				var a = Mp.init(std.testing.allocator); defer a.deinit();
 				var b = Mp.init(std.testing.allocator); defer b.deinit();
 				try a.setBytes(case.a.bytes()); try b.setBytes(case.b.bytes());

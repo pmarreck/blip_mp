@@ -23,6 +23,7 @@ pub fn main(init: std.process.Init) !void {
 	}
 	const args = try init.minimal.args.toSlice(init.arena.allocator());
 	if (args.len > 1 and std.mem.eql(u8,args[1],"public")) return @import("division_public.zig").run(init,args[2..]);
+	if (args.len > 1 and std.mem.eql(u8,args[1],"selected-public")) return @import("division_public.zig").runSelected(init,args[2..]);
 	if (args.len > 1 and std.mem.eql(u8,args[1],"leading")) return @import("division_public.zig").runLeading(init,args[2..]);
 	if (args.len > 1 and std.mem.eql(u8,args[1],"short")) return @import("division_public.zig").runShort(init,args[2..],false);
 	if (args.len > 1 and std.mem.eql(u8,args[1],"short-public")) return @import("division_public.zig").runShort(init,args[2..],true);
