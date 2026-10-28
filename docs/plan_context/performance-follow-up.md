@@ -1647,6 +1647,63 @@ The complete local suite passed with the diagnostic change in 93 seconds of
 mixed Nix preparation/check time. Production build and all-system evaluation
 passed. A fresh exact-commit CI result is still required.
 
+Exact-commit CI subsequently passed for
+`c380c3f630fdc8018382e5bf3723c32cd42844e9` in 195 seconds. This verifies the
+current tree; it does not establish a cause or permanent fix for the earlier
+intermittent failure.
+
+### Selected signed division results
+
+Campaign `blip-mp-selpub-20261028T210158Z` measured clean commit
+`c380c3f630fdc8018382e5bf3723c32cd42844e9` using the corrected
+`division-selected-public-paired-v1` method and components `current` and
+`selected`. Combined record IDs were checked against the history store's
+100-character limit before execution. The 32 fixtures cross four sign
+combinations with eight normalization shifts. Both paths return canonical BLIP
+values, compared in full on every timed call. Prepared inputs, reused outputs,
+warmed scratch and six ABBA/BAAB samples match the earlier signed policy.
+
+The table gives selected-B-Z/current-public CPU ratios. Each cell shows the
+1/12-CPU paired medians; the gap is dividend bytes minus divisor bytes.
+
+| Divisor bytes | Gap 1 | Gap 7 | Gap 8 | Twice-width dividend | Four-times-width dividend |
+|---:|---:|---:|---:|---:|---:|
+| 8,192 | 1.271 / 1.270 | 1.268 / 1.266 | 1.268 / 1.269 | 0.683 / 0.683 | 0.669 / 0.674 |
+| 12,288 | 1.260 / 1.261 | 1.257 / 1.257 | 1.263 / 1.265 | 0.510 / 0.510 | 0.503 / 0.501 |
+| 16,384 | 1.261 / 1.261 | 1.256 / 1.256 | 1.261 / 1.262 | 0.482 / 0.482 | 0.477 / 0.480 |
+| 16,385 | 1.294 / 1.294 | 1.290 / 1.293 | 1.265 / 1.259 | 1.002 / 1.002 | 1.001 / 1.002 |
+
+Every process mean favors selected B-Z on balanced/long even-width rows and
+favors current public division on the short-quotient rows. The paired savings
+are 32–52% for the former; the latter regress 26–29%. The odd-width long and
+balanced controls stay near parity in the medians, with individual process
+ratios from 0.990 to 1.023. The
+[summary](../benchmarks/storage-aware/division-selected-public-summary.json)
+retains all process means and sample ranges. The selected signed wrapper still
+materializes magnitudes and manages an arena before its Knuth fallback. Those
+costs are a plausible contributor to the short-quotient overhead; this comparison
+does not isolate them causally.
+
+All 50 processes verified their results. All ten cohorts are unbaselined,
+without retries or an approved baseline. The source digest stayed
+`35f4c7debfef8fae910369a2ca66ee19865b921d510bd9fdf3d9150cde5fe899`;
+the probe SHA-256 was
+`fd66a7d821ad18b3a507ec7afa52810b31e546289d6779aad1005a799ce7c096`.
+GMP supplies correctness references outside timing here. These ratios must
+not be multiplied into another campaign's GMP results.
+
+Public dispatch remains at its existing 99,999-byte threshold. The next
+algorithm experiment will scale both magnitudes by a power of 256 to pad the
+divisor to a suitable recursive block multiple, then unscale the remainder.
+The quotient is unchanged. This is an established normalization approach,
+also used in [V8's B-Z divider](https://chromium.googlesource.com/v8/v8.git/+/main/src/bigint/div-burnikel.cc),
+not a novel algorithm. With the current cutoff, suitable examples are
+4,098 to 4,160 bytes and 16,385 to 16,640 bytes. The experiment must retain
+fixed controls, cover neighboring widths and quotient boundaries, verify
+scaling/denormalization with independent oracles, and measure the added copying
+before selection. It will keep byte storage and the existing default dispatch
+during qualification.
+
 ### Exact-capacity remainder regression
 
 Reviewing the B-Z entry point exposed a separate single-byte-divisor bug. With

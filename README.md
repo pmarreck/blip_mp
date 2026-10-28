@@ -112,6 +112,13 @@ The recursive entry now selects this bound. Public integration stays unchanged;
 this is not a new GMP comparison. All 50 processes verified their results,
 with seven cohorts unbaselined and one inconclusive.
 
+The [corrected signed-path comparison](docs/plan_context/performance-follow-up.md#selected-signed-division-results)
+finds selected B-Z saving 32–52% CPU versus current public division on sampled
+balanced and long even-width inputs. Short quotients still cost 26–29% more,
+and the odd-width control stays near parity. All 50 processes verified their
+results; all ten cohorts are unbaselined. Public dispatch stays unchanged while
+neighboring-width alignment and quotient geometry are qualified.
+
 ## Quick start
 
 The [verified immediate-add probe](docs/plan_context/performance-follow-up.md#verified-immediate-add-probe-october-27-2026)

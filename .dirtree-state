@@ -43,6 +43,7 @@ annotate=[
 	docs/benchmarks/storage-aware/division-paired-summary.json = Identical-input Burnikel-Ziegler versus Knuth baseline ratios and verdicts
 	docs/benchmarks/storage-aware/division-public-summary.json = Paired signed division CPU ratios across three operand geometries
 	docs/benchmarks/storage-aware/division-selected-competitors-summary.json = Matched current division kernel and GMP ratios with complete process evidence
+	docs/benchmarks/storage-aware/division-selected-public-summary.json = Corrected selected signed B-Z versus public division across five geometries
 	docs/benchmarks/storage-aware/division-short-public-summary.json = Short-quotient candidate versus public division ratios across five geometries
 	docs/benchmarks/storage-aware/division-short-summary.json = Short-quotient fallback versus fixed B-Z ratios and timing verdicts
 	docs/benchmarks/storage-aware/division-wide-quotient-summary.json = Paired wider quotient fallback results and neighboring-width regressions
