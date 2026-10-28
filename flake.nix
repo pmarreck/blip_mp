@@ -365,16 +365,16 @@
 									$row.samples.cpu_ns[$i] == ([$row.components[].cpu_ns[$i]]|add/4) and
 									$row.samples.wall_ns[$i] == ([$row.components[].wall_ns[$i]]|add/4)))
 						' competitors.json > /dev/null
-						for comparison in public leading; do
-						for geometry in short_quotient balanced long_dividend; do
+						for comparison in public leading short short-public; do
+						for geometry in short_quotient one_chunk_limit two_chunk_start balanced long_dividend; do
 							${self.packages.${system}.division-probe}/bin/blip-mp-division-probe "$comparison" "$geometry" 64,65 > public.json 2> stderr
 							test ! -s stderr
 							jq -e --arg geometry "$geometry" --arg comparison "$comparison" '
-								.correct == true and .method == (if $comparison == "public" then "division-public-paired-v1" else "division-leading-block-paired-v1" end) and .geometry == $geometry and
+								.correct == true and .method == ({"public":"division-public-paired-v1","leading":"division-leading-block-paired-v1","short":"division-short-quotient-paired-v1","short-public":"division-short-public-paired-v1"}[$comparison]) and .geometry == $geometry and
 								[.rows[].size] == [64,65] and all(.rows[]; . as $row |
-									.dividend_bytes == (if $geometry == "short_quotient" then .size+1 elif $geometry == "balanced" then .size*2 else .size*4 end) and
+									.dividend_bytes == (if $geometry == "short_quotient" then .size+1 elif $geometry == "one_chunk_limit" then .size+7 elif $geometry == "two_chunk_start" then .size+8 elif $geometry == "balanced" then .size*2 else .size*4 end) and
 									.fixture_count == 32 and .iterations == 32 and .warmup_cases == 64 and
-									[.components[].method] == (if $comparison == "public" then ["current","burnikel_ziegler"] else ["burnikel_ziegler","leading_block"] end) and
+									[.components[].method] == ({"public":["current","burnikel_ziegler"],"leading":["burnikel_ziegler","leading_block"],"short":["leading_block","short_quotient"],"short-public":["current","short_quotient"]}[$comparison]) and
 									all(.components[]; (.cpu_ns|length)==6 and (.wall_ns|length)==6 and all(.cpu_ns[],.wall_ns[]; .>0)) and
 									all(range(6); . as $i | (($row.samples.cpu_ns[$i] - ([$row.components[].cpu_ns[$i]]|add/2))|fabs)<0.001))
 							' public.json > /dev/null

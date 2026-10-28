@@ -2265,27 +2265,33 @@ fn bzDiv3n_2n(
 /// 64 (= 512-bit divisor) is a conservative starting point.
 const BZ_TOPLEVEL_THRESHOLD: usize = 64;
 
-/// Experimental leading-block shortcut; the cutoff-128 entry is its fixed control.
+/// Experimental Knuth fallback when the quotient length is bounded by one chunk.
+pub fn divModBurnikelZieglerShortQuotient(u: []const u8, u_len: usize, v: []const u8, v_len: usize, q: []u8, r: []u8, allocator: std.mem.Allocator) std.mem.Allocator.Error!struct { q_len: usize, r_len: usize } {
+	const got = try divModBurnikelZieglerImpl(true, 128, true, true, u, u_len, v, v_len, q, r, allocator);
+	return .{ .q_len = got.q_len, .r_len = got.r_len };
+}
+
+/// Explicit leading-block shortcut; the cutoff-128 entry is its fixed control.
 pub fn divModBurnikelZieglerLeadingBlock(u: []const u8, u_len: usize, v: []const u8, v_len: usize, q: []u8, r: []u8, allocator: std.mem.Allocator) std.mem.Allocator.Error!struct { q_len: usize, r_len: usize } {
-	const got = try divModBurnikelZieglerImpl(true, 128, true, u, u_len, v, v_len, q, r, allocator);
+	const got = try divModBurnikelZieglerImpl(true, 128, true, false, u, u_len, v, v_len, q, r, allocator);
 	return .{ .q_len = got.q_len, .r_len = got.r_len };
 }
 
 /// Explicit 128-byte recursive cutoff, with chunk-reading fallback.
 pub fn divModBurnikelZieglerCutoff128(u: []const u8, u_len: usize, v: []const u8, v_len: usize, q: []u8, r: []u8, allocator: std.mem.Allocator) std.mem.Allocator.Error!struct { q_len: usize, r_len: usize } {
-	const got = try divModBurnikelZieglerImpl(true, 128, false, u, u_len, v, v_len, q, r, allocator);
+	const got = try divModBurnikelZieglerImpl(true, 128, false, false, u, u_len, v, v_len, q, r, allocator);
 	return .{ .q_len = got.q_len, .r_len = got.r_len };
 }
 
 /// Explicit chunk-reading fallback control with the original recursive cutoff.
 pub fn divModBurnikelZieglerChunkFallback(u: []const u8, u_len: usize, v: []const u8, v_len: usize, q: []u8, r: []u8, allocator: std.mem.Allocator) std.mem.Allocator.Error!struct { q_len: usize, r_len: usize } {
-	const got = try divModBurnikelZieglerImpl(true, BZ_LEGACY_RECURSE_THRESHOLD, false, u, u_len, v, v_len, q, r, allocator);
+	const got = try divModBurnikelZieglerImpl(true, BZ_LEGACY_RECURSE_THRESHOLD, false, false, u, u_len, v, v_len, q, r, allocator);
 	return .{ .q_len = got.q_len, .r_len = got.r_len };
 }
 
 /// Historical byte fallback retained for paired measurements.
 pub fn divModBurnikelZieglerByteFallback(u: []const u8, u_len: usize, v: []const u8, v_len: usize, q: []u8, r: []u8, allocator: std.mem.Allocator) std.mem.Allocator.Error!struct { q_len: usize, r_len: usize } {
-	const got = try divModBurnikelZieglerImpl(false, BZ_LEGACY_RECURSE_THRESHOLD, false, u, u_len, v, v_len, q, r, allocator);
+	const got = try divModBurnikelZieglerImpl(false, BZ_LEGACY_RECURSE_THRESHOLD, false, false, u, u_len, v, v_len, q, r, allocator);
 	return .{ .q_len = got.q_len, .r_len = got.r_len };
 }
 
@@ -2312,7 +2318,7 @@ pub fn divModBurnikelZiegler(
 	r_out: []u8,
 	allocator: std.mem.Allocator,
 ) std.mem.Allocator.Error!struct { q_len: usize, r_len: usize } {
-	const got = try divModBurnikelZieglerImpl(true, BZ_RECURSE_THRESHOLD, true, u, u_len_in, v, v_len, q_out, r_out, allocator);
+	const got = try divModBurnikelZieglerImpl(true, BZ_RECURSE_THRESHOLD, true, false, u, u_len_in, v, v_len, q_out, r_out, allocator);
 	return .{ .q_len = got.q_len, .r_len = got.r_len };
 }
 
@@ -2320,6 +2326,7 @@ fn divModBurnikelZieglerImpl(
 	comptime chunk_fallback: bool,
 	comptime recurse_threshold: usize,
 	comptime leading_block: bool,
+	comptime short_quotient: bool,
 	u: []const u8, u_len_in: usize, v: []const u8, v_len: usize,
 	q_out: []u8, r_out: []u8, allocator: std.mem.Allocator,
 ) std.mem.Allocator.Error!struct { q_len: usize, r_len: usize } {
@@ -2363,8 +2370,12 @@ fn divModBurnikelZieglerImpl(
 		// u > v at same length — fall through to main algorithm.
 	}
 
-	// Knuth fallback when divisor is small OR odd (B-Z needs even n).
-	if (v_len < BZ_TOPLEVEL_THRESHOLD or (v_len & 1) != 0) {
+	// With canonical lengths, q < beta^(u_len-v_len+1). A difference below
+	// eight bytes bounds the quotient to one native chunk. The candidate
+	// uses Knuth before allocating recursive work; other entries stay fixed.
+	const short = short_quotient and u_len - v_len < @sizeOf(u64);
+	// Knuth also handles small or odd divisor widths (B-Z needs even n).
+	if (short or v_len < BZ_TOPLEVEL_THRESHOLD or (v_len & 1) != 0) {
 		if (chunk_fallback) {
 			const leaf = try divModBZLeaf(u, u_len, v, v_len, q_out, r_out, allocator);
 			return .{ .q_len = leaf.q_len, .r_len = leaf.r_len };

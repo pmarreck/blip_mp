@@ -658,6 +658,12 @@ pub const Mp = struct {
 		try tier3DivModOpBZWith(tier3.divModBurnikelZieglerLeadingBlock,q,rem,a.payload(),b.payload());
 	}
 
+	/// Experimental Knuth fallback for a quotient bounded to one native chunk.
+	pub fn divModBurnikelZieglerShortQuotient(q: *Mp, rem: *Mp, a: *const Mp, b: *const Mp) ArithError!void {
+		if (b.cached_sign == 0) return error.DivisionByZero;
+		try tier3DivModOpBZWith(tier3.divModBurnikelZieglerShortQuotient,q,rem,a.payload(),b.payload());
+	}
+
 	/// Truncated quotient: writes a / b into `q`. See `divMod` for sign convention.
 	pub fn div(q: *Mp, a: *const Mp, b: *const Mp) ArithError!void {
 		var rem_tmp = Mp.init(q.allocator);
@@ -5406,6 +5412,9 @@ test "divMod: 8 sign combinations match GMP truncated semantics" {
 		try Mp.divModBurnikelZieglerLeadingBlock(&q_mp,&r_mp,&a_mp,&b_mp);
 		try testing.expectEqual(c.q, try q_mp.getI64());
 		try testing.expectEqual(c.rem, try r_mp.getI64());
+		try Mp.divModBurnikelZieglerShortQuotient(&q_mp,&r_mp,&a_mp,&b_mp);
+		try testing.expectEqual(c.q, try q_mp.getI64());
+		try testing.expectEqual(c.rem, try r_mp.getI64());
 	}
 }
 
@@ -5440,6 +5449,7 @@ test "divMod: division by zero returns error.DivisionByZero" {
 	try testing.expectError(error.DivisionByZero, Mp.divMod(&q, &r, &a, &b));
 	try testing.expectError(error.DivisionByZero, Mp.divModBurnikelZiegler(&q,&r,&a,&b));
 	try testing.expectError(error.DivisionByZero, Mp.divModBurnikelZieglerLeadingBlock(&q,&r,&a,&b));
+	try testing.expectError(error.DivisionByZero, Mp.divModBurnikelZieglerShortQuotient(&q,&r,&a,&b));
 	try testing.expectError(error.DivisionByZero, Mp.div(&q, &a, &b));
 	try testing.expectError(error.DivisionByZero, Mp.mod(&r, &a, &b));
 }
@@ -5467,6 +5477,9 @@ test "divMod: i64.min / -1 promotes to tier 3 and returns 2^63" {
 	try testing.expectEqualSlices(u8,&expected,q.bytes());
 	try testing.expectEqual(@as(i64,0),try r.getI64());
 	try Mp.divModBurnikelZieglerLeadingBlock(&q,&r,&a,&b);
+	try testing.expectEqualSlices(u8,&expected,q.bytes());
+	try testing.expectEqual(@as(i64,0),try r.getI64());
+	try Mp.divModBurnikelZieglerShortQuotient(&q,&r,&a,&b);
 	try testing.expectEqualSlices(u8,&expected,q.bytes());
 	try testing.expectEqual(@as(i64,0),try r.getI64());
 }

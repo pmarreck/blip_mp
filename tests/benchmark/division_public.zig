@@ -5,9 +5,10 @@ const Mp = blip.Mp;
 const Case = @import("division_competitors.zig").Case;
 const timing = @import("division_crossover.zig");
 const widths = [_]usize{64,65,8192,12288,16384,16385};
-const Geometry = enum { short_quotient, balanced, long_dividend };
-const Method = enum { current, burnikel_ziegler, leading_block };
+const Geometry = enum { short_quotient, one_chunk_limit, two_chunk_start, balanced, long_dividend };
+const Method = enum { current, burnikel_ziegler, leading_block, short_quotient };
 const methods = [2]Method{.current,.burnikel_ziegler};
+const Comparison = enum { public, leading, short, short_public };
 const Options = struct { geometry: Geometry, sizes: [widths.len]usize, count: usize };
 
 fn parse(args: []const []const u8) !Options {
@@ -24,7 +25,7 @@ fn parse(args: []const []const u8) !Options {
 }
 
 fn dividendBytes(geometry: Geometry, width: usize) usize {
-	return switch (geometry) { .short_quotient => width+1, .balanced => 2*width, .long_dividend => 4*width };
+	return switch (geometry) { .short_quotient => width+1, .one_chunk_limit => width+7, .two_chunk_start => width+8, .balanced => 2*width, .long_dividend => 4*width };
 }
 
 const Pool = struct {
@@ -59,6 +60,7 @@ const Pool = struct {
 			.current => try Mp.divMod(&self.q,&self.r,&case.a,&case.b),
 			.burnikel_ziegler => try Mp.divModBurnikelZiegler(&self.q,&self.r,&case.a,&case.b),
 			.leading_block => try Mp.divModBurnikelZieglerLeadingBlock(&self.q,&self.r,&case.a,&case.b),
+			.short_quotient => try Mp.divModBurnikelZieglerShortQuotient(&self.q,&self.r,&case.a,&case.b),
 		}
 		if (!std.mem.eql(u8,self.q.bytes(),case.mq.bytes()) or !std.mem.eql(u8,self.r.bytes(),case.mr.bytes())) return error.IncorrectWork;
 	}
@@ -90,7 +92,7 @@ test "public division parser classifies complete width and geometry sets" {
 test "public division corpus covers signed geometries and rejects corrupt references" {
 	for (std.enums.values(Geometry)) |geometry| for ([_]usize{64,65}) |width| {
 		var pool = try Pool.init(std.testing.allocator,geometry,width,32); defer pool.deinit();
-		const dividend_len = switch (geometry) { .short_quotient => width+1, .balanced => 2*width, .long_dividend => 4*width };
+		const dividend_len = switch (geometry) { .short_quotient => width+1, .one_chunk_limit => width+7, .two_chunk_start => width+8, .balanced => 2*width, .long_dividend => 4*width };
 		var combinations: [4][8]usize = @splat(@splat(0));
 		for (pool.cases,0..) |*case,index| {
 			try std.testing.expectEqual(dividend_len,case.dividend.len);
@@ -125,15 +127,22 @@ fn nativeBatch(pool: *Pool, method: Method, start: usize, count: usize, repeats:
 }
 
 pub fn run(init: std.process.Init, args: []const []const u8) !void {
-	return runPair(false,init,args);
+	return runPair(.public,init,args);
 }
 
 pub fn runLeading(init: std.process.Init, args: []const []const u8) !void {
-	return runPair(true,init,args);
+	return runPair(.leading,init,args);
 }
 
-fn runPair(comptime leading: bool, init: std.process.Init, args: []const []const u8) !void {
-	const pair: [2]Method = if (leading) .{.burnikel_ziegler,.leading_block} else methods;
+pub fn runShort(init: std.process.Init, args: []const []const u8, comptime against_public: bool) !void {
+	return runPair(if (against_public) .short_public else .short,init,args);
+}
+
+fn runPair(comptime comparison: Comparison, init: std.process.Init, args: []const []const u8) !void {
+	const pair: [2]Method = switch (comparison) {
+		.public => methods, .leading => .{.burnikel_ziegler,.leading_block},
+		.short => .{.leading_block,.short_quotient}, .short_public => .{.current,.short_quotient},
+	};
 	const options = try parse(args);
 	const Component = struct { method: []const u8, cpu_ns: [6]f64, wall_ns: [6]f64 };
 	const Row = struct {
@@ -162,10 +171,18 @@ fn runPair(comptime leading: bool, init: std.process.Init, args: []const []const
 	const report = .{
 		.schema = "performance-measurement/v1", .correct = true, .build_mode = "ReleaseFast",
 		.compiler = @import("builtin").zig_version_string,
-		.method = if (leading) "division-leading-block-paired-v1" else "division-public-paired-v1", .geometry = @tagName(options.geometry),
+		.method = switch (comparison) {
+			.public => "division-public-paired-v1", .leading => "division-leading-block-paired-v1",
+			.short => "division-short-quotient-paired-v1", .short_public => "division-short-public-paired-v1",
+		}, .geometry = @tagName(options.geometry),
 		.cpu_clock = "CLOCK_PROCESS_CPUTIME_ID", .wall_clock = "CLOCK_MONOTONIC",
 		.seed_usage = "0xB2D151A5 + divisor_bytes*257 + index; four sign combinations crossed with eight normalization shifts; engine seed does not alter inputs",
-		.operation = if (leading) "explicit signed B-Z versus leading-block shortcut; magnitude byte widths; identical canonical BLIP input/output comparison adapters" else "current public signed division versus explicit B-Z; magnitude byte widths; identical canonical BLIP input/output comparison adapters",
+		.operation = switch (comparison) {
+			.public => "current public signed division versus explicit B-Z; magnitude byte widths; identical canonical BLIP input/output comparison adapters",
+			.leading => "explicit signed B-Z versus leading-block shortcut; magnitude byte widths; identical canonical BLIP input/output comparison adapters",
+			.short => "fixed leading-block B-Z versus short-quotient fallback; magnitude byte widths; identical canonical BLIP input/output comparison adapters",
+			.short_public => "current public signed division versus short-quotient B-Z; magnitude byte widths; identical canonical BLIP input/output comparison adapters",
+		},
 		.normalization = "six ABBA/BAAB half-pool samples; 32 verified calls per method/sample; primary averages both methods; no subtraction",
 		.verification = "GMP quotient/remainder magnitudes with truncated sign rules outside timing; full canonical-byte comparison on every call",
 		.allocator_coverage = "prepared inputs, reused outputs and warmed thread-local scratch; arithmetic allocation included; cold allocation unmeasured",

@@ -1004,6 +1004,54 @@ preparation/check time. The optimized production build and all-system evaluation
 passed. The fixed comparator and selected default both remain covered by the
 complete suite.
 
+### Short-quotient fallback experiment
+
+`Mp.divModBurnikelZieglerShortQuotient` exposes a candidate that uses the existing
+chunk-reading Knuth leaf when the trimmed dividend magnitude has fewer than
+eight extra bytes over the divisor. If their lengths are `m` and `n`, then
+`u < 256^m` and `v >= 256^(n-1)`, so `q < 256^(m-n+1)`. A difference below
+eight therefore bounds the quotient to one 64-bit chunk. The existing zero,
+smaller-dividend and same-value cases run before this decision. Inputs remain
+byte buffers; no stored integer representation changes.
+
+The candidate makes that decision before recursive scratch allocation and
+otherwise retains the selected leading-block implementation. This is a bounded
+first cutoff, not an optimum. The default B-Z kernel and public dispatcher are
+unchanged during qualification. Explicit old, leading-block and short-quotient
+entries keep the comparison paths separate.
+
+A failing-first classifier test checks all sixteen length differences from
+zero through fifteen at 64-, 128- and 256-byte divisors. With only one allocation
+allowed, exactly differences zero through seven must complete. The dividend
+includes two extra high zero bytes, requiring the decision to use its actual
+magnitude. Independent power-of-256 identities establish every complete
+quotient and remainder; exact quotient capacity and output canaries detect
+overwrites, and allocation accounting requires complete cleanup. The initial
+implementation failed the expected accepted set.
+
+The signed corpus now includes dividends one, seven and eight bytes wider than
+the divisor, plus twice-width and four-times-width dividends. It crosses all
+four signs and eight normalization shifts, checks both complete GMP-derived
+canonical results and rejects corrupted references. The candidate joins native
+boundary, zero-divisor and input-alias controls. Allocation-failure enumeration
+covers both short and balanced operands, including optional arena-cache recovery.
+The new probe routes failed their CLI controls before implementation.
+
+`profiling-division-short.json` compares the fixed leading-block path with the
+candidate. `profiling-division-short-public.json` compares current public division
+with the candidate. Both use 8,192-, 12,288-, 16,384- and 16,385-byte divisor
+magnitudes, all five geometries, and separate 1/12-CPU affinity cohorts. Each
+cohort retains five fresh processes, six paired ABBA/BAAB samples, 32 cases per
+width and a 120-second process deadline. GMP supplies references outside timing.
+At a length difference of eight, the bound allows nine quotient bytes even
+though some actual quotients still fit in eight; this is deliberately conservative.
+The existing three-geometry configurations and their method definitions retain
+their previous inputs. SIMD remains deferred while this experiment tests the
+choice of division algorithm.
+
+The complete native suite passed in 87 seconds of mixed Nix preparation/check
+time. The optimized production build and all-system evaluation also passed.
+
 ### Exact-capacity remainder regression
 
 Reviewing the B-Z entry point exposed a separate single-byte-divisor bug. With
