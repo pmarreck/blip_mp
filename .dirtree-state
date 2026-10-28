@@ -29,6 +29,7 @@ annotate=[
 	docs/benchmarks/storage-aware/RESEARCH.md = Recursive Toom and blocked multiplication results and correctness findings
 	docs/benchmarks/storage-aware/crossover-summary.jsonl = Selected-process crossover and allocation observations with cohort verdicts
 	docs/benchmarks/storage-aware/paired-tail-summary.jsonl = Paired final-block timing components and process ratios
+	docs/benchmarks/storage-aware/powm-baseline-summary.json = Verified powm baseline process means and cohort verdicts
 	docs/benchmarks/storage-aware/short-tail-summary.jsonl = Selected unpaired short-tail measurements and verdicts
 	docs/benchmarks/storage-aware/test-evidence.txt = Recorded red and green boundary tests
 	docs/benchmarks/storage-aware/tuned-full-summary.jsonl = Full API comparison exposing and resolving recursive crossover regression

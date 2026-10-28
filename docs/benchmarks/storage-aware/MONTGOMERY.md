@@ -90,3 +90,57 @@ small radices with native full-product oracles, retain the invalid-bound negativ
 control above, check native-width carry boundaries against GMP, and verify
 allocation/aliasing behavior. Measure conversion/precomputation separately from
 repeated modular products. No Montgomery speedup or SIMD benefit is claimed.
+
+## Verified public baseline and sampling
+
+Campaign `blip-mp-powm-20261028T070827Z` measured commit
+`c6f00e01510f6a5b85df82cbd11dbf518b0581b2` on the existing x86_64 Zen 2 host,
+Zig 0.16.0 ReleaseFast and GMP 6.3.0. Source hash
+`a7875990ec047b153d01ade309e6702cd75b0f73b2938b884b4158c9bbddfd3d`
+stayed unchanged. All 15 processes verified their results. The one-CPU cohort
+was `INCONCLUSIVE` after its allowed retry; the 12-CPU cohort was `UNBASELINED`.
+No baseline epoch was approved.
+
+| Nominal bits | Median process-mean CPU, 1 CPU | Median process-mean CPU, 12 CPUs |
+|---:|---:|---:|
+| 512 | 0.141 ms | 0.142 ms |
+| 1024 | 0.797 ms | 0.797 ms |
+| 2048 | 5.447 ms | 5.474 ms |
+| 3072 | 17.153 ms | 17.128 ms |
+
+These descriptive medians use the five final processes, each averaging five
+complete 256-case passes. They differ from the engine's selected process and
+do not override its verdict. The [summary](powm-baseline-summary.json) keeps
+both representations, individual process means, source identity and verdicts;
+full records, including the earlier attempt, remain in external history.
+At 2048 bits, one final one-CPU process averaged 7.203 ms, illustrating the
+variation. These are public BLIP-operation times with setup, allocation and
+full result verification. GMP supplies correctness, not a timed competitor.
+
+A separate Linux `perf record` diagnostic sampled user-space cycles at 99 Hz
+while the original probe ran its 3072-bit workload on one CPU. It recorded
+3268 samples with none reported lost. About 88.30% of weighted samples fell
+in `tier3.montMul`, 4.43% in `memset`, and 4.46% in two GMP arithmetic routines.
+The profile covers the whole process, including GMP reference preparation and
+warmup; its percentages are not a breakdown of the probe's timed interval.
+The original executable hash is recorded in the
+[probe notes](../../plan_context/performance-follow-up.md#verified-modular-exponentiation-probe).
+
+The next candidate reuses `squareMagnitudesU64` before the existing Montgomery
+reduction. Sliding-window exponentiation currently sends every squaring through
+general multiplication even though the symmetric product kernel already exists.
+It reduces the product phase from `k^2` chunk products to `k*(k+1)/2`, with the
+same reduction afterward. That count is a hypothesis for runtime improvement,
+not a measured speedup. The isolated candidate first failed a new GMP test
+against an empty implementation, then passed 288 cases across nine buffer
+widths, four modulus patterns, four input patterns and both output-alias modes.
+The corpus includes dirty scratch, unaligned buffers, zero/one values, dense
+carry cases and canaries. Its complete native suite/build and all-system
+evaluation passed before measurement; production remains unchanged.
+
+The candidate's ReleaseFast executable had SHA-256
+`8f6692d6899e610024d22c7f1bbe354bdb80cad9476016ab37060aeb212dc8ee`.
+The symmetric product and Montgomery reduction compiled to scalar BMI2 `MULX`
+and carry loops, occupying 428 and 427 bytes respectively. The wrapper and
+general multiplication were inlined in this build. SIMD remains deferred while
+the existing algorithmic saving is measured on the complete public operation.
