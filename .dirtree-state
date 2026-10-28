@@ -46,6 +46,7 @@ annotate=[
 	profiling-linux-counters.json = Interleaved add diagnostic cases with Linux hardware counters
 	profiling-multiplication.json = Asymmetric multiplication boundary, ratio and allocation measurement cohorts
 	profiling-paired-tail.json = Paired ABBA final-block multiplication timing cohorts
+	profiling-powm-boundary.json = Paired public Montgomery squaring sweep around the small-size crossover
 	profiling-powm-paired.json = Paired public Montgomery squaring comparisons with mirrored fixture batches
 	profiling-powm.json = Single- and twelve-CPU verified modular exponentiation cohorts
 	profiling-short-tail.json = Padded and register-tail multiplication controls at one, eight and nine trailing bytes

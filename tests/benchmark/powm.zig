@@ -4,7 +4,7 @@ const blip = @import("blip_mp");
 const Mp = blip.Mp;
 const gmp = @import("gmp.zig");
 const legacy = @import("blip_mp_bench.zig");
-const widths = [_]usize{ 512, 1024, 2048, 3072 };
+const widths = [_]usize{ 64, 128, 256, 384, 512, 768, 1024, 1536, 2048, 3072 };
 const Options = struct { sizes: [widths.len]usize, count: usize, paired: bool = false };
 
 const Method = enum { general, symmetric };
@@ -200,13 +200,22 @@ const Fixture = struct {
 
 test "powm probe accepts only ordered supported widths" {
 	const all = try parse(&.{"512,1024,2048,3072"});
-	try std.testing.expectEqualSlices(usize, &widths, all.sizes[0..all.count]);
+	try std.testing.expectEqualSlices(usize, &.{512,1024,2048,3072}, all.sizes[0..all.count]);
 	const paired = try parse(&.{"paired", "512,3072"});
 	try std.testing.expectEqualSlices(usize, &.{512,3072}, paired.sizes[0..paired.count]);
 	for ([_][]const u8{"", "0", "511", "513", "4096", "512,", "512,512", "1024,512", "x"}) |value|
 		try std.testing.expectError(error.InvalidArguments, parse(&.{value}));
 	try std.testing.expectError(error.InvalidArguments, parse(&.{}));
 	try std.testing.expectError(error.InvalidArguments, parse(&.{"512", "1024"}));
+}
+
+test "powm boundary probe accepts the complete small-width classifier set" {
+	const all = try parse(&.{"paired", "64,128,256,384,512,768,1024,1536,2048,3072"});
+	try std.testing.expectEqualSlices(usize, &.{64,128,256,384,512,768,1024,1536,2048,3072}, all.sizes[0..all.count]);
+	for ([_][]const u8{"63","65","192","255","257","383","385","767","769","1535","1537","3073","4096","128,64","64,64"}) |value| {
+		try std.testing.expectError(error.InvalidArguments, parse(&.{value}));
+		try std.testing.expectError(error.InvalidArguments, parse(&.{"paired",value}));
+	}
 }
 
 test "powm sampling preserves work counts, distinct clocks and error paths" {

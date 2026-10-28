@@ -192,3 +192,22 @@ build and all-system evaluation passed. The independent Montgomery-square
 corpus adds 288 direct GMP cases in the unit suite; those are separate from
 the integration comparison count. Production `Mp.powm` still uses the general
 product, and the original single-method probe retains its measurement label.
+
+## Small-width qualification
+
+`profiling-powm-boundary.json` prepares a separate paired sweep at nominal
+64, 128, 256, 384, 512, 768, 1024 and 1536 bits. These sizes span the minimum
+Montgomery width and the uncertain smaller-size results. The original
+512/1024/2048/3072 campaigns and labels remain unchanged. The new configuration
+uses distinct case names and a `powm-squaring-boundary-v1` definition, with
+the same mirrored batches, 256 cases per method/sample, five processes per
+affinity cohort and 120-second process deadlines.
+
+The parser's complete accepted/rejected size-set test failed before widening
+its allowlist. Existing independent GMP fixture and corruption tests now cover
+every allowed width, and CLI checks exercise the new 64/128-bit reports. The
+complete native suite passed with 13,231 integration GMP comparisons in 89
+seconds of mixed Nix preparation/check time; production build and all-system
+evaluation passed. No measurements or production threshold follow from these
+checks alone. Run `./bm --verified-powm --config profiling-powm-boundary.json`
+after the first paired sweep has established the candidate's behavior.

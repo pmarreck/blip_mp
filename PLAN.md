@@ -4,13 +4,13 @@ Purpose: [INTENT.md](INTENT.md). The [legacy roadmap](docs/plan_context/legacy-r
 
 ## Current bounded milestone
 
+- [x] Prepare the paired Montgomery small-width sweep with accepted/rejected classifier sets, expanded GMP fixtures and CLI checks; pass full native tests/build and all-system evaluation (context: docs/benchmarks/storage-aware/MONTGOMERY.md; done 2026-10-28 03:56 EDT; this commit).
 - [x] Fix the reproduced Goldilocks CLI clock-resolution failure with larger smoke inputs, injected invalid-clock controls and captured failure diagnostics; 128 repeated checks and the full native suite/build pass (context: docs/benchmarks/goldilocks/TRUNCATED.md; done 2026-10-28 03:23 EDT; this commit).
 
 ## Follow-up and existing backlog
 
 
 
-- [x] Add the retained-workload GMP-verified powm probe with allocation, timing, CLI and CI controls; pass full native tests/build and all-system evaluation (context: docs/plan_context/performance-follow-up.md; done 2026-10-28 03:06 EDT; this commit).
 - [x] Measure the verified powm baseline and sample its 3072-bit path: about 88% of whole-process user-cycle samples fall in montMul; preserve inconclusive/unbaselined verdicts and prepare an isolated symmetric-squaring candidate (context: docs/benchmarks/storage-aware/MONTGOMERY.md; done 2026-10-28 03:27 EDT; this commit).
 - [x] Add paired public Montgomery-squaring measurements with shared fixtures, mirrored batches, independent GMP/canary controls and unchanged production dispatch; pass full native tests/build and all-system evaluation (context: docs/benchmarks/storage-aware/MONTGOMERY.md; done 2026-10-28 03:43 EDT; this commit).
 - [ ] Measure the paired public Montgomery-squaring comparison and qualify the dispatch boundary before production selection; separate-process observations favor 2048/3072 bits but disagree at smaller sizes (context: docs/benchmarks/storage-aware/MONTGOMERY.md).

@@ -388,6 +388,9 @@
 									$row.samples.cpu_ns[$i] == ([$row.components[].cpu_ns[$i]]|add/2) and
 									$row.samples.wall_ns[$i] == ([$row.components[].wall_ns[$i]]|add/2)))
 						' paired.json > /dev/null
+						${self.packages.${system}.powm-probe}/bin/blip-mp-powm-probe paired 64,128 > boundary.json 2> stderr
+						test ! -s stderr
+						jq -e '.correct == true and .method == "powm-paired-squaring-v1" and [.rows[].size] == [64,128] and all(.rows[]; all(.samples[]; length == 5 and all(.[]; . > 0)))' boundary.json > /dev/null
 						if ${self.packages.${system}.powm-probe}/bin/blip-mp-powm-probe 513 > output.json 2> stderr; then exit 1; fi
 						test ! -s output.json
 						mkdir bin
