@@ -96,17 +96,58 @@ fn balancedSample(state: anytype, comptime batch: anytype, methods: [3]Layout, i
 }
 
 fn timedBatch(fixture: *Fixture, layout: Layout, iterations: usize) !Timing {
-	const now = @import("immediate_add.zig").now;
-	const wall_start = try now(.MONOTONIC);
-	const cpu_start = try now(.PROCESS_CPUTIME_ID);
+	const NativeClock = struct {
+		fn read(_: *@This(), kind: std.c.CLOCK) !u64 { return @import("immediate_add.zig").now(kind); }
+	};
+	var clock: NativeClock = .{};
+	return timedBatchWithClock(fixture, &clock, layout, iterations);
+}
+
+fn timedBatchWithClock(work: anytype, clock: anytype, layout: Layout, iterations: usize) !Timing {
+	if (iterations == 0) return error.InvalidArguments;
+	const wall_start = try clock.read(.MONOTONIC);
+	const cpu_start = try clock.read(.PROCESS_CPUTIME_ID);
 	for (0..iterations) |_| {
-		try fixture.run(layout);
-		std.mem.doNotOptimizeAway(fixture);
+		try work.run(layout);
+		std.mem.doNotOptimizeAway(work);
 	}
-	const cpu_end = try now(.PROCESS_CPUTIME_ID);
-	const wall_end = try now(.MONOTONIC);
+	const cpu_end = try clock.read(.PROCESS_CPUTIME_ID);
+	const wall_end = try clock.read(.MONOTONIC);
 	if (cpu_end <= cpu_start or wall_end <= wall_start) return error.ClockFailed;
 	return .{ .cpu = cpu_end - cpu_start, .wall = wall_end - wall_start };
+}
+
+test "Goldilocks timed batches preserve work and reject invalid clock intervals" {
+	const Work = struct {
+		count: usize = 0, fail: bool = false,
+		fn run(self: *@This(), layout: Layout) !void {
+			if (self.fail) return error.IncorrectWork;
+			try std.testing.expectEqual(Layout.fused, layout);
+			self.count += 1;
+		}
+	};
+	const Clock = struct {
+		times: [4]u64 = .{100, 200, 600, 900}, index: usize = 0, fail: bool = false,
+		fn read(self: *@This(), kind: std.c.CLOCK) !u64 {
+			if (self.fail) return error.InjectedClockFailure;
+			try std.testing.expectEqual(if (self.index == 0 or self.index == 3) std.c.CLOCK.MONOTONIC else std.c.CLOCK.PROCESS_CPUTIME_ID, kind);
+			defer self.index += 1;
+			return self.times[self.index];
+		}
+	};
+	var work: Work = .{}; var clock: Clock = .{};
+	try std.testing.expectEqualDeep(Timing{ .cpu = 400, .wall = 800 }, try timedBatchWithClock(&work, &clock, .fused, 3));
+	try std.testing.expectEqual(@as(usize, 3), work.count);
+	try std.testing.expectEqual(@as(usize, 4), clock.index);
+	try std.testing.expectError(error.InvalidArguments, timedBatchWithClock(&work, &clock, .fused, 0));
+	work = .{ .fail = true }; clock = .{};
+	try std.testing.expectError(error.IncorrectWork, timedBatchWithClock(&work, &clock, .fused, 3));
+	work = .{}; clock = .{ .fail = true };
+	try std.testing.expectError(error.InjectedClockFailure, timedBatchWithClock(&work, &clock, .fused, 3));
+	for ([_][4]u64{ .{100,200,200,900}, .{100,200,199,900}, .{100,200,600,100}, .{100,200,600,99}, .{2609843644147502,2562336,2562336,2609843644194391} }) |times| {
+		work = .{}; clock = .{ .times = times };
+		try std.testing.expectError(error.ClockFailed, timedBatchWithClock(&work, &clock, .fused, 3));
+	}
 }
 
 const Fixture = struct {

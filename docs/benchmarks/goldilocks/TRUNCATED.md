@@ -269,3 +269,25 @@ intervals. Public GMP checks cover both signs and both operand-alias orders at
 nine boundary widths, including transitions back to full fusion. The complete
 native suite passed with 13,231 GMP comparisons in 89 seconds of mixed Nix
 preparation/check time; this is not a test-execution-only duration.
+
+## CLI clock-resolution regression
+
+CI for the occupancy-selection commit failed in the probe CLI check. A bounded
+repetition of that exact check reproduced `ClockFailed`; a diagnostic build
+then captured identical process-CPU readings of 2562336 ns while monotonic wall
+time advanced 46889 ns. The probe correctly rejected the interval. This does
+not establish a defect in transform arithmetic or justify accepting zero CPU
+duration.
+
+The CLI smoke inputs increase from 64/128 to 1024/2048 bytes, retaining eight
+operations per batch and every layout mode. Unit fixtures still cover the
+smaller sizes. Injected-clock tests preserve the observed stopped-clock case,
+backward CPU/wall time, clock-read failures, work failures and exact work counts.
+The new timing test failed against its placeholder before implementation. CLI
+failures now expose captured stderr instead of reporting only an exit code.
+
+The corrected check passed 128 bounded repetitions across all four modes. This
+is finite evidence of reliable smoke coverage, not a claim that the process
+clock can never stop. The complete native suite passed with 13,231 GMP
+comparisons in 136 seconds of mixed Nix preparation/check time. Production
+build and all-system evaluation passed; arithmetic dispatch did not change.

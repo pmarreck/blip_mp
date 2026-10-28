@@ -396,6 +396,7 @@
 					gold-probe-cli = pkgs.runCommand "${pname}-gold-probe-cli" {
 						nativeBuildInputs = [ pkgs.jq ];
 					} ''
+						trap 'status=$?; if [ "$status" -ne 0 ]; then cat stderr; fi; exit "$status"' EXIT
 						mkdir bin
 						cat > bin/nix <<-'STUB'
 						#!${pkgs.bash}/bin/bash
@@ -411,13 +412,13 @@
 							test ! -s stderr
 						done
 						for mode in product passes truncated hybrid; do
-							${self.packages.${system}.gold-probe}/bin/blip-mp-gold-probe "$mode" 64,128 8 > output.json 2> stderr
+							${self.packages.${system}.gold-probe}/bin/blip-mp-gold-probe "$mode" 1024,2048 8 > output.json 2> stderr
 							test ! -s stderr
 							jq -e --arg mode "$mode" '
 								.schema == "performance-measurement/v1" and .correct == true and
 								.build_mode == "ReleaseFast" and .mode == $mode and
 								.method == (if $mode == "hybrid" then "gold-hybrid-products-v1" elif $mode == "truncated" then "gold-truncated-products-v1" else "gold-paired-layouts-v1" end) and
-								[.rows[].size] == [64,128] and [.rows[].transform_length] == [64,128] and
+								[.rows[].size] == [1024,2048] and [.rows[].transform_length] == [1024,2048] and
 								all(.rows[]; . as $row | .iterations == 8 and
 									[.components[].layout] == (if $mode == "hybrid" then ["fused","truncated","hybrid"] elif $mode == "truncated" then ["stockham","fused","truncated"] else ["stockham","paired","fused"] end) and
 									all(.samples[]; length == 6 and all(.[]; . > 0)) and

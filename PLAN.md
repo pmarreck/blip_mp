@@ -4,8 +4,8 @@ Purpose: [INTENT.md](INTENT.md). The [legacy roadmap](docs/plan_context/legacy-r
 
 ## Current bounded milestone
 
+- [x] Fix the reproduced Goldilocks CLI clock-resolution failure with larger smoke inputs, injected invalid-clock controls and captured failure diagnostics; 128 repeated checks and the full native suite/build pass (context: docs/benchmarks/goldilocks/TRUNCATED.md; done 2026-10-28 03:23 EDT; this commit).
 - [x] Measure fused-subtree products: all 15 processes verify; paired medians save about 15% at 100000 bytes and 34–40% just above padding jumps, with losses near full transforms; retain the inconclusive one-CPU cohort and prepare a distinct crossover sweep (context: docs/benchmarks/goldilocks/TRUNCATED.md; done 2026-10-28 02:40 EDT; this commit).
-- [x] Add fused complete subtrees to truncated Goldilocks, retain both controls, pass 92,736 independent transform cases and 13,183 GMP comparisons, and add a separate paired measurement mode; full native tests/build and all-system evaluation pass (context: docs/benchmarks/goldilocks/TRUNCATED.md; done 2026-10-28 02:28 EDT; this commit).
 
 ## Follow-up and existing backlog
 
