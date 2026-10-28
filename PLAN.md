@@ -10,10 +10,10 @@ Purpose: [INTENT.md](INTENT.md). The [legacy roadmap](docs/plan_context/legacy-r
 
 
 - [x] Select the chunk-reading B-Z fallback after paired samples show 6–19× gains with near-parity recursive controls; preserve unbaselined/inconclusive verdicts and pass full tests/build/evaluation (context: docs/plan_context/performance-follow-up.md; done 2026-10-28 06:34 EDT; this commit).
-- [x] Qualify an explicit 128-byte recursive cutoff against independent GMP, allocation and paired timing controls; pass the complete suite, build and all-system evaluation (context: docs/plan_context/performance-follow-up.md; done 2026-10-28 06:16 EDT; this commit).
 - [ ] Measure the 128-byte recursive cutoff against the four-byte control, keeping the same chunk-reading fallback and unchanged odd-width controls (context: docs/plan_context/performance-follow-up.md).
 - [x] Report inverse-probe significant widths and correct the historical recursive-HGCD fallback attribution; pass the complete suite, build and all-system evaluation (context: docs/plan_context/performance-follow-up.md; done 2026-10-28 06:29 EDT; this commit).
-- [ ] Establish an exact-width GMP-verified inverse corpus at and above 4096 significant modulus bits before comparing recursive HGCD.
+- [x] Establish exact 4095/4096/4097-bit inverse fixtures with GMP, accepted-width and allocation-failure controls; pass the complete suite, build and all-system evaluation (context: docs/plan_context/performance-follow-up.md; done 2026-10-28 06:41 EDT; this commit).
+- [ ] Measure wider-window versus recursive inverse calls on an expanded exact-width corpus with paired timing and verified results before changing dispatch.
 - [x] Fix B-Z single-byte remainder length at exact output capacity after a failing native-oracle regression; pass the complete suite, build and all-system evaluation (context: docs/plan_context/performance-follow-up.md; done 2026-10-28 06:22 EDT; this commit).
 - [ ] Continue GMP performance work across operand sizes; measure FFT viability, recursive HGCD dependencies, division thresholds and small-divisor paths; hand assembly remains deferred per the May 18 record (context: docs/plan_context/legacy-roadmap.md).
 - [ ] Resolve strict unsigned-BLIP interoperability and conditional binary-base GMP float cross-validation requirements before implementation (context: docs/plan_context/legacy-roadmap.md).

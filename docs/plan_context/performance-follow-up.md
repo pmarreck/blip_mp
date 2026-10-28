@@ -320,6 +320,27 @@ The metadata correction passed the complete native suite in 132 seconds of
 mixed Nix preparation/check time, plus the production/probe build and all-system
 evaluation. It introduces no arithmetic or dispatch change.
 
+The first exact-width correctness corpus uses deterministic dense operands at
+4095, 4096 and 4097 significant modulus bits. Moduli are positive and odd;
+the other operand has one fewer significant bit. Full-byte payloads receive
+the required positive sign padding. Both wider-window and recursive inverse
+entry points are checked against GMP, so the last two widths cross the
+recursive wrapper's threshold. This is one operand pair per width, not a
+performance sample or broad input-distribution study.
+
+The original fixture failed the new width check with `expected 4096, found
+4095`. The exact-width generator then passed those oracle checks. The initial
+six-test inverse probe executed in 347 ms after 28 seconds of compilation;
+the Nix build phase took 34 seconds. Separate checks classify the accepted
+width set and inject failures through each fixture allocation. The inverse
+probe build/test phase has a 120-second safety deadline and reports compilation
+and test execution durations separately. Historical inputs and timings remain
+unchanged; exact-width timing needs a separate paired measurement.
+
+The complete native suite then passed in 91 seconds of mixed Nix
+preparation/check time, including the accepted-width and allocation-failure
+controls. Production/probe builds and all-system evaluation also passed.
+
 ## Division probes
 
 `./bm --verified-division` runs the six workloads formerly embedded in five

@@ -116,12 +116,65 @@ pub fn verify(result: *const Mp, actual_exists: bool, wanted: []const u8, expect
 const gmp = @import("gmp.zig");
 const Z = gmp.Z;
 
+fn inverseOracle(allocator: std.mem.Allocator, a: *const Mp, m: *const Mp, raw: []u8) !struct { bytes: []u8, exists: bool } {
+	var ga: Z = undefined;
+	gmp.__gmpz_init(&ga);
+	defer gmp.__gmpz_clear(&ga);
+	var gm: Z = undefined;
+	gmp.__gmpz_init(&gm);
+	defer gmp.__gmpz_clear(&gm);
+	var inverse: Z = undefined;
+	gmp.__gmpz_init(&inverse);
+	defer gmp.__gmpz_clear(&inverse);
+	const a_bytes = try magnitude(a);
+	const m_bytes = try magnitude(m);
+	std.debug.assert(raw.len >= m_bytes.len);
+	gmp.__gmpz_import(&ga, a_bytes.len, -1, 1, 0, 0, a_bytes.ptr);
+	gmp.__gmpz_import(&gm, m_bytes.len, -1, 1, 0, 0, m_bytes.ptr);
+	const exists = gmp.__gmpz_invert(&inverse, &ga, &gm) != 0;
+	var length: usize = 0;
+	if (exists) _ = gmp.__gmpz_export(raw.ptr, &length, -1, 1, 0, 0, &inverse);
+	return .{ .bytes = try allocator.dupe(u8, raw[0..length]), .exists = exists };
+}
+
+fn setExactPositive(value: *Mp, random: std.Random, bits: usize, odd: bool, raw: []u8, encoded: []u8) !void {
+	var length = (bits + 7) / 8;
+	random.bytes(raw[0..length]);
+	const high_bit: u3 = @intCast((bits - 1) % 8);
+	raw[length - 1] &= @as(u8, 0xff) >> (7 - high_bit);
+	raw[length - 1] |= @as(u8, 1) << high_bit;
+	if (odd) raw[0] |= 1;
+	if (raw[length - 1] & 0x80 != 0) {
+		raw[length] = 0;
+		length += 1;
+	}
+	const header = try blip.tier3.writeHeader(encoded, length);
+	@memcpy(encoded[header..][0..length], raw[0..length]);
+	try value.setBytes(encoded[0 .. header + length]);
+}
+
 pub const Fixture = struct {
 	allocator: std.mem.Allocator,
 	a: Mp,
 	m: Mp,
 	expected: []u8,
 	has_inverse: bool,
+	pub fn initExact(allocator: std.mem.Allocator, bits: usize) !Fixture {
+		if (bits < 4095 or bits > 4097) return error.InvalidArguments;
+		var a = Mp.init(allocator);
+		errdefer a.deinit();
+		var m = Mp.init(allocator);
+		errdefer m.deinit();
+		const raw = try allocator.alloc(u8, (bits + 7) / 8 + 1);
+		defer allocator.free(raw);
+		const encoded = try allocator.alloc(u8, raw.len + 16);
+		defer allocator.free(encoded);
+		var rng = std.Random.DefaultPrng.init(0xEAC7_4096 ^ @as(u64, @intCast(bits)));
+		try setExactPositive(&a, rng.random(), bits - 1, false, raw, encoded);
+		try setExactPositive(&m, rng.random(), bits, true, raw, encoded);
+		const oracle = try inverseOracle(allocator, &a, &m, raw);
+		return .{ .allocator = allocator, .a = a, .m = m, .expected = oracle.bytes, .has_inverse = oracle.exists };
+	}
 	pub fn init(allocator: std.mem.Allocator, bits: usize) !Fixture {
 		if (std.mem.indexOfScalar(usize, &widths, bits) == null) return error.InvalidArguments;
 		var a = Mp.init(allocator);
@@ -153,24 +206,9 @@ pub const Fixture = struct {
 				break;
 			}
 		}
-		var ga: Z = undefined;
-		gmp.__gmpz_init(&ga);
-		defer gmp.__gmpz_clear(&ga);
-		var gm: Z = undefined;
-		gmp.__gmpz_init(&gm);
-		defer gmp.__gmpz_clear(&gm);
-		var inverse: Z = undefined;
-		gmp.__gmpz_init(&inverse);
-		defer gmp.__gmpz_clear(&inverse);
-		const a_bytes = try magnitude(&a);
-		const m_bytes = try magnitude(&m);
-		gmp.__gmpz_import(&ga, a_bytes.len, -1, 1, 0, 0, a_bytes.ptr);
-		gmp.__gmpz_import(&gm, m_bytes.len, -1, 1, 0, 0, m_bytes.ptr);
-		const exists = gmp.__gmpz_invert(&inverse, &ga, &gm) != 0;
-		var length: usize = 0;
-		if (exists) _ = gmp.__gmpz_export(raw.ptr, &length, -1, 1, 0, 0, &inverse);
+		const oracle = try inverseOracle(allocator, &a, &m, raw);
 		return .{ .allocator = allocator, .a = a, .m = m,
-			.expected = try allocator.dupe(u8, raw[0..length]), .has_inverse = exists };
+			.expected = oracle.bytes, .has_inverse = oracle.exists };
 	}
 	pub fn deinit(self: *Fixture) void {
 		self.a.deinit();
@@ -186,6 +224,54 @@ pub fn run(algorithm: Algorithm, result: *Mp, fixture: *const Fixture) !bool {
 		.recursive => Mp.invModHGCDRecursive(result, &fixture.a, &fixture.m),
 		.stein => Mp.invModStein(result, &fixture.a, &fixture.m),
 	};
+}
+
+test "exact inverse fixture widths classify the complete bounded set" {
+	var accepted: [4100]bool = @splat(false);
+	var expected: [4100]bool = @splat(false);
+	for ([_]usize{4095,4096,4097}) |bits| expected[bits] = true;
+	for (0..accepted.len) |bits| {
+		if (Fixture.initExact(std.testing.allocator, bits)) |value| {
+			var fixture = value;
+			defer fixture.deinit();
+			accepted[bits] = true;
+		} else |err| {
+			try std.testing.expectEqual(error.InvalidArguments, err);
+		}
+	}
+	try std.testing.expectEqualSlices(bool, &expected, &accepted);
+	try std.testing.expectError(error.InvalidArguments, Fixture.initExact(std.testing.allocator, std.math.maxInt(usize)));
+}
+
+test "exact inverse fixtures release partial allocations" {
+	const FailureCase = struct {
+		fn run(allocator: std.mem.Allocator, bits: usize) !void {
+			var fixture = try Fixture.initExact(allocator, bits);
+			defer fixture.deinit();
+		}
+	};
+	for ([_]usize{4095,4096,4097}) |bits| try std.testing.checkAllAllocationFailures(std.testing.allocator, FailureCase.run, .{bits});
+}
+
+test "exact inverse fixtures cross the recursive threshold and agree with GMP" {
+	defer blip.tier3.releaseBzArena();
+	defer blip.tier3.releaseMulScratch();
+	defer blip.tier3.releaseDivScratch();
+	defer blip.tier3.releaseVnScratch();
+	var result = Mp.init(std.testing.allocator);
+	defer result.deinit();
+	for ([_]usize{4096,4095,4097}) |bits| {
+		var fixture = try Fixture.initExact(std.testing.allocator, bits);
+		defer fixture.deinit();
+		try std.testing.expectEqual(bits, fixture.m.bitLen());
+		try std.testing.expectEqual(bits - 1, fixture.a.bitLen());
+		try std.testing.expectEqual(@as(i8, 1), fixture.m.cached_sign);
+		try std.testing.expectEqual(@as(i8, 1), fixture.a.cached_sign);
+		for ([_]Algorithm{.hgcd,.recursive}) |algorithm| {
+			const ok = try run(algorithm, &result, &fixture);
+			try verify(&result, ok, fixture.expected, fixture.has_inverse);
+		}
+	}
 }
 
 test "every historical inverse fixture agrees with GMP for all bounded algorithms" {

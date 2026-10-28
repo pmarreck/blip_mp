@@ -259,7 +259,7 @@
 						pname = "${pname}-inverse-probe-tests";
 						buildPhase = ''
 							${commonBuild}
-							zig build inverse-probe-test -Doptimize=ReleaseSafe -Dgmp-lib-path=${pkgs.gmp}/lib
+							timeout 120 zig build inverse-probe-test -Doptimize=ReleaseSafe -Dgmp-lib-path=${pkgs.gmp}/lib --summary all
 						'';
 					};
 					division-probe = self.checks.${system}.probe.overrideAttrs {
