@@ -85,6 +85,9 @@ The fused layout reduced complete-product CPU time by about 23–25% versus
 Stockham in the sampled sizes and is selected at the existing large-input
 threshold. This comparison establishes no new GMP crossover; the measurement
 notes retain the unbaselined and inconclusive cohort verdicts.
+`./bm --verified-truncated` compares the experimental
+[truncated product](docs/benchmarks/goldilocks/TRUNCATED.md) against Stockham
+and fusion around transform-padding boundaries.
 
 Requires [Nix](https://nixos.org/) (handles the Zig 0.16.0 toolchain and GMP build for benchmarks).
 

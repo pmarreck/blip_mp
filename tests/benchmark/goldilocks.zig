@@ -2,8 +2,11 @@
 const std = @import("std");
 const blip = @import("blip_mp");
 const fft = blip.fft;
-const Layout = fft.GoldLayout;
-const Mode = enum { product, passes };
+const Layout = enum { stockham, paired, fused, truncated };
+const Mode = enum { product, passes, truncated };
+fn layouts(mode: Mode) [3]Layout {
+	return if (mode == .truncated) .{ .stockham, .fused, .truncated } else .{ .stockham, .paired, .fused };
+}
 const Options = struct { mode: Mode, sizes: [16]usize, count: usize, iterations: usize };
 const Timing = struct { cpu: u64, wall: u64 };
 const Sample = struct { cpu: [3]f64, wall: [3]f64 };
@@ -25,12 +28,12 @@ pub fn main(init: std.process.Init) !void {
 		var fixture = try Fixture.init(std.heap.c_allocator, options.mode, size);
 		defer fixture.deinit();
 		var row: Row = .{ .size = size, .transform_length = fixture.n, .iterations = options.iterations, .samples = undefined, .components = undefined };
-		for (std.enums.values(Layout), 0..) |layout, i| {
+		for (layouts(options.mode), 0..) |layout, i| {
 			try fixture.run(layout);
 			row.components[i] = .{ .layout = @tagName(layout), .cpu_ns = undefined, .wall_ns = undefined };
 		}
 		for (0..6) |round| {
-			const sample = try balancedSample(&fixture, timedBatch, options.iterations, round);
+			const sample = try balancedSample(&fixture, timedBatch, layouts(options.mode), options.iterations, round);
 			var cpu: f64 = 0;
 			var wall: f64 = 0;
 			for (&row.components, 0..) |*component, i| {
@@ -43,11 +46,12 @@ pub fn main(init: std.process.Init) !void {
 	}
 	const report = .{
 		.schema = "performance-measurement/v1", .correct = true, .build_mode = "ReleaseFast",
-		.compiler = @import("builtin").zig_version_string, .method = "gold-paired-layouts-v1", .mode = @tagName(options.mode),
+		.compiler = @import("builtin").zig_version_string,
+		.method = if (options.mode == .truncated) "gold-truncated-products-v1" else "gold-paired-layouts-v1", .mode = @tagName(options.mode),
 		.cpu_clock = "CLOCK_PROCESS_CPUTIME_ID", .wall_clock = "CLOCK_MONOTONIC",
 		.seed_usage = "fixed 0x601D_B3AC; identical inputs across layouts; engine seed does not alter inputs",
 		.normalization = "rotating ABCCBA batches; primary samples average all layouts per operation; components preserve individual means; no subtraction",
-		.operation = if (options.mode == .product) "complete product with packing, twiddle preparation, carry output and GMP-derived byte comparison" else "forward/inverse pair, unscaled, including input restore and complete canonical-residue comparison",
+		.operation = if (options.mode != .passes) "complete product with packing, twiddle preparation, carry output and GMP-derived byte comparison" else "forward/inverse pair, unscaled, including input restore and complete canonical-residue comparison",
 		.allocator_coverage = "c_allocator arena; fixture and scratch allocation outside timing, reused across all layouts",
 		.warmup_per_layout = 1, .rows = rows[0..options.count],
 	};
@@ -57,7 +61,7 @@ pub fn main(init: std.process.Init) !void {
 }
 fn validSize(mode: Mode, size: usize) bool {
 	return size >= 64 and size <= fft.GOLD_MAX_FFT_COMBINED_LEN / 2 and
-		(mode == .product or size & (size - 1) == 0);
+		(mode != .passes or size & (size - 1) == 0);
 }
 fn parse(args: []const []const u8) !Options {
 	if (args.len != 3) return error.InvalidArguments;
@@ -77,11 +81,11 @@ fn parse(args: []const []const u8) !Options {
 	}
 	return result;
 }
-fn balancedSample(state: anytype, comptime batch: anytype, iterations: usize, round: usize) !Sample {
+fn balancedSample(state: anytype, comptime batch: anytype, methods: [3]Layout, iterations: usize, round: usize) !Sample {
 	var sample: Sample = .{ .cpu = @splat(0), .wall = @splat(0) };
 	for ([_]usize{0, 1, 2, 2, 1, 0}) |position| {
 		const index = (position + round % 3) % 3;
-		const duration = try batch(state, @as(Layout, @enumFromInt(index)), iterations);
+		const duration = try batch(state, methods[index], iterations);
 		sample.cpu[index] += @floatFromInt(duration.cpu);
 		sample.wall[index] += @floatFromInt(duration.wall);
 	}
@@ -124,12 +128,12 @@ const Fixture = struct {
 		const pa = work[0..bytes];
 		const tw_fwd = work[2 * bytes .. 5 * bytes / 2];
 		const tw_inv = work[5 * bytes / 2 .. 3 * bytes];
-		const a = try allocator.alloc(u8, if (mode == .product) size else bytes);
-		const b = try allocator.alloc(u8, if (mode == .product) size else 0);
-		const out = if (mode == .product) try allocator.alloc(u8, 2 * size) else pa;
+		const a = try allocator.alloc(u8, if (mode != .passes) size else bytes);
+		const b = try allocator.alloc(u8, if (mode != .passes) size else 0);
+		const out = if (mode != .passes) try allocator.alloc(u8, 2 * size) else pa;
 		var expected = try allocator.alloc(u8, out.len);
 		var rng = std.Random.DefaultPrng.init(0x601D_B3AC);
-		if (mode == .product) {
+		if (mode != .passes) {
 			rng.random().bytes(a); rng.random().bytes(b);
 			a[size - 1] |= 1; b[size - 1] |= 1;
 			const length = try @import("gmp.zig").product(a, b, expected);
@@ -158,10 +162,13 @@ const Fixture = struct {
 	fn run(self: *@This(), layout: Layout) !void {
 		inline for (std.enums.values(Layout)) |method| {
 			if (layout == method) {
-				if (self.mode == .product) {
-					const len = fft.goldMulMagnitudesWithLayout(method, self.a, self.b, self.out, self.pa, self.pb, self.tw_fwd, self.tw_inv, if (method == .stockham) self.scratch else &.{});
+				if (self.mode != .passes) {
+					const len = if (method == .truncated)
+						fft.goldMulMagnitudesTruncated(self.a, self.b, self.out, self.pa, self.pb, self.tw_fwd, self.tw_inv)
+					else fft.goldMulMagnitudesWithLayout(@enumFromInt(@intFromEnum(method)), self.a, self.b, self.out, self.pa, self.pb, self.tw_fwd, self.tw_inv, if (method == .stockham) self.scratch else &.{});
 					if (!std.mem.eql(u8, self.expected, self.out[0..len])) return error.IncorrectWork;
 				} else {
+					if (method == .truncated) return error.InvalidArguments;
 					@memcpy(self.pa, self.a);
 					if (method == .stockham) {
 						fft.goldNttStockham(self.pa, self.scratch, self.tw_fwd);
@@ -198,6 +205,7 @@ test "Goldilocks probe classifies modes sizes and bounded iteration counts" {
 	for (values, 0..) |size, i| accepted[i] = if (parse(&.{"passes", size, "1"})) |_| true else |_| false;
 	try std.testing.expectEqualSlices(bool, &.{true, false, false, true, false, true}, &accepted);
 	for (values) |size| _ = try parse(&.{"product", size, "1"});
+	for (values) |size| _ = try parse(&.{"truncated", size, "1"});
 	try std.testing.expectError(error.InvalidArguments, parse(&.{"unknown", "64", "1"}));
 	try std.testing.expectError(error.InvalidArguments, parse(&.{"product", "64,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80", "1"}));
 	try std.testing.expectError(error.InvalidArguments, parse(&.{}));
@@ -222,7 +230,7 @@ test "Goldilocks batches balance three methods and cancel linear drift" {
 	};
 	for (orders, 0..) |order, round| {
 		var fake: Fake = .{};
-		const sample = try balancedSample(&fake, Fake.batch, 3, round);
+		const sample = try balancedSample(&fake, Fake.batch, layouts(.product), 3, round);
 		try std.testing.expectEqualSlices(f64, &.{125, 105, 85}, &sample.cpu);
 		try std.testing.expectEqualSlices(f64, &.{130, 110, 90}, &sample.wall);
 		try std.testing.expectEqualSlices(Layout, &order, &fake.calls);
@@ -234,7 +242,7 @@ test "Goldilocks batches propagate errors" {
 	const Failure = struct {
 		fn batch(_: void, _: Layout, _: usize) error{Injected}!Timing { return error.Injected; }
 	};
-	try std.testing.expectError(error.Injected, balancedSample({}, Failure.batch, 1, 0));
+	try std.testing.expectError(error.Injected, balancedSample({}, Failure.batch, layouts(.product), 1, 0));
 }
 
 test "Goldilocks fixtures verify products and passes and reject corrupted results" {
@@ -243,9 +251,9 @@ test "Goldilocks fixtures verify products and passes and reject corrupted result
 			if (mode == .passes and size & (size - 1) != 0) continue;
 			var fixture = try Fixture.init(std.testing.allocator, mode, size);
 			defer fixture.deinit();
-			for (std.enums.values(Layout)) |layout| try fixture.run(layout);
+			for (layouts(mode)) |layout| try fixture.run(layout);
 			fixture.expected[0] ^= 1;
-			for (std.enums.values(Layout)) |layout| try std.testing.expectError(error.IncorrectWork, fixture.run(layout));
+			for (layouts(mode)) |layout| try std.testing.expectError(error.IncorrectWork, fixture.run(layout));
 		}
 	}
 }
@@ -256,7 +264,7 @@ test "Goldilocks fixtures clean up every allocation failure" {
 			for (std.enums.values(Mode)) |mode| {
 				var fixture = try Fixture.init(allocator, mode, 64);
 				defer fixture.deinit();
-				for (std.enums.values(Layout)) |layout| try fixture.run(layout);
+				for (layouts(mode)) |layout| try fixture.run(layout);
 			}
 		}
 	};

@@ -118,12 +118,15 @@ result remains historical evidence, not a current guarantee.
 1. Measure blocked crossover and allocation costs at 2:1 boundaries and wider
    ratios, then compare asymmetric Toom splits. Current measurements justify
    a conservative dispatch region, not a universally optimal threshold.
-2. For FFT, measure paired inverse/forward layouts and fused Goldilocks stages.
+2. The [paired/fused Goldilocks comparison](../goldilocks/README.md) selected
+   fusion at the existing threshold after 23–25% lower complete-product CPU time.
    Dense small-prime residues usually occupy their full five-byte slots, making
    an offset table unlikely to save space there; this is a prediction to test.
 3. Test sparse/truncated transforms around large padding jumps, with dense
-   controls. Header-only zero initialization is implemented; zero-skipping
-   butterflies and truncated transforms are not.
+   controls. Header-only zero initialization is implemented. The
+   [input/output-truncated Goldilocks experiment](../goldilocks/TRUNCATED.md)
+   now passes independent transform and GMP product checks; measurements remain
+   necessary before production selection.
 4. Derive truncated Montgomery carry bounds before implementation. No claim
    of a Montgomery speedup is made by this work.
 5. Revisit contextual BLIP types only after profiling the remaining codec cost.

@@ -68,3 +68,31 @@ At the combined input cap, each coefficient is bounded by
 `131072 * 65535^2 < 2^49`, safely below the Goldilocks modulus. The inverse
 therefore recovers the integer convolution without modular wraparound. Timing
 and production selection remain separate steps; production still uses fusion.
+
+## Measurement method
+
+Run `./bm --verified-truncated` for the separate `gold-truncated-products-v1`
+history cohort. It compares Stockham, fused and truncated complete products in
+the same process using six rotating mirrored batches. Every timed product is
+compared in full with a GMP reference prepared outside timing. CPU and wall
+components remain separate; the engine's primary value averages all three.
+The original `gold-paired-layouts-v1` mode and its component meanings are retained.
+
+The configuration uses five processes in each of the 1-CPU and 12-CPU affinity
+cohorts. Balanced operand lengths are 1024, 1025, 1537, 4096, 4097, 6145, 16384,
+16385, 65535, 65536, 65537, 98305 and 100000 bytes. These include nearly full
+transforms, lengths just above padding jumps, and intermediate fill ratios.
+Allocation is outside timing. Result restoration, packing, twiddle generation,
+transforms, carry output and result verification remain inside timing.
+
+Before implementation, the new mode failed parsing/fixture/allocation-cleanup
+tests, and the new shell route failed its CLI check. All modes retain bounded
+input classifiers, injected batch-order/error controls, corrupted-reference
+rejection and allocation-failure cleanup. The complete entry point and CI run
+the extended CLI schema checks, including preserved original method labels.
+
+The extended adapter passed the complete native suite in 106 seconds of mixed
+Nix preparation/check time, plus the production build and all-system evaluation.
+SIMD work remains deferred while the measured question is whether pruning
+outweighs recursive control and lost stage fusion. The existing fused control
+uses scalar BMI2 multiplication; no vectorization benefit is assumed here.

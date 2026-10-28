@@ -4,10 +4,10 @@ Purpose: [INTENT.md](INTENT.md). The [legacy roadmap](docs/plan_context/legacy-r
 
 ## Current bounded milestone
 
+- [x] Add rotating Stockham/fused/truncated product measurements around padding jumps, with separate history labels and preserved correctness/CLI controls; pass full native tests/build and all-system evaluation (context: docs/benchmarks/goldilocks/TRUNCATED.md; done 2026-10-28 01:55 EDT; this commit).
 - [x] Add experimental input/output-truncated Goldilocks transforms with 46,368 independent DFT/mixed-inverse cases and GMP product checks; pass the complete native suite/build (context: docs/benchmarks/goldilocks/TRUNCATED.md; done 2026-10-28 01:51 EDT; this commit).
 - [x] Select fused Goldilocks after paired product medians show 23–25% lower CPU time than Stockham, omit permutation scratch, retain the threshold and pass full native tests/build plus all-system evaluation (context: docs/benchmarks/goldilocks/README.md; done 2026-10-28 01:47 EDT; this commit).
 - [x] Add rotating paired Goldilocks product/pass measurements, corruption and allocation-failure controls, CLI/CI integration and 1/12-CPU cohorts; pass full native tests/build and all-system evaluation (context: docs/benchmarks/goldilocks/README.md; done 2026-10-28 01:14 EDT; this commit).
-- [x] Add experimental paired/fused Goldilocks transforms, independently check field DFTs/canonical bytes and GMP products, fix one-point twiddle initialization, inspect scalar code and pass the complete native suite/build (context: docs/benchmarks/goldilocks/README.md; done 2026-10-28 01:01 EDT; this commit).
 
 ## Follow-up and existing backlog
 

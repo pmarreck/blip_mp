@@ -39,6 +39,7 @@ annotate=[
 	profiling-multiplication.json = Asymmetric multiplication boundary, ratio and allocation measurement cohorts
 	profiling-paired-tail.json = Paired ABBA final-block multiplication timing cohorts
 	profiling-short-tail.json = Padded and register-tail multiplication controls at one, eight and nine trailing bytes
+	profiling-truncated.json = Paired truncated Goldilocks product cohorts across padding boundaries
 	profiling.json = Shared performance engine cases for immediate-add fixtures and CPU cohorts
 	src/chunks.zig = Unaligned scalar access to LE magnitude byte buffers
 	src/fft_residue.zig = Canonical BLIP residues in fixed-capacity FFT byte slots
