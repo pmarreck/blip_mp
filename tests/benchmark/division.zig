@@ -19,7 +19,8 @@ pub fn main(init: std.process.Init) !void {
 		return error.UnoptimizedBuild;
 	}
 	const args = try init.minimal.args.toSlice(init.arena.allocator());
-	if (args.len > 1 and std.mem.eql(u8, args[1], "paired")) return @import("division_crossover.zig").run(init, args[2..]);
+	if (args.len > 1 and std.mem.eql(u8, args[1], "paired")) return @import("division_crossover.zig").run(init, args[2..], .kernels);
+	if (args.len > 1 and std.mem.eql(u8, args[1], "paired-fallback")) return @import("division_crossover.zig").run(init, args[2..], .fallbacks);
 	const options = try parse(args[1..]);
 	var fixture = try Fixture.init(std.heap.c_allocator, options.kind);
 	defer fixture.deinit();

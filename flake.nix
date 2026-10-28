@@ -315,20 +315,22 @@
 								all(.rows[0].samples.cpu_ns[], .rows[0].samples.wall_ns[]; . > 0)
 							' output.json > /dev/null
 						done
-						${self.packages.${system}.division-probe}/bin/blip-mp-division-probe paired 128,256 > paired.json 2> stderr
+						for comparison in paired paired-fallback; do
+						${self.packages.${system}.division-probe}/bin/blip-mp-division-probe "$comparison" 128,129 > paired.json 2> stderr
 						test ! -s stderr
-						jq -e '
+						jq -e --arg comparison "$comparison" '
 							.schema == "performance-measurement/v1" and .correct == true and
-							.method == "division-paired-kernels-v1" and .build_mode == "ReleaseFast" and
-							[.rows[].size] == [128,256] and all(.rows[]; . as $row |
+							.method == (if $comparison == "paired" then "division-paired-kernels-v1" else "division-paired-fallbacks-v1" end) and .build_mode == "ReleaseFast" and
+							[.rows[].size] == [128,129] and all(.rows[]; . as $row |
 								.fixture_count == 256 and .iterations == 1024 and .warmup_cases == 512 and
-								[.components[].method] == ["knuth","burnikel_ziegler"] and
+								[.components[].method] == (if $comparison == "paired" then ["knuth","burnikel_ziegler"] else ["burnikel_ziegler","burnikel_ziegler_chunk_fallback"] end) and
 								all(.samples[]; length == 5 and all(.[]; . > 0)) and
 								all(.components[]; (.cpu_ns|length) == 5 and (.wall_ns|length) == 5 and all(.cpu_ns[],.wall_ns[]; . > 0)) and
 								all(range(5); . as $i |
 									$row.samples.cpu_ns[$i] == ([$row.components[].cpu_ns[$i]]|add/2) and
 									$row.samples.wall_ns[$i] == ([$row.components[].wall_ns[$i]]|add/2)))
 						' paired.json > /dev/null
+						done
 						if ${self.packages.${system}.division-probe}/bin/blip-mp-division-probe byte_2048 0 > output.json 2> stderr; then
 							exit 1
 						fi

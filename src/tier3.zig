@@ -2263,6 +2263,12 @@ fn bzDiv3n_2n(
 /// 64 (= 512-bit divisor) is a conservative starting point.
 const BZ_TOPLEVEL_THRESHOLD: usize = 64;
 
+/// Experimental top-level fallback selection; recursion is unchanged.
+pub fn divModBurnikelZieglerChunkFallback(u: []const u8, u_len: usize, v: []const u8, v_len: usize, q: []u8, r: []u8, allocator: std.mem.Allocator) std.mem.Allocator.Error!struct { q_len: usize, r_len: usize } {
+	const got = try divModBurnikelZieglerImpl(true, u, u_len, v, v_len, q, r, allocator);
+	return .{ .q_len = got.q_len, .r_len = got.r_len };
+}
+
 /// Burnikel-Ziegler recursive divider — top-level entry. Byte-direct,
 /// magnitude-only (caller handles signs). For divisor sizes ≥
 /// BZ_TOPLEVEL_THRESHOLD AND even (so the recursive halving lands cleanly),
@@ -2284,6 +2290,15 @@ pub fn divModBurnikelZiegler(
 	q_out: []u8,
 	r_out: []u8,
 	allocator: std.mem.Allocator,
+) std.mem.Allocator.Error!struct { q_len: usize, r_len: usize } {
+	const got = try divModBurnikelZieglerImpl(false, u, u_len_in, v, v_len, q_out, r_out, allocator);
+	return .{ .q_len = got.q_len, .r_len = got.r_len };
+}
+
+fn divModBurnikelZieglerImpl(
+	comptime chunk_fallback: bool,
+	u: []const u8, u_len_in: usize, v: []const u8, v_len: usize,
+	q_out: []u8, r_out: []u8, allocator: std.mem.Allocator,
 ) std.mem.Allocator.Error!struct { q_len: usize, r_len: usize } {
 	// Trim u to canonical length.
 	var u_len: usize = u_len_in;
@@ -2333,6 +2348,10 @@ pub fn divModBurnikelZiegler(
 
 	// Knuth fallback when divisor is small OR odd (B-Z needs even n).
 	if (v_len < BZ_TOPLEVEL_THRESHOLD or (v_len & 1) != 0) {
+		if (chunk_fallback) {
+			const leaf = try divModBZLeaf(u, u_len, v, v_len, q_out, r_out, allocator);
+			return .{ .q_len = leaf.q_len, .r_len = leaf.r_len };
+		}
 		const work = try allocator.alloc(u8, divModKnuthScratchNeed(u_len, v_len));
 		defer allocator.free(work);
 		const leaf = divModKnuth(u, u_len, v, v_len, q_out, r_out, work);

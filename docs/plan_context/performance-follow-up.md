@@ -403,6 +403,82 @@ The complete native suite passed in 112 seconds of mixed Nix preparation/check
 time, with 15,535 integration GMP comparisons unchanged. Production build and
 all-system evaluation also passed.
 
+### Paired division baseline result
+
+Campaign `blip-mp-division-paired-20261028T093148Z` measured commit
+`d842aafd49da4087d3fac34db0c6555a6200acab`, with source hash
+`e7141dae4b1d35013023ca1a842581c9f26729de91b6e4a38cf9f233ae611311`
+unchanged. All ten processes verified their results. Both cohorts were
+`UNBASELINED` after one attempt, with no approved baseline epoch. The campaign
+spent at least four minutes in the admission queue, separate from execution.
+
+| Divisor bytes | B-Z/Knuth paired CPU median, 1 CPU | B-Z/Knuth paired CPU median, 12 CPUs |
+|---:|---:|---:|
+| 64 | 70.19 | 70.36 |
+| 128 | 64.73 | 64.80 |
+| 256 | 52.58 | 52.69 |
+| 512 | 35.59 | 35.50 |
+| 1024 | 20.73 | 20.77 |
+| 2048 | 11.57 | 11.56 |
+
+Each median uses 25 paired sample ratios across five processes. The
+[summary](../benchmarks/storage-aware/division-paired-summary.json) preserves
+process means, ratio ranges, selected CPU/wall components and cohort verdicts.
+The narrowing gap does not establish a crossover beyond the sampled widths.
+These ratios compare existing magnitude kernels, with warmed allocation setup
+included, and do not time GMP or public signed operations.
+
+The current recursion reaches a four-byte cutoff, where tiny byte-Knuth leaves
+and recursive setup can dominate. Before tuning it, the separate
+`profiling-division-boundary.json` sweep covers 31/32, 63/64/65 and 127/128/129
+divisor bytes. The B-Z entry point currently falls back to byte-Knuth for small
+or odd divisor lengths; those rows must not be described as recursive B-Z.
+The boundary configuration keeps the same workload and timing method, with
+distinct case names and a `division-paired-boundary-v1` definition.
+
+Campaign `blip-mp-division-boundary-20261028T094156Z` measured commit
+`fd60b6978f2c8b081bb3307309315145e49994b5`, with source hash
+`fb7d7eec93426ed9fab075b9d35a3e2de75d42edd00d0ea65ddce2e903485d35`
+unchanged. All ten processes verified, and both cohorts were `UNBASELINED`
+after one attempt. The [boundary summary](../benchmarks/storage-aware/division-boundary-summary.json)
+keeps process ratios and the selected timing components.
+
+| Divisor bytes | B-Z entry path | Entry/Knuth CPU median, 1 CPU | Entry/Knuth CPU median, 12 CPUs |
+|---:|---|---:|---:|
+| 31 | Byte-Knuth fallback | 6.51 | 6.63 |
+| 32 | Byte-Knuth fallback | 6.73 | 6.75 |
+| 63 | Byte-Knuth fallback | 11.64 | 11.68 |
+| 64 | Recursive B-Z | 69.82 | 69.56 |
+| 65 | Byte-Knuth fallback | 11.38 | 11.43 |
+| 127 | Byte-Knuth fallback | 18.64 | 18.68 |
+| 128 | Recursive B-Z | 64.66 | 64.75 |
+| 129 | Byte-Knuth fallback | 18.33 | 18.43 |
+
+These medians again use 25 paired sample ratios per size and cohort. They
+separate the slower fallback from the still larger recursive overhead.
+Neither campaign establishes a benefit from changing the recursive cutoff.
+
+### Chunk-reading fallback experiment
+
+The explicit `divModBurnikelZieglerChunkFallback` variant replaces only the
+top-level small/odd-divisor fallback with the existing `divModBZLeaf` dispatcher.
+That leaf already uses chunk-reading Knuth above eight divisor bytes and
+byte-Knuth at smaller widths. The recursive calls, cutoff and default entry
+point remain unchanged. The shared GMP fixture tests failed against an empty
+candidate before passing with the reused leaf, including allocation failures.
+
+Run `./bm --verified-division --config profiling-division-fallback.json` for a
+paired old/new comparison on the boundary corpus. The 64/128-byte recursive
+rows serve as unchanged algorithm controls. The `division-paired-fallbacks-v1`
+mode retains the same fixtures, workload counts, allocation coverage and
+mirrored timing as the baseline. Pair-selection and equal-coverage tests cover
+both comparisons; warmup visits only the selected pair. No production fallback
+change follows until measurements support it.
+
+The complete native suite passed in 96 seconds of mixed Nix preparation/check
+time. The production/probe build and all-system flake evaluation also passed.
+This duration includes compilation and is not a test-execution measurement.
+
 ## CRT correctness-reference cost
 
 At commit `43c296f`, a fresh diagnostic run split the 100-case CRT fuzz test

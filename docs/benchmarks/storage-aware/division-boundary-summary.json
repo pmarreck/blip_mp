@@ -1,0 +1,610 @@
+[
+  {
+    "case": "division_boundary_1core",
+    "verdict": "UNBASELINED",
+    "attempts": 1,
+    "source": "fb7d7eec93426ed9fab075b9d35a3e2de75d42edd00d0ea65ddce2e903485d35",
+    "source_after": "fb7d7eec93426ed9fab075b9d35a3e2de75d42edd00d0ea65ddce2e903485d35",
+    "cores": 1,
+    "size": 31,
+    "selected_components": [
+      {
+        "method": "knuth",
+        "cpu_ns": 246.1296875,
+        "wall_ns": 250.78203125
+      },
+      {
+        "method": "burnikel_ziegler",
+        "cpu_ns": 1601.9228515625,
+        "wall_ns": 1609.0716796875
+      }
+    ],
+    "bz_to_knuth_median": 6.50998836114609,
+    "paired_ratio_min": 5.5435918192165285,
+    "paired_ratio_max": 6.667437460584402,
+    "process_cpu_ratios": [
+      6.537126496051239,
+      5.799744445869167,
+      6.504132290229922,
+      6.508450353281743,
+      6.431962831907064
+    ],
+    "all_attempt_process_cpu_ratios": [
+      6.537126496051239,
+      5.799744445869167,
+      6.504132290229922,
+      6.508450353281743,
+      6.431962831907064
+    ]
+  },
+  {
+    "case": "division_boundary_1core",
+    "verdict": "UNBASELINED",
+    "attempts": 1,
+    "source": "fb7d7eec93426ed9fab075b9d35a3e2de75d42edd00d0ea65ddce2e903485d35",
+    "source_after": "fb7d7eec93426ed9fab075b9d35a3e2de75d42edd00d0ea65ddce2e903485d35",
+    "cores": 1,
+    "size": 32,
+    "selected_components": [
+      {
+        "method": "knuth",
+        "cpu_ns": 251.2701171875,
+        "wall_ns": 252.375
+      },
+      {
+        "method": "burnikel_ziegler",
+        "cpu_ns": 1695.1671875,
+        "wall_ns": 1708.18359375
+      }
+    ],
+    "bz_to_knuth_median": 6.727741725270846,
+    "paired_ratio_min": 5.848574069819014,
+    "paired_ratio_max": 6.837438055239573,
+    "process_cpu_ratios": [
+      6.766801657452079,
+      5.999640049670957,
+      6.7023771648849255,
+      6.746393906582417,
+      6.765127370626301
+    ],
+    "all_attempt_process_cpu_ratios": [
+      6.766801657452079,
+      5.999640049670957,
+      6.7023771648849255,
+      6.746393906582417,
+      6.765127370626301
+    ]
+  },
+  {
+    "case": "division_boundary_1core",
+    "verdict": "UNBASELINED",
+    "attempts": 1,
+    "source": "fb7d7eec93426ed9fab075b9d35a3e2de75d42edd00d0ea65ddce2e903485d35",
+    "source_after": "fb7d7eec93426ed9fab075b9d35a3e2de75d42edd00d0ea65ddce2e903485d35",
+    "cores": 1,
+    "size": 63,
+    "selected_components": [
+      {
+        "method": "knuth",
+        "cpu_ns": 464.110546875,
+        "wall_ns": 465.2603515625
+      },
+      {
+        "method": "burnikel_ziegler",
+        "cpu_ns": 5383.693359375,
+        "wall_ns": 5444.3619140625
+      }
+    ],
+    "bz_to_knuth_median": 11.642619650557856,
+    "paired_ratio_min": 10.11198182218071,
+    "paired_ratio_max": 11.7259049716054,
+    "process_cpu_ratios": [
+      11.669117528806412,
+      10.294095317741377,
+      11.621557996469857,
+      11.600023734916334,
+      11.654866852843133
+    ],
+    "all_attempt_process_cpu_ratios": [
+      11.669117528806412,
+      10.294095317741377,
+      11.621557996469857,
+      11.600023734916334,
+      11.654866852843133
+    ]
+  },
+  {
+    "case": "division_boundary_1core",
+    "verdict": "UNBASELINED",
+    "attempts": 1,
+    "source": "fb7d7eec93426ed9fab075b9d35a3e2de75d42edd00d0ea65ddce2e903485d35",
+    "source_after": "fb7d7eec93426ed9fab075b9d35a3e2de75d42edd00d0ea65ddce2e903485d35",
+    "cores": 1,
+    "size": 64,
+    "selected_components": [
+      {
+        "method": "knuth",
+        "cpu_ns": 464.4978515625,
+        "wall_ns": 465.7478515625
+      },
+      {
+        "method": "burnikel_ziegler",
+        "cpu_ns": 32506.2572265624,
+        "wall_ns": 32737.5814453124
+      }
+    ],
+    "bz_to_knuth_median": 69.81687279930502,
+    "paired_ratio_min": 64.60144559592352,
+    "paired_ratio_max": 75.28982897023336,
+    "process_cpu_ratios": [
+      69.7389201803293,
+      67.5976064231953,
+      70.29081099593836,
+      69.98150178136736,
+      69.00468908176643
+    ],
+    "all_attempt_process_cpu_ratios": [
+      69.7389201803293,
+      67.5976064231953,
+      70.29081099593836,
+      69.98150178136736,
+      69.00468908176643
+    ]
+  },
+  {
+    "case": "division_boundary_1core",
+    "verdict": "UNBASELINED",
+    "attempts": 1,
+    "source": "fb7d7eec93426ed9fab075b9d35a3e2de75d42edd00d0ea65ddce2e903485d35",
+    "source_after": "fb7d7eec93426ed9fab075b9d35a3e2de75d42edd00d0ea65ddce2e903485d35",
+    "cores": 1,
+    "size": 65,
+    "selected_components": [
+      {
+        "method": "knuth",
+        "cpu_ns": 531.0587890625,
+        "wall_ns": 535.3912109375
+      },
+      {
+        "method": "burnikel_ziegler",
+        "cpu_ns": 6067.422265625,
+        "wall_ns": 6112.175
+      }
+    ],
+    "bz_to_knuth_median": 11.379804616176907,
+    "paired_ratio_min": 11.155356060939086,
+    "paired_ratio_max": 11.54242653191385,
+    "process_cpu_ratios": [
+      11.366146645203871,
+      11.36111580089022,
+      11.396526488976122,
+      11.42514235822379,
+      11.374684931378551
+    ],
+    "all_attempt_process_cpu_ratios": [
+      11.366146645203871,
+      11.36111580089022,
+      11.396526488976122,
+      11.42514235822379,
+      11.374684931378551
+    ]
+  },
+  {
+    "case": "division_boundary_1core",
+    "verdict": "UNBASELINED",
+    "attempts": 1,
+    "source": "fb7d7eec93426ed9fab075b9d35a3e2de75d42edd00d0ea65ddce2e903485d35",
+    "source_after": "fb7d7eec93426ed9fab075b9d35a3e2de75d42edd00d0ea65ddce2e903485d35",
+    "cores": 1,
+    "size": 127,
+    "selected_components": [
+      {
+        "method": "knuth",
+        "cpu_ns": 1106.4658203125,
+        "wall_ns": 1114.8669921875
+      },
+      {
+        "method": "burnikel_ziegler",
+        "cpu_ns": 20503.7349609376,
+        "wall_ns": 20645.1095703124
+      }
+    ],
+    "bz_to_knuth_median": 18.635127648022404,
+    "paired_ratio_min": 18.16094837615915,
+    "paired_ratio_max": 18.793531652951216,
+    "process_cpu_ratios": [
+      18.625205487209264,
+      18.494290999208946,
+      18.63611618196453,
+      18.530834468205004,
+      18.671114766992787
+    ],
+    "all_attempt_process_cpu_ratios": [
+      18.625205487209264,
+      18.494290999208946,
+      18.63611618196453,
+      18.530834468205004,
+      18.671114766992787
+    ]
+  },
+  {
+    "case": "division_boundary_1core",
+    "verdict": "UNBASELINED",
+    "attempts": 1,
+    "source": "fb7d7eec93426ed9fab075b9d35a3e2de75d42edd00d0ea65ddce2e903485d35",
+    "source_after": "fb7d7eec93426ed9fab075b9d35a3e2de75d42edd00d0ea65ddce2e903485d35",
+    "cores": 1,
+    "size": 128,
+    "selected_components": [
+      {
+        "method": "knuth",
+        "cpu_ns": 1040.9912109375,
+        "wall_ns": 1046.399609375
+      },
+      {
+        "method": "burnikel_ziegler",
+        "cpu_ns": 67508.418359375,
+        "wall_ns": 68276.8205078124
+      }
+    ],
+    "bz_to_knuth_median": 64.66150386109837,
+    "paired_ratio_min": 52.372751923924845,
+    "paired_ratio_max": 65.66001255158686,
+    "process_cpu_ratios": [
+      63.282804020678846,
+      58.899592427087214,
+      64.62968687111416,
+      64.85013288304135,
+      64.63583476762274
+    ],
+    "all_attempt_process_cpu_ratios": [
+      63.282804020678846,
+      58.899592427087214,
+      64.62968687111416,
+      64.85013288304135,
+      64.63583476762274
+    ]
+  },
+  {
+    "case": "division_boundary_1core",
+    "verdict": "UNBASELINED",
+    "attempts": 1,
+    "source": "fb7d7eec93426ed9fab075b9d35a3e2de75d42edd00d0ea65ddce2e903485d35",
+    "source_after": "fb7d7eec93426ed9fab075b9d35a3e2de75d42edd00d0ea65ddce2e903485d35",
+    "cores": 1,
+    "size": 129,
+    "selected_components": [
+      {
+        "method": "knuth",
+        "cpu_ns": 1094.267578125,
+        "wall_ns": 1102.4130859375
+      },
+      {
+        "method": "burnikel_ziegler",
+        "cpu_ns": 20064.826171875,
+        "wall_ns": 20221.33125
+      }
+    ],
+    "bz_to_knuth_median": 18.33277209850965,
+    "paired_ratio_min": 15.403732081432299,
+    "paired_ratio_max": 18.61857051277434,
+    "process_cpu_ratios": [
+      16.063210171037927,
+      18.392863824123275,
+      18.31013355016993,
+      18.336306926186715,
+      18.432411220386427
+    ],
+    "all_attempt_process_cpu_ratios": [
+      16.063210171037927,
+      18.392863824123275,
+      18.31013355016993,
+      18.336306926186715,
+      18.432411220386427
+    ]
+  },
+  {
+    "case": "division_boundary_12core",
+    "verdict": "UNBASELINED",
+    "attempts": 1,
+    "source": "fb7d7eec93426ed9fab075b9d35a3e2de75d42edd00d0ea65ddce2e903485d35",
+    "source_after": "fb7d7eec93426ed9fab075b9d35a3e2de75d42edd00d0ea65ddce2e903485d35",
+    "cores": 12,
+    "size": 31,
+    "selected_components": [
+      {
+        "method": "knuth",
+        "cpu_ns": 243.9966796875,
+        "wall_ns": 246.4732421875
+      },
+      {
+        "method": "burnikel_ziegler",
+        "cpu_ns": 1610.2392578125,
+        "wall_ns": 1622.127734375
+      }
+    ],
+    "bz_to_knuth_median": 6.626376851211629,
+    "paired_ratio_min": 5.750727742761379,
+    "paired_ratio_max": 7.4392348164010915,
+    "process_cpu_ratios": [
+      6.763124985706118,
+      6.767403600736525,
+      6.477933084953734,
+      6.5994310245320635,
+      6.62883807912516
+    ],
+    "all_attempt_process_cpu_ratios": [
+      6.763124985706118,
+      6.767403600736525,
+      6.477933084953734,
+      6.5994310245320635,
+      6.62883807912516
+    ]
+  },
+  {
+    "case": "division_boundary_12core",
+    "verdict": "UNBASELINED",
+    "attempts": 1,
+    "source": "fb7d7eec93426ed9fab075b9d35a3e2de75d42edd00d0ea65ddce2e903485d35",
+    "source_after": "fb7d7eec93426ed9fab075b9d35a3e2de75d42edd00d0ea65ddce2e903485d35",
+    "cores": 12,
+    "size": 32,
+    "selected_components": [
+      {
+        "method": "knuth",
+        "cpu_ns": 251.804296875,
+        "wall_ns": 252.9662109375
+      },
+      {
+        "method": "burnikel_ziegler",
+        "cpu_ns": 1704.1359375,
+        "wall_ns": 1722.0267578125
+      }
+    ],
+    "bz_to_knuth_median": 6.7515185366194235,
+    "paired_ratio_min": 6.511415217545869,
+    "paired_ratio_max": 7.145950854326524,
+    "process_cpu_ratios": [
+      6.732217817725768,
+      6.831351747415026,
+      6.827342642705848,
+      6.7676999902267845,
+      6.595568218716001
+    ],
+    "all_attempt_process_cpu_ratios": [
+      6.732217817725768,
+      6.831351747415026,
+      6.827342642705848,
+      6.7676999902267845,
+      6.595568218716001
+    ]
+  },
+  {
+    "case": "division_boundary_12core",
+    "verdict": "UNBASELINED",
+    "attempts": 1,
+    "source": "fb7d7eec93426ed9fab075b9d35a3e2de75d42edd00d0ea65ddce2e903485d35",
+    "source_after": "fb7d7eec93426ed9fab075b9d35a3e2de75d42edd00d0ea65ddce2e903485d35",
+    "cores": 12,
+    "size": 63,
+    "selected_components": [
+      {
+        "method": "knuth",
+        "cpu_ns": 466.1474609375,
+        "wall_ns": 470.700390625
+      },
+      {
+        "method": "burnikel_ziegler",
+        "cpu_ns": 5553.640234375,
+        "wall_ns": 5589.830078125
+      }
+    ],
+    "bz_to_knuth_median": 11.676878838015845,
+    "paired_ratio_min": 11.487735563468021,
+    "paired_ratio_max": 12.982801197851868,
+    "process_cpu_ratios": [
+      11.691726032636879,
+      11.626681501088585,
+      11.768031503576864,
+      11.913912870415954,
+      11.605044609221189
+    ],
+    "all_attempt_process_cpu_ratios": [
+      11.691726032636879,
+      11.626681501088585,
+      11.768031503576864,
+      11.913912870415954,
+      11.605044609221189
+    ]
+  },
+  {
+    "case": "division_boundary_12core",
+    "verdict": "UNBASELINED",
+    "attempts": 1,
+    "source": "fb7d7eec93426ed9fab075b9d35a3e2de75d42edd00d0ea65ddce2e903485d35",
+    "source_after": "fb7d7eec93426ed9fab075b9d35a3e2de75d42edd00d0ea65ddce2e903485d35",
+    "cores": 12,
+    "size": 64,
+    "selected_components": [
+      {
+        "method": "knuth",
+        "cpu_ns": 470.4095703125,
+        "wall_ns": 472.115234375
+      },
+      {
+        "method": "burnikel_ziegler",
+        "cpu_ns": 33133.5027343752,
+        "wall_ns": 33346.3060546876
+      }
+    ],
+    "bz_to_knuth_median": 69.56291415709993,
+    "paired_ratio_min": 67.27680023598288,
+    "paired_ratio_max": 75.74895331666579,
+    "process_cpu_ratios": [
+      69.83258843857752,
+      68.97420387559454,
+      69.41812927595737,
+      70.4354350451759,
+      69.71017146794826
+    ],
+    "all_attempt_process_cpu_ratios": [
+      69.83258843857752,
+      68.97420387559454,
+      69.41812927595737,
+      70.4354350451759,
+      69.71017146794826
+    ]
+  },
+  {
+    "case": "division_boundary_12core",
+    "verdict": "UNBASELINED",
+    "attempts": 1,
+    "source": "fb7d7eec93426ed9fab075b9d35a3e2de75d42edd00d0ea65ddce2e903485d35",
+    "source_after": "fb7d7eec93426ed9fab075b9d35a3e2de75d42edd00d0ea65ddce2e903485d35",
+    "cores": 12,
+    "size": 65,
+    "selected_components": [
+      {
+        "method": "knuth",
+        "cpu_ns": 498.0359375,
+        "wall_ns": 501.19453125
+      },
+      {
+        "method": "burnikel_ziegler",
+        "cpu_ns": 5832.8390625,
+        "wall_ns": 5879.9732421875
+      }
+    ],
+    "bz_to_knuth_median": 11.427193779067252,
+    "paired_ratio_min": 11.153395715237616,
+    "paired_ratio_max": 12.758559702950947,
+    "process_cpu_ratios": [
+      11.446384274727352,
+      11.342924761974272,
+      11.452247804923383,
+      11.711683080099014,
+      11.5578682553788
+    ],
+    "all_attempt_process_cpu_ratios": [
+      11.446384274727352,
+      11.342924761974272,
+      11.452247804923383,
+      11.711683080099014,
+      11.5578682553788
+    ]
+  },
+  {
+    "case": "division_boundary_12core",
+    "verdict": "UNBASELINED",
+    "attempts": 1,
+    "source": "fb7d7eec93426ed9fab075b9d35a3e2de75d42edd00d0ea65ddce2e903485d35",
+    "source_after": "fb7d7eec93426ed9fab075b9d35a3e2de75d42edd00d0ea65ddce2e903485d35",
+    "cores": 12,
+    "size": 127,
+    "selected_components": [
+      {
+        "method": "knuth",
+        "cpu_ns": 1043.089453125,
+        "wall_ns": 1051.8966796875
+      },
+      {
+        "method": "burnikel_ziegler",
+        "cpu_ns": 19459.1095703124,
+        "wall_ns": 19566.1761718752
+      }
+    ],
+    "bz_to_knuth_median": 18.676436883099317,
+    "paired_ratio_min": 18.182667908180843,
+    "paired_ratio_max": 18.90138760112115,
+    "process_cpu_ratios": [
+      18.680509117589867,
+      18.709274667003818,
+      18.679457844308587,
+      18.655264428199036,
+      18.58289751320879
+    ],
+    "all_attempt_process_cpu_ratios": [
+      18.680509117589867,
+      18.709274667003818,
+      18.679457844308587,
+      18.655264428199036,
+      18.58289751320879
+    ]
+  },
+  {
+    "case": "division_boundary_12core",
+    "verdict": "UNBASELINED",
+    "attempts": 1,
+    "source": "fb7d7eec93426ed9fab075b9d35a3e2de75d42edd00d0ea65ddce2e903485d35",
+    "source_after": "fb7d7eec93426ed9fab075b9d35a3e2de75d42edd00d0ea65ddce2e903485d35",
+    "cores": 12,
+    "size": 128,
+    "selected_components": [
+      {
+        "method": "knuth",
+        "cpu_ns": 1045.0376953125,
+        "wall_ns": 1051.987890625
+      },
+      {
+        "method": "burnikel_ziegler",
+        "cpu_ns": 68039.65644531259,
+        "wall_ns": 68433.937109375
+      }
+    ],
+    "bz_to_knuth_median": 64.74571709514564,
+    "paired_ratio_min": 63.96418118921134,
+    "paired_ratio_max": 66.26651336845872,
+    "process_cpu_ratios": [
+      64.70138180471008,
+      64.56798259953639,
+      64.4635048848513,
+      65.1073705288368,
+      64.93410618097049
+    ],
+    "all_attempt_process_cpu_ratios": [
+      64.70138180471008,
+      64.56798259953639,
+      64.4635048848513,
+      65.1073705288368,
+      64.93410618097049
+    ]
+  },
+  {
+    "case": "division_boundary_12core",
+    "verdict": "UNBASELINED",
+    "attempts": 1,
+    "source": "fb7d7eec93426ed9fab075b9d35a3e2de75d42edd00d0ea65ddce2e903485d35",
+    "source_after": "fb7d7eec93426ed9fab075b9d35a3e2de75d42edd00d0ea65ddce2e903485d35",
+    "cores": 12,
+    "size": 129,
+    "selected_components": [
+      {
+        "method": "knuth",
+        "cpu_ns": 1155.5677734375,
+        "wall_ns": 1163.87109375
+      },
+      {
+        "method": "burnikel_ziegler",
+        "cpu_ns": 21273.7029296876,
+        "wall_ns": 21412.7876953124
+      }
+    ],
+    "bz_to_knuth_median": 18.43470120928511,
+    "paired_ratio_min": 18.262359635724398,
+    "paired_ratio_max": 21.219785276211727,
+    "process_cpu_ratios": [
+      18.425074511168685,
+      18.478741412547066,
+      18.97209340783645,
+      18.409740578351467,
+      18.596016264706613
+    ],
+    "all_attempt_process_cpu_ratios": [
+      18.425074511168685,
+      18.478741412547066,
+      18.97209340783645,
+      18.409740578351467,
+      18.596016264706613
+    ]
+  }
+]

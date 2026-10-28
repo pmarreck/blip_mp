@@ -19,16 +19,30 @@ fn parse(args: []const []const u8) !Options {
 	return options;
 }
 
-const Method = enum { knuth, burnikel_ziegler };
+const Method = enum { knuth, burnikel_ziegler, burnikel_ziegler_chunk_fallback };
+pub const Comparison = enum { kernels, fallbacks };
+fn comparisonMethods(comparison: Comparison) [2]Method {
+	return switch (comparison) {
+		.kernels => .{ .knuth, .burnikel_ziegler },
+		.fallbacks => .{ .burnikel_ziegler, .burnikel_ziegler_chunk_fallback },
+	};
+}
+
+test "division comparison selects the intended algorithm pairs" {
+	const expected = [_][2]Method{ .{.knuth,.burnikel_ziegler}, .{.burnikel_ziegler,.burnikel_ziegler_chunk_fallback} };
+	for (std.enums.values(Comparison), expected) |comparison, methods| {
+		try std.testing.expectEqualSlices(Method, &methods, &comparisonMethods(comparison));
+	}
+}
 const Timing = struct { cpu_ns: f64, wall_ns: f64 };
 const Sample = struct { cpu_ns: [2]f64, wall_ns: [2]f64 };
 
-fn pairedSample(state: anytype, comptime batch: anytype, count: usize, repeats: usize, round: usize) !Sample {
+fn pairedSample(state: anytype, comptime batch: anytype, methods: [2]Method, count: usize, repeats: usize, round: usize) !Sample {
 	if (count == 0 or count % 2 != 0 or repeats == 0) return error.InvalidArguments;
 	const order: [4]usize = if (round % 2 == 0) .{0,1,1,0} else .{1,0,0,1};
 	var sample: Sample = .{ .cpu_ns = @splat(0), .wall_ns = @splat(0) };
 	for (order, 0..) |method, position| {
-		const timing = try batch(state, @enumFromInt(method), if (position < 2) 0 else count / 2, count / 2, repeats);
+		const timing = try batch(state, methods[method], if (position < 2) 0 else count / 2, count / 2, repeats);
 		sample.cpu_ns[method] += timing.cpu_ns;
 		sample.wall_ns[method] += timing.wall_ns;
 	}
@@ -55,7 +69,7 @@ test "paired division batches cover each input equally and cancel linear drift" 
 	const Fake = struct {
 		position: usize = 0,
 		calls: [4]Method = undefined,
-		visits: [2][8]usize = @splat(@splat(0)),
+		visits: [3][8]usize = @splat(@splat(0)),
 		fn batch(self: *@This(), method: Method, start: usize, count: usize, repeats: usize) !Timing {
 			const index: usize = @intFromEnum(method);
 			for (start .. start + count) |i| self.visits[index][i] += repeats;
@@ -65,22 +79,31 @@ test "paired division batches cover each input equally and cancel linear drift" 
 			return .{ .cpu_ns = duration, .wall_ns = duration + @as(f64, @floatFromInt(5 * count * repeats)) };
 		}
 	};
-	const orders = [_][4]Method{ .{.knuth,.burnikel_ziegler,.burnikel_ziegler,.knuth}, .{.burnikel_ziegler,.knuth,.knuth,.burnikel_ziegler} };
+	const orders = [_][4]Method{
+		.{.knuth,.burnikel_ziegler,.burnikel_ziegler,.knuth}, .{.burnikel_ziegler,.knuth,.knuth,.burnikel_ziegler},
+		.{.burnikel_ziegler,.burnikel_ziegler_chunk_fallback,.burnikel_ziegler_chunk_fallback,.burnikel_ziegler},
+		.{.burnikel_ziegler_chunk_fallback,.burnikel_ziegler,.burnikel_ziegler,.burnikel_ziegler_chunk_fallback},
+	};
 	for (orders, 0..) |order, round| {
+		const methods: [2]Method = if (round < 2) .{.knuth,.burnikel_ziegler} else .{.burnikel_ziegler,.burnikel_ziegler_chunk_fallback};
 		var state: Fake = .{};
-		const sample = try pairedSample(&state, Fake.batch, 8, 3, round);
-		try std.testing.expectEqualSlices(f64, &.{115,95}, &sample.cpu_ns);
-		try std.testing.expectEqualSlices(f64, &.{120,100}, &sample.wall_ns);
+		const sample = try pairedSample(&state, Fake.batch, methods, 8, 3, round);
+		try std.testing.expectEqualSlices(f64, if (round < 2) &.{115,95} else &.{95,75}, &sample.cpu_ns);
+		try std.testing.expectEqualSlices(f64, if (round < 2) &.{120,100} else &.{100,80}, &sample.wall_ns);
 		try std.testing.expectEqualSlices(Method, &order, &state.calls);
-		for (state.visits) |visits| try std.testing.expectEqualSlices(usize, &@as([8]usize, @splat(3)), &visits);
+		for (state.visits, 0..) |visits, method| {
+			const expected_visits: [8]usize = @splat(if ((round < 2 and method < 2) or (round >= 2 and method > 0)) 3 else 0);
+			try std.testing.expectEqualSlices(usize, &expected_visits, &visits);
+		}
 	}
 	var state: Fake = .{};
-	for ([_]usize{0,1,7}) |count| try std.testing.expectError(error.InvalidArguments, pairedSample(&state, Fake.batch, count, 3, 0));
-	try std.testing.expectError(error.InvalidArguments, pairedSample(&state, Fake.batch, 8, 0, 0));
+	const methods: [2]Method = .{.knuth,.burnikel_ziegler};
+	for ([_]usize{0,1,7}) |count| try std.testing.expectError(error.InvalidArguments, pairedSample(&state, Fake.batch, methods, count, 3, 0));
+	try std.testing.expectError(error.InvalidArguments, pairedSample(&state, Fake.batch, methods, 8, 0, 0));
 	const Failure = struct {
 		fn batch(_: void, _: Method, _: usize, _: usize, _: usize) error{Injected}!Timing { return error.Injected; }
 	};
-	try std.testing.expectError(error.Injected, pairedSample({}, Failure.batch, 8, 1, 0));
+	try std.testing.expectError(error.Injected, pairedSample({}, Failure.batch, methods, 8, 1, 0));
 }
 
 test "division timing checks work counts clock resolution and failures" {
@@ -129,8 +152,9 @@ fn nativeBatch(fixture: *Fixture, method: Method, start: usize, count: usize, re
 	return timedBatch(fixture, &clock, method, start, count, repeats);
 }
 
-pub fn run(init: std.process.Init, args: []const []const u8) !void {
+pub fn run(init: std.process.Init, args: []const []const u8, comparison: Comparison) !void {
 	const options = try parse(args);
+	const methods = comparisonMethods(comparison);
 	const case_count = 256;
 	const repeats = 4;
 	const Component = struct { method: []const u8, cpu_ns: [5]f64, wall_ns: [5]f64 };
@@ -143,14 +167,14 @@ pub fn run(init: std.process.Init, args: []const []const u8) !void {
 		var fixture = try Fixture.init(std.heap.c_allocator, width, case_count);
 		defer fixture.deinit();
 		for (0..case_count) |i| {
-			inline for (std.enums.values(Method)) |method| try fixture.run(method, i);
+			for (methods) |method| try fixture.run(method, i);
 		}
 		var row: Row = .{ .size = width, .samples = undefined, .components = .{
-			.{ .method = "knuth", .cpu_ns = undefined, .wall_ns = undefined },
-			.{ .method = "burnikel_ziegler", .cpu_ns = undefined, .wall_ns = undefined },
+			.{ .method = @tagName(methods[0]), .cpu_ns = undefined, .wall_ns = undefined },
+			.{ .method = @tagName(methods[1]), .cpu_ns = undefined, .wall_ns = undefined },
 		} };
 		for (0..5) |round| {
-			const sample = try pairedSample(&fixture, nativeBatch, case_count, repeats, round);
+			const sample = try pairedSample(&fixture, nativeBatch, methods, case_count, repeats, round);
 			for (&row.components, 0..) |*component, method| {
 				component.cpu_ns[round] = sample.cpu_ns[method];
 				component.wall_ns[round] = sample.wall_ns[method];
@@ -162,7 +186,9 @@ pub fn run(init: std.process.Init, args: []const []const u8) !void {
 	}
 	const report = .{
 		.schema = "performance-measurement/v1", .correct = true, .build_mode = "ReleaseFast",
-		.compiler = @import("builtin").zig_version_string, .method = "division-paired-kernels-v1",
+		.compiler = @import("builtin").zig_version_string,
+		.method = if (comparison == .kernels) "division-paired-kernels-v1" else "division-paired-fallbacks-v1",
+		.comparison = @tagName(comparison),
 		.cpu_clock = "CLOCK_PROCESS_CPUTIME_ID", .wall_clock = "CLOCK_MONOTONIC",
 		.seed_usage = "0xB2D151A5 + divisor_bytes*257 + case_index; all eight normalization shifts; engine seed does not alter inputs",
 		.normalization = "ABBA/BAAB half-pool batches; four repetitions per case; 1024 verified divisions per method/sample; primary averages both methods; no subtraction",
@@ -227,6 +253,10 @@ const Fixture = struct {
 			},
 			.burnikel_ziegler => blk: {
 				const got = try tier3.divModBurnikelZiegler(case.dividend, case.dividend.len, case.divisor, case.divisor.len, q, r, self.scratch.allocator());
+				break :blk .{ got.q_len, got.r_len };
+			},
+			.burnikel_ziegler_chunk_fallback => blk: {
+				const got = try tier3.divModBurnikelZieglerChunkFallback(case.dividend, case.dividend.len, case.divisor, case.divisor.len, q, r, self.scratch.allocator());
 				break :blk .{ got.q_len, got.r_len };
 			},
 		};
