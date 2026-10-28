@@ -128,3 +128,43 @@ result remains historical evidence, not a current guarantee.
    of a Montgomery speedup is made by this work.
 5. Revisit contextual BLIP types only after profiling the remaining codec cost.
    The [type proposal](../../BLIP_ALGORITHM_TYPES.md) is not a wire-format change.
+
+## Verified crossover and allocation probe
+
+`./bm --verified-multiplication` runs the shared measurement engine with
+`profiling-multiplication.json`. Each geometry uses identical fixed positive
+operands for four methods: chunk-reading schoolbook, blocked multiplication,
+public `Mp.mul` with reused buffers, and public `Mp.mul` with newly allocated
+result/scratch buffers. Direct kernel methods use prepared byte storage. All
+stored arithmetic scratch remains byte-based; GMP supplies the independent
+product before timing and is not itself timed.
+
+The shorter lengths are 1024, 1536, 2047, 2048, 2049 and 4096 bytes around
+the 2:1 boundary. The longer length is twice that size minus one, exactly twice,
+or twice plus one. Wider 4:1, 8:1 and 16:1 ratios use 2048/4096-byte shorter
+operands. Each case declares separate 1/12-CPU affinity cohorts, five fresh
+processes and five samples. Boundary batches contain 100 verified products;
+wider-ratio batches contain 20. Results are nanoseconds per product, including
+the complete GMP-derived byte comparison and any measured buffer cleanup.
+
+The cold-buffer case releases the result and thread-local multiplication scratch
+before and after each operation. Input construction and GMP calculation remain
+outside timing. It measures library allocation lifetime, with libc and hardware
+caches potentially warm; it is not a fresh-process or cold-memory measurement.
+Allocation counts are not collected during timing. A correctness test checks
+that repeated warm public calls allocate nothing for its 4096-by-8192 fixture,
+while repeated cold calls allocate and release storage. Failure-injection tests
+exercise cleanup after every injected Zig allocation failure in a small complete fixture.
+
+The complete suite checks every geometry, both sides of the shorter-length and
+2:1 thresholds, public and direct-kernel results, corrupted expected results,
+CLI output and argument rejection. SIMD changes are deferred while this probe
+isolates algorithm selection and allocation costs; no production arithmetic or
+dispatch threshold changes are part of the measurement adapter.
+
+The complete native suite, including 13,111 existing GMP comparisons, and the
+production build passed in 87 seconds combined; mixed Nix preparation/check
+time was 86 seconds. All-system evaluation passed, with execution on Linux
+x86_64 only. The initial adapter failed all five new behavioral tests, and the
+new command route failed before implementation. The final adapter also passed
+the optimized CLI checks and ReleaseSafe cleanup/corruption controls.

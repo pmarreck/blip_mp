@@ -70,6 +70,12 @@ GMP quotient/remainder checks. Repeated timing work runs outside the unit suite;
 its [probe checks and method](docs/plan_context/performance-follow-up.md#division-probes)
 remain part of `./test`.
 
+`./bm --verified-multiplication` compares schoolbook and blocked products on
+identical inputs around the 2:1 dispatch boundary and at 4:1, 8:1 and 16:1 ratios.
+It also compares public calls with reused and freshly allocated result/scratch
+buffers. Every product is checked against GMP. See the
+[measurement method](docs/benchmarks/storage-aware/RESEARCH.md#verified-crossover-and-allocation-probe).
+
 Requires [Nix](https://nixos.org/) (handles the Zig 0.16.0 toolchain and GMP build for benchmarks).
 
 ```bash

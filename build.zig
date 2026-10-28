@@ -177,6 +177,21 @@ pub fn build(b: *std.Build) void {
 	const install_division = b.addInstallArtifact(division_probe, .{});
 	b.step("division-probe", "Build the GMP-verified division probe").dependOn(&install_division.step);
 
+	const multiplication_module = b.createModule(.{
+		.root_source_file = b.path("tests/benchmark/multiplication.zig"),
+		.target = target, .optimize = optimize, .link_libc = true,
+		.imports = &.{.{ .name = "blip_mp", .module = core_module }},
+	});
+	if (gmp_lib_path) |path| multiplication_module.addLibraryPath(.{ .cwd_relative = path });
+	multiplication_module.linkSystemLibrary("gmp", .{});
+	const multiplication_tests = b.addTest(.{ .root_module = multiplication_module });
+	const run_multiplication_tests = b.addRunArtifact(multiplication_tests);
+	b.step("multiplication-probe-test", "Check multiplication workloads and allocation lifetimes").dependOn(&run_multiplication_tests.step);
+	test_step.dependOn(&run_multiplication_tests.step);
+	const multiplication_probe = b.addExecutable(.{ .name = "blip-mp-multiplication-probe", .root_module = multiplication_module });
+	const install_multiplication = b.addInstallArtifact(multiplication_probe, .{});
+	b.step("multiplication-probe", "Build the GMP-verified multiplication probe").dependOn(&install_multiplication.step);
+
 	// Shared monotonic-clock helper module for the benchmark + cross-check exes.
 	const time_util_module = b.createModule(.{
 		.root_source_file = b.path("tests/time_util.zig"),

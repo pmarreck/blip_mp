@@ -29,6 +29,7 @@ annotate=[
 	profiling-division.json = Verified division workloads with separate 1/12 CPU cohorts
 	profiling-inverse.json = Inverse algorithm measurements for 1/12 CPU cohorts
 	profiling-linux-counters.json = Interleaved add diagnostic cases with Linux hardware counters
+	profiling-multiplication.json = Asymmetric multiplication boundary, ratio and allocation measurement cohorts
 	profiling.json = Shared performance engine cases for immediate-add fixtures and CPU cohorts
 	src/chunks.zig = Unaligned scalar access to LE magnitude byte buffers
 	src/fft_residue.zig = Canonical BLIP residues in fixed-capacity FFT byte slots
@@ -39,6 +40,7 @@ annotate=[
 	tests/benchmark/immediate_add.zig = Verified immediate-add workload, CPU/wall probe and independent sum checks
 	tests/benchmark/inverse.zig = Historical inverse fixtures, GMP oracle and optimized CPU/wall probe
 	tests/benchmark/linux_counters.zig = Checked Linux grouped cycle/instruction counters and lifecycle tests
+	tests/benchmark/multiplication.zig = GMP-verified blocked and schoolbook multiplication with cold/warm allocation controls
 	tests/benchmark/shifted_residues.zig = Interleaved comparison of three canonical BLIP residue representations
 	tests/benchmark/storage_aware.zig = Seeded full-product FFT and Toom CPU/wall comparisons
 ]

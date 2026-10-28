@@ -40,3 +40,7 @@ Completed PLAN.md items retired by plan-retire, oldest retirement first.
 - [x] [Current bounded milestone] Route debug builds through Nix, advertise Zig 0.16 as the minimum, and test routing, failure propagation and debug/release banners; pass the complete native suite, build and all-system evaluation. (done 2026-10-27 22:00 EDT; this commit)
 - [x] [Current bounded milestone] Investigate immediate-add variation with interleaved cycle/instruction measurements; ten processes verified, instruction counts stayed stable while cycles varied, and both cohorts remain unbaselined (context: docs/plan_context/performance-follow-up.md; done 2026-10-27 22:26 EDT; this commit).
 - [x] [Current bounded milestone] Attribute core unit latency and move inverse timing loops to GMP-verified optimized probes; preserve all fixture comparisons, add existence checks, and measure core execution at 40.995 seconds before and 24.352 after (context: docs/plan_context/performance-follow-up.md; done 2026-10-27 22:47 EDT; this commit).
+
+## Retired 2026-10-28
+
+- [x] [Current bounded milestone] Move the five division timing tests to optimized probes; retain all six fixtures, add GMP quotient/remainder checks and corruption controls, and pass the full native suite, build and all-system evaluation (context: docs/plan_context/performance-follow-up.md; done 2026-10-27 23:04 EDT; this commit).

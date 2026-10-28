@@ -55,7 +55,7 @@
 					buildInputs = [ zig pkgs.hyperfine pkgs.gmp
 						performance-profiling.packages.${system}.default
 						self.packages.${system}.add-probe self.packages.${system}.inverse-probe
-						self.packages.${system}.division-probe ];
+						self.packages.${system}.division-probe self.packages.${system}.multiplication-probe ];
 					shellHook = ''
 						export GMP_INCLUDE_PATH="${pkgs.gmp.dev}/include"
 						export GMP_LIB_PATH="${pkgs.gmp}/lib"
@@ -100,6 +100,14 @@
 					buildPhase = ''
 						${commonBuild}
 						zig build division-probe --prefix "$out" -Doptimize=ReleaseFast -Dgmp-lib-path=${pkgs.gmp}/lib
+					'';
+				};
+
+				packages.multiplication-probe = self.packages.${system}.add-probe.overrideAttrs {
+					pname = "${pname}-multiplication-probe";
+					buildPhase = ''
+						${commonBuild}
+						zig build multiplication-probe --prefix "$out" -Doptimize=ReleaseFast -Dgmp-lib-path=${pkgs.gmp}/lib
 					'';
 				};
 
@@ -243,6 +251,13 @@
 							zig build division-probe-test -Doptimize=ReleaseSafe -Dgmp-lib-path=${pkgs.gmp}/lib
 						'';
 					};
+					multiplication-probe = self.checks.${system}.probe.overrideAttrs {
+						pname = "${pname}-multiplication-probe-tests";
+						buildPhase = ''
+							${commonBuild}
+							zig build multiplication-probe-test -Doptimize=ReleaseSafe -Dgmp-lib-path=${pkgs.gmp}/lib
+						'';
+					};
 					gmp-oracle = self.checks.${system}.probe.overrideAttrs {
 						pname = "${pname}-gmp-oracle-tests";
 						buildPhase = ''
@@ -277,6 +292,39 @@
 							' output.json > /dev/null
 						done
 						if ${self.packages.${system}.division-probe}/bin/blip-mp-division-probe byte_2048 0 > output.json 2> stderr; then
+							exit 1
+						fi
+						test ! -s output.json
+						mkdir -p "$out"
+					'';
+
+					multiplication-probe-cli = pkgs.runCommand "${pname}-multiplication-probe-cli" {
+						nativeBuildInputs = [ pkgs.jq ];
+					} ''
+						mkdir bin
+						cat > bin/nix <<-'STUB'
+						#!${pkgs.bash}/bin/bash
+						printf '%s\n' "$@" > "$ARGV"
+						STUB
+						chmod +x bin/nix
+						export ARGV="$PWD/argv"
+						PATH="$PWD/bin:$PATH" bash ${./bm} --verified-multiplication --seed 0 > stdout 2> stderr
+						printf '%s\n' develop -c performance-profile run --config profiling-multiplication.json --mode bm --seed 0 > expected
+						cmp expected argv
+						test ! -s stdout
+						test ! -s stderr
+						for kind in schoolbook blocked mp_warm mp_cold; do
+							${self.packages.${system}.multiplication-probe}/bin/blip-mp-multiplication-probe "$kind" two 64,128 2 > output.json 2> stderr
+							test ! -s stderr
+							jq -e --arg kind "$kind" '
+								.schema == "performance-measurement/v1" and .correct == true and
+								.build_mode == "ReleaseFast" and .algorithm == $kind and .shape == "two" and
+								[.rows[].size] == [64,128] and [.rows[].longer_bytes] == [128,256] and
+								all(.rows[]; .iterations == 2 and (.samples.cpu_ns|length) == 5 and (.samples.wall_ns|length) == 5) and
+								all(.rows[].samples.cpu_ns[], .rows[].samples.wall_ns[]; . > 0)
+							' output.json > /dev/null
+						done
+						if ${self.packages.${system}.multiplication-probe}/bin/blip-mp-multiplication-probe blocked two 0 2 > output.json 2> stderr; then
 							exit 1
 						fi
 						test ! -s output.json
