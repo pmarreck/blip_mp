@@ -10,6 +10,7 @@ printf 'Preparing and checking ReleaseSafe units, C API, GMP comparisons and CLI
 if nix build --no-link --keep-going --print-build-logs \
 	".#checks.$system.test" \
 	".#checks.$system.integration" \
+	".#checks.$system.build-driver" \
 	".#checks.$system.probe-cli"; then
 	printf 'All test groups passed (Nix checks may be cached).\n'
 	status=0

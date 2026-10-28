@@ -121,7 +121,7 @@ Large-number arithmetic operating directly on BLIP payload bytes — no auxiliar
 - `montMul` / `computeR2ModM` — arbitrary-odd-modulus Montgomery primitives (used by Mp.powm)
 
 **FFT scratch cache** (M6-4-E.1):
-- `FFT_THRESHOLD: usize = 99999` (FFT gated off in production; M6-4-E.3 inline asm needed to flip)
+- `FFT_THRESHOLD: usize = 99999` (single-prime FFT excluded throughout its supported range; dispatch changes require measured crossovers)
 - `FftScratch` thread-local cache + `getFftScratch` / `releaseFftScratch`
 
 ### `src/bitwise.zig` (M12-A1)
@@ -167,8 +167,8 @@ Exact arbitrary-precision fixed-point on top of Mp. **No NaN, no ±∞, no signe
 - IEEE754: `getF64Exact` — encode back to f64 ONLY if exactly representable; errors otherwise. `getF64(self, mode)` — general counterpart that rounds >53-bit mantissas via `roundToScale(mode)`; carry-up renormalize handled.
 - Headline test: `0.1 + 0.2 == 0.3 EXACTLY` (and the inverse killshot: setF64(0.1) → toDecimal → 55-digit decimal expansion of the IEEE754 lie).
 
-### `src/fft.zig` (2082 lines)
-Pure-Zig FFT multiplication. Every residue is canonical BLIP in a 16-byte slot. Single-prime and CRT production dispatch are excluded by thresholds; Goldilocks is reachable at very large sizes.
+### `src/fft.zig`
+Pure-Zig FFT multiplication. Every stored residue is canonical BLIP in five-byte small-field or ten-byte Goldilocks capacity. The small-field path uses shifted representatives to keep a fixed canonical payload width. Single-prime and CRT production dispatch are excluded by thresholds; Goldilocks is reachable at very large sizes.
 
 **Field abstraction** (M6-3.14):
 - `Field { p, primitive_root, max_ntt_len }` with comptime-generic methods

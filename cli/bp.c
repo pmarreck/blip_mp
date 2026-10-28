@@ -847,6 +847,9 @@ static void print_help(void) {
 // ── main ──────────────────────────────────────────────────────────────────
 
 int main(int argc, char **argv) {
+#ifdef BLIP_MP_DEBUG
+	fputs("\033[33mDEBUG BUILD!\033[0m\n", stderr);
+#endif
 	detect_lang(argc, argv);
 	// Suppress -Wunused-variable in builds where bp_lang isn't yet read by ops.
 	(void)bp_lang;

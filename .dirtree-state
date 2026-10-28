@@ -25,6 +25,7 @@ annotate=[
 	docs/benchmarks/storage-aware/tuned-summary.jsonl = Retained recursion and blocked-product CPU/wall medians and ranges
 	docs/plan_context/legacy-roadmap.md = Preserved roadmap decisions, experiments and unresolved tasks
 	docs/plan_context/performance-follow-up.md = Measurement gaps and reconciled benchmark follow-up scope
+	docs/plan_context/roadmap-reconciliation.md = Current dispositions and evidence for unchecked historical roadmap tasks
 	profiling.json = Shared performance engine cases for immediate-add fixtures and CPU cohorts
 	src/chunks.zig = Unaligned scalar access to LE magnitude byte buffers
 	src/fft_residue.zig = Canonical BLIP residues in fixed-capacity FFT byte slots

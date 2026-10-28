@@ -1,8 +1,5 @@
 #!/usr/bin/env bash
-# Top-level build driver per CLAUDE.md conventions.
-# Uses `nix build` for sandboxed/deterministic native builds.
-# Avoid `nix develop -c zig build` for native — Zig 0.15.2's libSystem stubs
-# don't cover macOS 26.x and produce undefined-symbol errors.
+# Native release and debug builds use declared Nix packages.
 set -u
 
 mode="release"
@@ -13,7 +10,7 @@ for arg in "$@"; do
 		-h|--help)
 			printf 'Usage: ./build [--debug|--test]\n'
 			printf '  (default) ReleaseFast native build via nix\n'
-			printf '  --debug   Debug build via nix develop -c zig build (cross-compile / sysroot path)\n'
+			printf '  --debug   Debug build via nix\n'
 			printf '  --test    Build and run tests\n'
 			exit 0
 			;;
@@ -36,7 +33,7 @@ case "$mode" in
 		fi
 		;;
 	debug)
-		nix develop -c zig build -Doptimize=Debug
+		nix build .#debug --print-build-logs
 		;;
 	test)
 		exec ./test

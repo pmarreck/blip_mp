@@ -88,6 +88,14 @@
 					'';
 				};
 
+				packages.debug = self.packages.${system}.default.overrideAttrs {
+					pname = "${pname}-debug";
+					buildPhase = ''
+						${commonBuild}
+						zig build --prefix "$out" -Doptimize=Debug
+					'';
+				};
+
 				packages.bench = pkgs.stdenv.mkDerivation {
 					pname = "${pname}-bench";
 					inherit version;
@@ -109,6 +117,38 @@
 
 				checks = {
 					build = self.packages.${system}.default;
+					build-driver = pkgs.runCommand "${pname}-build-driver-tests" {} ''
+						mkdir bin
+						cat > bin/nix <<-'STUB'
+						#!${pkgs.bash}/bin/bash
+						printf '%s\n' "$@" > "$ARGV"
+						exit "$NIX_STATUS"
+						STUB
+						chmod +x bin/nix
+						export PATH="$PWD/bin:$PATH" ARGV="$PWD/argv"
+						printf '%s\n' build .#debug --print-build-logs > expected
+						for status in 0 23; do
+							if NIX_STATUS="$status" bash ${./build} --debug > stdout 2> stderr; then
+								actual=0
+							else
+								actual=$?
+							fi
+							test "$actual" -eq "$status"
+							cmp expected argv
+							test ! -s stdout
+							test ! -s stderr
+						done
+						${self.packages.${system}.debug}/bin/bp 2 3 + > stdout 2> stderr
+						printf '5\n' > expected
+						cmp expected stdout
+						printf '\033[33mDEBUG BUILD!\033[0m\n' > expected
+						cmp expected stderr
+						${self.packages.${system}.default}/bin/bp 2 3 + > stdout 2> stderr
+						printf '5\n' > expected
+						cmp expected stdout
+						test ! -s stderr
+						mkdir -p "$out"
+					'';
 					probe-cli = pkgs.runCommand "${pname}-probe-cli" {
 						nativeBuildInputs = [ pkgs.jq ];
 					} ''

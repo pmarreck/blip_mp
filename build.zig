@@ -88,8 +88,9 @@ pub fn build(b: *std.Build) void {
 	});
 	bp_module.addCSourceFile(.{
 		.file = b.path("cli/bp.c"),
-		.flags = &.{ "-O2", "-Wall", "-Wextra", "-Werror", "-std=c11" },
+		.flags = &.{ if (optimize == .Debug) "-O0" else "-O2", "-Wall", "-Wextra", "-Werror", "-std=c11" },
 	});
+	if (optimize == .Debug) bp_module.addCMacro("BLIP_MP_DEBUG", "1");
 	bp_module.addIncludePath(b.path("include"));
 	bp_module.linkLibrary(c_api_lib);
 	const bp_exe = b.addExecutable(.{

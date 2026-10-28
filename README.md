@@ -71,6 +71,9 @@ cd blip_mp
 ./result/bin/blip_mp_bench    # run the bench (after nix build .#packages.<sys>.bench)
 ```
 
+`./build --debug` builds the debug package through Nix. Its `bp` executable
+announces `DEBUG BUILD!` in yellow on stderr; release builds omit the marker.
+
 ## `bp` — RPN exact-arithmetic calculator
 
 `bp` is a Forth-style RPN calculator that ships in `./result/bin/bp` after `./build`. It dogfoods the C FFI — same headers any downstream Rust/Lua/Python binding would use — so every shipped fix to the FFI surface gets exercised by the calculator itself.
