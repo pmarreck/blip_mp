@@ -108,10 +108,7 @@ pub fn build(b: *std.Build) void {
 			.root_source_file = b.path("src/blip_mp.zig"),
 			.target = target,
 			.optimize = optimize,
-			// Tests reference std.c.clock_gettime via the bench-only monoNanos
-			// helpers in tier3.zig (and equivalents). On aarch64-darwin Zig
-			// auto-links libSystem; on linux/x86_64 libc must be explicit.
-			// Cheap to always link for unit tests — no runtime cost on macOS.
+			// Native test support may use libc; the production core stays independent.
 			.link_libc = true,
 		}),
 	});
@@ -153,6 +150,21 @@ pub fn build(b: *std.Build) void {
 	const inverse_probe = b.addExecutable(.{ .name = "blip-mp-inverse-probe", .root_module = inverse_module });
 	const install_inverse = b.addInstallArtifact(inverse_probe, .{});
 	b.step("inverse-probe", "Build the GMP-verified inverse-modulo probe").dependOn(&install_inverse.step);
+
+	const division_module = b.createModule(.{
+		.root_source_file = b.path("tests/benchmark/division.zig"),
+		.target = target, .optimize = optimize, .link_libc = true,
+		.imports = &.{.{ .name = "blip_mp", .module = core_module }},
+	});
+	if (gmp_lib_path) |path| division_module.addLibraryPath(.{ .cwd_relative = path });
+	division_module.linkSystemLibrary("gmp", .{});
+	const division_tests = b.addTest(.{ .root_module = division_module });
+	const run_division_tests = b.addRunArtifact(division_tests);
+	b.step("division-probe-test", "Check division probe oracles").dependOn(&run_division_tests.step);
+	test_step.dependOn(&run_division_tests.step);
+	const division_probe = b.addExecutable(.{ .name = "blip-mp-division-probe", .root_module = division_module });
+	const install_division = b.addInstallArtifact(division_probe, .{});
+	b.step("division-probe", "Build the GMP-verified division probe").dependOn(&install_division.step);
 
 	// Shared monotonic-clock helper module for the benchmark + cross-check exes.
 	const time_util_module = b.createModule(.{

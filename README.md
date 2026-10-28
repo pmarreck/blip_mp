@@ -65,6 +65,11 @@ on the historical fixed fixtures. Every result is checked against GMP; CPU and
 wall samples include that comparison. See the [measurement notes](docs/plan_context/performance-follow-up.md#unit-latency-and-inverse-probe)
 for scope and retained correctness coverage.
 
+`./bm --verified-division` measures the retained division fixtures with complete
+GMP quotient/remainder checks. Repeated timing work runs outside the unit suite;
+its [probe checks and method](docs/plan_context/performance-follow-up.md#division-probes)
+remain part of `./test`.
+
 Requires [Nix](https://nixos.org/) (handles the Zig 0.16.0 toolchain and GMP build for benchmarks).
 
 ```bash

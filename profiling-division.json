@@ -1,0 +1,20 @@
+{
+	"schema": "performance-project/v1",
+	"project": "blip_mp",
+	"history_url": "file:///var/lib/performance-profiling",
+	"identity": {"runtime": "Zig-0.16.0", "build_mode": "ReleaseFast", "concurrency": 1},
+	"cases": [
+		{"name":"division_byte_2048_1core","definition":"division-gmp-verified-v1","cores":1,"processes":5,"mode":"bm","metric":"cpu_ns","comparison":"absolute","command":["blip-mp-division-probe","byte_2048","{sizes}"],"sizes":[20000],"bounds":[0.1,10000000],"policy":{"max_cv":0.1}},
+		{"name":"division_byte_2048_12core","definition":"division-gmp-verified-v1","cores":12,"processes":5,"mode":"bm","metric":"cpu_ns","comparison":"absolute","command":["blip-mp-division-probe","byte_2048","{sizes}"],"sizes":[20000],"bounds":[0.1,10000000],"policy":{"max_cv":0.1}},
+		{"name":"division_chunk_2048_1core","definition":"division-gmp-verified-v1","cores":1,"processes":5,"mode":"bm","metric":"cpu_ns","comparison":"absolute","command":["blip-mp-division-probe","chunk_2048","{sizes}"],"sizes":[100000],"bounds":[0.1,10000000],"policy":{"max_cv":0.1}},
+		{"name":"division_chunk_2048_12core","definition":"division-gmp-verified-v1","cores":12,"processes":5,"mode":"bm","metric":"cpu_ns","comparison":"absolute","command":["blip-mp-division-probe","chunk_2048","{sizes}"],"sizes":[100000],"bounds":[0.1,10000000],"policy":{"max_cv":0.1}},
+		{"name":"division_chunk_4096_1core","definition":"division-gmp-verified-v1","cores":1,"processes":5,"mode":"bm","metric":"cpu_ns","comparison":"absolute","command":["blip-mp-division-probe","chunk_4096","{sizes}"],"sizes":[50000],"bounds":[0.1,10000000],"policy":{"max_cv":0.1}},
+		{"name":"division_chunk_4096_12core","definition":"division-gmp-verified-v1","cores":12,"processes":5,"mode":"bm","metric":"cpu_ns","comparison":"absolute","command":["blip-mp-division-probe","chunk_4096","{sizes}"],"sizes":[50000],"bounds":[0.1,10000000],"policy":{"max_cv":0.1}},
+		{"name":"division_chunk_8192_1core","definition":"division-gmp-verified-v1","cores":1,"processes":5,"mode":"bm","metric":"cpu_ns","comparison":"absolute","command":["blip-mp-division-probe","chunk_8192","{sizes}"],"sizes":[20000],"bounds":[0.1,10000000],"policy":{"max_cv":0.1}},
+		{"name":"division_chunk_8192_12core","definition":"division-gmp-verified-v1","cores":12,"processes":5,"mode":"bm","metric":"cpu_ns","comparison":"absolute","command":["blip-mp-division-probe","chunk_8192","{sizes}"],"sizes":[20000],"bounds":[0.1,10000000],"policy":{"max_cv":0.1}},
+		{"name":"division_single_byte_1core","definition":"division-gmp-verified-v1","cores":1,"processes":5,"mode":"bm","metric":"cpu_ns","comparison":"absolute","command":["blip-mp-division-probe","single_byte","{sizes}"],"sizes":[200000],"bounds":[0.1,10000000],"policy":{"max_cv":0.1}},
+		{"name":"division_single_byte_12core","definition":"division-gmp-verified-v1","cores":12,"processes":5,"mode":"bm","metric":"cpu_ns","comparison":"absolute","command":["blip-mp-division-probe","single_byte","{sizes}"],"sizes":[200000],"bounds":[0.1,10000000],"policy":{"max_cv":0.1}},
+		{"name":"division_single_chunk_1core","definition":"division-gmp-verified-v1","cores":1,"processes":5,"mode":"bm","metric":"cpu_ns","comparison":"absolute","command":["blip-mp-division-probe","single_chunk","{sizes}"],"sizes":[500000],"bounds":[0.1,10000000],"policy":{"max_cv":0.1}},
+		{"name":"division_single_chunk_12core","definition":"division-gmp-verified-v1","cores":12,"processes":5,"mode":"bm","metric":"cpu_ns","comparison":"absolute","command":["blip-mp-division-probe","single_chunk","{sizes}"],"sizes":[500000],"bounds":[0.1,10000000],"policy":{"max_cv":0.1}}
+	]
+}

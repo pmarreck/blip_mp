@@ -54,7 +54,8 @@
 				devShells.default = pkgs.mkShell {
 					buildInputs = [ zig pkgs.hyperfine pkgs.gmp
 						performance-profiling.packages.${system}.default
-						self.packages.${system}.add-probe self.packages.${system}.inverse-probe ];
+						self.packages.${system}.add-probe self.packages.${system}.inverse-probe
+						self.packages.${system}.division-probe ];
 					shellHook = ''
 						export GMP_INCLUDE_PATH="${pkgs.gmp.dev}/include"
 						export GMP_LIB_PATH="${pkgs.gmp}/lib"
@@ -92,6 +93,13 @@
 					buildPhase = ''
 						${commonBuild}
 						zig build inverse-probe --prefix "$out" -Doptimize=ReleaseFast -Dgmp-lib-path=${pkgs.gmp}/lib
+					'';
+				};
+				packages.division-probe = self.packages.${system}.add-probe.overrideAttrs {
+					pname = "${pname}-division-probe";
+					buildPhase = ''
+						${commonBuild}
+						zig build division-probe --prefix "$out" -Doptimize=ReleaseFast -Dgmp-lib-path=${pkgs.gmp}/lib
 					'';
 				};
 
@@ -228,6 +236,45 @@
 							zig build inverse-probe-test -Doptimize=ReleaseSafe -Dgmp-lib-path=${pkgs.gmp}/lib
 						'';
 					};
+					division-probe = self.checks.${system}.probe.overrideAttrs {
+						pname = "${pname}-division-probe-tests";
+						buildPhase = ''
+							${commonBuild}
+							zig build division-probe-test -Doptimize=ReleaseSafe -Dgmp-lib-path=${pkgs.gmp}/lib
+						'';
+					};
+					division-probe-cli = pkgs.runCommand "${pname}-division-probe-cli" {
+						nativeBuildInputs = [ pkgs.jq ];
+					} ''
+						mkdir bin
+						cat > bin/nix <<-'STUB'
+						#!${pkgs.bash}/bin/bash
+						printf '%s\n' "$@" > "$ARGV"
+						STUB
+						chmod +x bin/nix
+						export ARGV="$PWD/argv"
+						PATH="$PWD/bin:$PATH" bash ${./bm} --verified-division --seed 0 > stdout 2> stderr
+						printf '%s\n' develop -c performance-profile run --config profiling-division.json --mode bm --seed 0 > expected
+						cmp expected argv
+						test ! -s stdout
+						test ! -s stderr
+						for kind in byte_2048 chunk_2048 chunk_4096 chunk_8192 single_byte single_chunk; do
+							${self.packages.${system}.division-probe}/bin/blip-mp-division-probe "$kind" 2 > output.json 2> stderr
+							test ! -s stderr
+							jq -e --arg kind "$kind" '
+								.schema == "performance-measurement/v1" and .correct == true and
+								.build_mode == "ReleaseFast" and .fixture == $kind and
+								(.rows|length) == 1 and .rows[0].size == 2 and
+								(.rows[0].samples.cpu_ns|length) == 5 and (.rows[0].samples.wall_ns|length) == 5 and
+								all(.rows[0].samples.cpu_ns[], .rows[0].samples.wall_ns[]; . > 0)
+							' output.json > /dev/null
+						done
+						if ${self.packages.${system}.division-probe}/bin/blip-mp-division-probe byte_2048 0 > output.json 2> stderr; then
+							exit 1
+						fi
+						test ! -s output.json
+						mkdir -p "$out"
+					'';
 
 					test = pkgs.stdenv.mkDerivation {
 						pname = "${pname}-tests";

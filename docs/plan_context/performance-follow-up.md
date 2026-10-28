@@ -270,3 +270,69 @@ budget, with CRT fuzz remaining the largest test at 9.644 seconds.
 The uninstrumented complete suite, optimized CLI protocol checks, 13,111 GMP
 comparisons and production build passed in 109 seconds combined. All-system
 evaluation passed; correctness and attribution execution were Linux x86_64 only.
+
+The first optimized inverse campaign ran from 02:49:19 to 02:50:48 UTC on
+October 28, at commit `3c9fb33`, with recorded host load 18.55. All 60 fresh
+processes, including four automatic retries, verified their results. Five
+cohorts remained unbaselined and three were inconclusive. No baseline was
+approved. The fixed 128-bit and 8192-bit operand pairs have no inverse; their
+timings measure the negative result path, not successful inversion.
+
+The 4096-bit pair does have an inverse. Selected-process mean CPU microseconds
+per verified call are shown below, including result comparison overhead.
+Algorithms ran in separate cases, so host variation limits comparisons.
+
+| Algorithm | Allowed CPUs | 4096-bit µs/call | Attempts | Verdict |
+|---|---:|---:|---:|---|
+| Lehmer | 1 | 185.90 | 1 | Unbaselined |
+| Lehmer | 12 | 191.19 | 2 | Inconclusive |
+| Wider HGCD | 1 | 131.10 | 1 | Unbaselined |
+| Wider HGCD | 12 | 132.54 | 2 | Inconclusive |
+| Recursive HGCD | 1 | 132.34 | 1 | Unbaselined |
+| Recursive HGCD | 12 | 137.66 | 2 | Inconclusive |
+| Stein | 1 | 7885.17 | 1 | Unbaselined |
+| Stein | 12 | 8171.44 | 2 | Unbaselined |
+
+All widths and samples are retained in external observations with prefix
+`blip-mp-inverse-20261028T0249Z-` and the case names in `profiling-inverse.json`.
+The source digest stayed
+`f3ef329623ba01cb7ca7cd5aa667655eb96e455df23c1dd3aa428014860b1708`.
+GMP supplied correctness results outside timing; this campaign did not measure
+GMP's performance or justify changing production inverse dispatch thresholds.
+
+## Division probes
+
+`./bm --verified-division` runs the six workloads formerly embedded in five
+timing-only unit tests: byte-base Knuth at 2048/1024 bits, chunk-reading Knuth
+at 2048/1024, 4096/2048 and 8192/4096 bits, and a 2048-bit dividend divided
+by 101 or 65537. Seeds, random draw widths, operands and buffer-reset behavior
+are retained. All stored benchmark input/work data use byte buffers.
+
+Each fixture computes GMP's quotient and remainder before timing. Every measured
+iteration compares the complete results, including zero-padding normalization.
+The new `division-gmp-verified-v1` timings include those comparisons, required
+input-buffer resets and an optimizer barrier. They cannot be substituted for
+the former unchecked unit-test timings. The two single-divisor cases have
+different divisors; their ratio is not an isolated kernel comparison.
+
+`profiling-division.json` declares separate one-CPU and 12-CPU affinity cohorts,
+five fresh processes and five samples per fixture. Batch sizes are explicit:
+20,000 byte-base divisions; 100,000/50,000/20,000 chunk-reading divisions at
+the three widths; and 200,000/500,000 single-byte/single-chunk divisions.
+These are steady-state measurements with prepared storage and one warmup call;
+fixture allocation and GMP calculation are outside timing. Allocation costs
+remain unmeasured.
+
+The complete correctness entry point runs all six fixtures repeatedly against
+GMP, checks failure after deliberate quotient corruption, rejects wrong
+remainders and invalid work counts, and exercises the optimized CLI for every
+fixture. The old timing-only tests had no result assertions. Their workloads
+remain covered, now with independent quotient/remainder assertions, while
+existing division regression and randomized tests are unchanged. No arithmetic
+implementation or production dispatch was changed by this migration.
+
+The complete native suite, including the retained six division fixtures and
+13,111 existing GMP comparisons, plus the production build passed in 104
+seconds combined. The mixed Nix preparation/check phase took 102 seconds.
+All-system evaluation passed; execution was Linux x86_64 only. The remaining
+unit execution budget finding is unchanged by this small timing-loop migration.

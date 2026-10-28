@@ -112,13 +112,8 @@ pub fn verify(result: *const Mp, actual_exists: bool, wanted: []const u8, expect
 	if (actual_exists and !std.mem.eql(u8, try magnitude(result), wanted)) return error.IncorrectWork;
 }
 
-// GMP's public mpz ABI; its representation remains confined to this oracle.
-const Z = extern struct { allocated: c_int, size: c_int, data: ?*anyopaque };
-extern "c" fn __gmpz_init(value: *Z) void;
-extern "c" fn __gmpz_clear(value: *Z) void;
-extern "c" fn __gmpz_import(value: *Z, count: usize, order: c_int, size: usize, endian: c_int, nails: usize, bytes: [*]const u8) void;
-extern "c" fn __gmpz_export(bytes: [*]u8, count: *usize, order: c_int, size: usize, endian: c_int, nails: usize, value: *const Z) ?[*]u8;
-extern "c" fn __gmpz_invert(result: *Z, a: *const Z, m: *const Z) c_int;
+const gmp = @import("gmp.zig");
+const Z = gmp.Z;
 
 pub const Fixture = struct {
 	allocator: std.mem.Allocator,
@@ -158,21 +153,21 @@ pub const Fixture = struct {
 			}
 		}
 		var ga: Z = undefined;
-		__gmpz_init(&ga);
-		defer __gmpz_clear(&ga);
+		gmp.__gmpz_init(&ga);
+		defer gmp.__gmpz_clear(&ga);
 		var gm: Z = undefined;
-		__gmpz_init(&gm);
-		defer __gmpz_clear(&gm);
+		gmp.__gmpz_init(&gm);
+		defer gmp.__gmpz_clear(&gm);
 		var inverse: Z = undefined;
-		__gmpz_init(&inverse);
-		defer __gmpz_clear(&inverse);
+		gmp.__gmpz_init(&inverse);
+		defer gmp.__gmpz_clear(&inverse);
 		const a_bytes = try magnitude(&a);
 		const m_bytes = try magnitude(&m);
-		__gmpz_import(&ga, a_bytes.len, -1, 1, 0, 0, a_bytes.ptr);
-		__gmpz_import(&gm, m_bytes.len, -1, 1, 0, 0, m_bytes.ptr);
-		const exists = __gmpz_invert(&inverse, &ga, &gm) != 0;
+		gmp.__gmpz_import(&ga, a_bytes.len, -1, 1, 0, 0, a_bytes.ptr);
+		gmp.__gmpz_import(&gm, m_bytes.len, -1, 1, 0, 0, m_bytes.ptr);
+		const exists = gmp.__gmpz_invert(&inverse, &ga, &gm) != 0;
 		var length: usize = 0;
-		if (exists) _ = __gmpz_export(raw.ptr, &length, -1, 1, 0, 0, &inverse);
+		if (exists) _ = gmp.__gmpz_export(raw.ptr, &length, -1, 1, 0, 0, &inverse);
 		return .{ .allocator = allocator, .a = a, .m = m,
 			.expected = try allocator.dupe(u8, raw[0..length]), .has_inverse = exists };
 	}
