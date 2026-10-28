@@ -1504,6 +1504,41 @@ pub fn divModSingleU64(a: []u8, a_len: usize, b: u64) struct { q_len: usize, rem
 	return .{ .q_len = n, .rem = r };
 }
 
+/// Experimental reciprocal reuse for division of byte payloads by a native divisor.
+pub fn divModSingleReciprocal(a: []u8, a_len: usize, b: u64) struct { q_len: usize, rem: u64 } {
+	std.debug.assert(b != 0 and a_len <= a.len);
+	if (a_len == 0) return .{ .q_len = 0, .rem = 0 };
+	const payload = a[0..a_len];
+	// The leading 1..8 bytes fit a native divide. Avoid reciprocal setup
+	// altogether if no lower chunks remain.
+	var i = a_len - (1 + (a_len - 1) % 8);
+	const top = readChunkOrZero(payload, i);
+	const quotient = top / b;
+	var remainder = top % b;
+	writeChunkTruncated(payload, i, quotient);
+	if (i != 0) {
+		const shift: u6 = @intCast(@clz(b));
+		const divisor = b << shift;
+		const reciprocal = invertChunk(divisor);
+		remainder <<= shift;
+		while (i != 0) {
+			i -= 8;
+			const chunk = std.mem.readInt(u64, payload[i..][0..8], .little);
+			// Keep the remainder normalized between steps. Its low `shift`
+			// bits are zero, so the two window terms have no overlapping bits.
+			// remainder < divisor guarantees the high half is below divisor.
+			const window = (@as(u128, remainder) << 64) | (@as(u128, chunk) << shift);
+			const out = div2by1(@truncate(window >> 64), @truncate(window), divisor, reciprocal);
+			std.mem.writeInt(u64, payload[i..][0..8], out.q, .little);
+			remainder = out.r;
+		}
+		remainder >>= shift;
+	}
+	var len = a_len;
+	while (len != 0 and payload[len - 1] == 0) len -= 1;
+	return .{ .q_len = len, .rem = remainder };
+}
+
 /// Knuth Algorithm D long division (TAOCP vol 2 §4.3.1) on byte-base (b=256).
 ///
 /// Computes q = u / v and r = u %% v for unsigned LE magnitudes u and v.
@@ -5264,6 +5299,49 @@ test "divModSingleU64: 1000 random pairs vs u512 oracle (a_len ≤ 64, full u64 
 		while (expected_len > 0 and q_bytes[expected_len - 1] == 0) expected_len -= 1;
 		try testing.expectEqual(expected_len, out.q_len);
 		try testing.expectEqualSlices(u8, q_bytes[0..expected_len], work[0..out.q_len]);
+	}
+}
+
+test "divModSingleReciprocal: native oracle across normalization, tail and quotient boundaries" {
+	const allocator = std.testing.allocator;
+	const work = try allocator.alloc(u8, 66);
+	defer allocator.free(work);
+	var rng = std.Random.DefaultPrng.init(0xD1A1_5EED);
+	const random = rng.random();
+	for (0..65) |len| for (0..64) |bit| {
+		const power = @as(u64, 1) << @as(u6, @intCast(bit));
+		const divisors = [_]u64{ power, if (power > 1) power - 1 else 1, power + 1, power | (random.int(u64) & (power - 1)) };
+		for (divisors) |divisor| {
+			@memset(work, 0xa5);
+			const payload = work[1 .. 1 + len];
+			random.bytes(payload);
+			var original: u512 = 0;
+			for (payload, 0..) |byte, i| original |= @as(u512, byte) << @intCast(8 * i);
+			const expected_q = original / divisor;
+			const expected_r: u64 = @intCast(original % divisor);
+			var expected: [64]u8 = undefined;
+			std.mem.writeInt(u512, &expected, expected_q, .little);
+			const canonical = std.mem.trimEnd(u8, &expected, &.{0});
+			const got = divModSingleReciprocal(payload, len, divisor);
+			try std.testing.expectEqual(expected_r, got.rem);
+			try std.testing.expectEqual(canonical.len, got.q_len);
+			try std.testing.expectEqualSlices(u8, canonical, payload[0..got.q_len]);
+			try std.testing.expectEqual(@as(u8, 0xa5), work[0]);
+			for (work[1 + len ..]) |byte| try std.testing.expectEqual(@as(u8, 0xa5), byte);
+		}
+	};
+}
+
+test "divModSingleReciprocal: zero, exact division and maximum divisor" {
+	for ([_]u64{ 1, 2, 255, 256, 65537, (@as(u64, 1) << 63), std.math.maxInt(u64) }) |divisor| {
+		for ([_]u128{ 0, divisor - 1, divisor, @as(u128, divisor) + 1, @as(u128, divisor) * std.math.maxInt(u64), std.math.maxInt(u128) }) |value| {
+			var bytes: [16]u8 = undefined;
+			std.mem.writeInt(u128, &bytes, value, .little);
+			const got = divModSingleReciprocal(&bytes, bytes.len, divisor);
+			try std.testing.expectEqual(value / divisor, std.mem.readInt(u128, &bytes, .little));
+			try std.testing.expectEqual(@as(u64, @intCast(value % divisor)), got.rem);
+			try std.testing.expectEqual(std.mem.trimEnd(u8, &bytes, &.{0}).len, got.q_len);
+		}
 	}
 }
 

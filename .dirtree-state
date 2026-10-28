@@ -85,6 +85,7 @@ annotate=[
 	profiling-division-selected-public.json = Current signed recursive division versus public dispatch across five quotient geometries
 	profiling-division-short-public.json = Paired short-quotient B-Z versus current public division
 	profiling-division-short.json = Paired short-quotient fallback versus fixed leading-block B-Z
+	profiling-division-single-reciprocal.json = Paired reciprocal reuse versus fixed small-divisor byte division
 	profiling-division-single-variable.json = Variable small-divisor kernel versus GMP across payload and alignment boundaries
 	profiling-division-wide-quotient.json = Paired wider quotient fallback with floor, gap and neighboring-alignment controls
 	profiling-division.json = Verified division workloads with separate 1/12 CPU cohorts

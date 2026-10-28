@@ -2138,6 +2138,47 @@ Inspect the candidate's generated code and measure setup cost at small sizes
 before selecting it. The existing public divider and all thresholds remain
 unchanged.
 
+### Reciprocal small-divisor qualification
+
+`divModSingleReciprocal` is an experimental byte-payload entry point. It
+divides the leading 1–8 bytes natively, then uses the existing normalized
+Möller–Granlund reciprocal and correction primitive for lower chunks. The
+reciprocal is computed once per call. Keeping the remainder normalized avoids
+a remainder shift after each chunk. No stored limb array, heap allocation or
+public dispatch change is introduced.
+
+Two native-oracle tests failed against the placeholder before implementation.
+They cover every payload length from zero through 64 bytes, all 64 divisor
+bit positions, nearby powers of two, seeded values, zero/exact results and
+the maximum divisor. Output canaries guard both ends. The paired adapter's
+native-oracle, full-result corruption and allocation tests also failed before
+the candidate was connected; its CLI check rejected the missing mode. The
+completed adapter checks all eight normalization shifts at every accepted
+divisor/dividend width, up to 4,097 bytes, against GMP.
+
+`single-reciprocal` uses `division-single-reciprocal-paired-v1`, with the same
+32 fixtures, 512 repeats, six ABBA/BAAB samples and two affinity cohorts as
+the preceding probe. Its components are `current` and `reciprocal`. Both
+include the same input copy, variable-divisor decode, complete quotient and
+remainder comparison and canaries. Reciprocal setup remains inside every
+timed call. GMP supplies references outside timing. This comparison can
+establish a local kernel improvement, not a direct win over GMP or a signed
+public-API crossover.
+
+The first generated-code inspection found the fixed loop calling `__udivti3`
+per chunk, while the candidate uses scalar multiply/shift/correction operations
+with reciprocal division outside the loop. SIMD remains limited by the running
+remainder dependency. The inspection also found two native leading-chunk
+divides separated by an output write. Moving both calculations before the
+write did not change the executable: both builds had SHA-256
+`9470b41d80526ac94d5fc8bd0fbd3b6672ac42b29bbcccb29b09eeea9e9cc11b`.
+The two leading divides remain a measured setup cost. Measure the compiled
+result before selecting a cutoff or changing public behavior.
+
+The complete suite passed in 89 seconds of mixed Nix preparation/check time;
+the unit/C-API build phase took 87 seconds. Production build and all-system
+evaluation passed. This is correctness qualification, not a performance verdict.
+
 ### Build feedback follow-up
 
 Repeated full checks take roughly 90–120 seconds of mixed preparation and

@@ -382,25 +382,27 @@
 									$row.samples.wall_ns[$i] == ([$row.components[].wall_ns[$i]]|add/4)))
 						' competitors.json > /dev/null
 						done
+						for single_mode in single-variable single-reciprocal; do
 						for divisor in 1 2 4 8; do
-							if ! ${self.packages.${system}.division-probe}/bin/blip-mp-division-probe single-variable "$divisor" 8,9,64,65 > single.json 2> stderr; then
-								echo "variable single-divisor probe failed: $divisor" >&2
+							if ! ${self.packages.${system}.division-probe}/bin/blip-mp-division-probe "$single_mode" "$divisor" 8,9,64,65 > single.json 2> stderr; then
+								echo "variable single-divisor probe failed: $single_mode $divisor" >&2
 								cat stderr >&2
 								exit 1
 							fi
 							test ! -s stderr
-							jq -e --argjson divisor "$divisor" '
+							jq -e --argjson divisor "$divisor" --arg mode "$single_mode" '
 								.schema=="performance-measurement/v1" and .correct==true and .build_mode=="ReleaseFast" and
-								.method=="division-single-variable-paired-v1" and .divisor_bytes==$divisor and
+								.method==(if $mode=="single-variable" then "division-single-variable-paired-v1" else "division-single-reciprocal-paired-v1" end) and .divisor_bytes==$divisor and
 								.divisor_min_bits==$divisor*8-7 and .divisor_max_bits==$divisor*8 and
 								(.gmp_version|length)>0 and [.rows[].size]==[8,9,64,65] and
 								all(.rows[]; . as $row |
 									.fixture_count==32 and .iterations==16384 and .warmup_cases==64 and
-									[.components[].method]==["current","gmp"] and
+									[.components[].method]==(if $mode=="single-variable" then ["current","gmp"] else ["current","reciprocal"] end) and
 									all(.samples[]; length==6 and all(.[]; .>0)) and
 									all(.components[]; (.cpu_ns|length)==6 and (.wall_ns|length)==6 and all(.cpu_ns[],.wall_ns[];.>0)) and
 									all(range(6); . as $i | (($row.samples.cpu_ns[$i]-([$row.components[].cpu_ns[$i]]|add/2))|fabs)<0.001 and (($row.samples.wall_ns[$i]-([$row.components[].wall_ns[$i]]|add/2))|fabs)<0.001))
 							' single.json > /dev/null
+						done
 						done
 						for comparison in public leading short short-public carry selected-public guarded-signed; do
 						for geometry in short_quotient one_chunk_limit two_chunk_start balanced long_dividend; do

@@ -6,7 +6,7 @@ const Case = @import("division_competitors.zig").Case;
 const timing = @import("division_crossover.zig");
 const widths = [_]usize{8,9,16,17,64,65,256,257,1024,1025,4096,4097};
 const divisor_widths = [_]usize{1,2,4,8};
-const Method = enum { current, gmp };
+const Method = enum { current, reciprocal, gmp };
 const Options = struct { divisor_bytes: usize, sizes: [widths.len]usize, count: usize };
 
 fn parse(args: []const []const u8) !Options {
@@ -44,12 +44,21 @@ const Pool = struct {
 	pub fn run(self: *@This(), method: Method, index: usize) !void {
 		const case = &self.cases[index];
 		switch (method) {
-			.current => {
+			.current, .reciprocal => {
 				self.work[0]=0xa5; self.work[self.work.len-1]=0xa5;
 				const payload = self.work[1..self.work.len-1];
 				@memcpy(payload,case.dividend);
-				const got = blip.tier3.divModSingleU64(payload,payload.len,asU64(case.divisor));
-				if (!std.mem.eql(u8,payload[0..got.q_len],case.expected_q) or got.rem!=asU64(case.expected_r)) return error.IncorrectWork;
+				const divisor = asU64(case.divisor);
+				var q_len: usize = undefined;
+				var remainder: u64 = undefined;
+				if (method == .current) {
+					const got = blip.tier3.divModSingleU64(payload,payload.len,divisor);
+					q_len = got.q_len; remainder = got.rem;
+				} else {
+					const got = blip.tier3.divModSingleReciprocal(payload,payload.len,divisor);
+					q_len = got.q_len; remainder = got.rem;
+				}
+				if (!std.mem.eql(u8,payload[0..q_len],case.expected_q) or remainder!=asU64(case.expected_r)) return error.IncorrectWork;
 				if (self.work[0]!=0xa5 or self.work[self.work.len-1]!=0xa5) return error.CanaryDamaged;
 			},
 			.gmp => {
@@ -75,10 +84,18 @@ fn nativeBatch(pool: *Pool, method: Method, start: usize, count: usize, repeats:
 }
 
 pub fn run(init: std.process.Init, args: []const []const u8) !void {
+	return runComparison(init,args,false);
+}
+
+pub fn runReciprocal(init: std.process.Init, args: []const []const u8) !void {
+	return runComparison(init,args,true);
+}
+
+fn runComparison(init: std.process.Init, args: []const []const u8, comptime reciprocal: bool) !void {
 	const options = try parse(args);
 	const count = 32;
 	const repeats = 512;
-	const methods = [2]Method{.current,.gmp};
+	const methods: [2]Method = if (reciprocal) .{.current,.reciprocal} else .{.current,.gmp};
 	const Component = struct { method: []const u8, cpu_ns: [6]f64, wall_ns: [6]f64 };
 	const Row = struct {
 		size: usize, fixture_count: usize = count, iterations: usize = count*repeats, warmup_cases: usize = 2*count,
@@ -101,14 +118,14 @@ pub fn run(init: std.process.Init, args: []const []const u8) !void {
 	const report = .{
 		.schema="performance-measurement/v1",.correct=true,.build_mode="ReleaseFast",
 		.compiler=@import("builtin").zig_version_string,.gmp_version=std.mem.span(gmp.__gmp_version),
-		.method="division-single-variable-paired-v1",.divisor_bytes=options.divisor_bytes,
+		.method=if (reciprocal) "division-single-reciprocal-paired-v1" else "division-single-variable-paired-v1",.divisor_bytes=options.divisor_bytes,
 		.divisor_min_bits=8*options.divisor_bytes-7,.divisor_max_bits=8*options.divisor_bytes,
 		.cpu_clock="CLOCK_PROCESS_CPUTIME_ID",.wall_clock="CLOCK_MONOTONIC",
 		.seed_usage="0xB2D151A5 + divisor_bytes*257 + index; eight normalization shifts; engine seed does not alter inputs",
-		.operation="positive byte payload divided by variable 1/2/4/8-byte magnitude; size is dividend bytes; in-place BLIP byte kernel versus GMP mpz_tdiv_qr",
+		.operation=if (reciprocal) "positive byte payload divided by variable 1/2/4/8-byte magnitude; size is dividend bytes; current versus reciprocal byte kernels" else "positive byte payload divided by variable 1/2/4/8-byte magnitude; size is dividend bytes; in-place BLIP byte kernel versus GMP mpz_tdiv_qr",
 		.normalization="six ABBA/BAAB half-pool samples; 512 repeats per fixture at every size; primary averages two methods; no subtraction",
 		.verification="GMP references outside timing, checked against native arithmetic in tests; full quotient/remainder comparison on every call; byte-kernel canaries",
-		.allocator_coverage="prepared inputs and reused outputs; byte kernel includes input copy and divisor decode, GMP uses preconverted mpz inputs; comparison costs included; cold allocations unmeasured",
+		.allocator_coverage=if (reciprocal) "prepared inputs and reused outputs; both kernels include input copy, variable divisor decode and complete comparisons; reciprocal setup included on every call; cold allocations unmeasured" else "prepared inputs and reused outputs; byte kernel includes input copy and divisor decode, GMP uses preconverted mpz inputs; comparison costs included; cold allocations unmeasured",
 		.rows=rows[0..options.count],
 	};
 	const json = try std.json.Stringify.valueAlloc(init.arena.allocator(),report,.{});
@@ -164,8 +181,8 @@ test "single divisor fixtures match native division across every byte normalizat
 
 test "single divisor probe checks aligned and partial payloads and rejects corrupted references" {
 	for (divisor_widths) |divisor| for (widths) |width| {
-		var pool = try Pool.init(std.testing.allocator,divisor,width,1); defer pool.deinit();
-		for (std.enums.values(Method)) |method| try pool.run(method,0);
+		var pool = try Pool.init(std.testing.allocator,divisor,width,8); defer pool.deinit();
+		for (0..pool.cases.len) |index| for (std.enums.values(Method)) |method| try pool.run(method,index);
 		try std.testing.expectEqual(@as(u8,0xa5),pool.work[0]);
 		try std.testing.expectEqual(@as(u8,0xa5),pool.work[pool.work.len-1]);
 		const case = &pool.cases[0];
