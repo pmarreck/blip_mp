@@ -15,7 +15,8 @@ if nix build --no-link --keep-going --print-build-logs \
 	".#checks.$system.inverse-probe-cli" \
 	".#checks.$system.division-probe-cli" \
 	".#checks.$system.multiplication-probe-cli" \
-	".#checks.$system.gold-probe-cli"; then
+	".#checks.$system.gold-probe-cli" \
+	".#checks.$system.powm-probe-cli"; then
 	printf 'All test groups passed (Nix checks may be cached).\n'
 	status=0
 else

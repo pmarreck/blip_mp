@@ -70,6 +70,12 @@ GMP quotient/remainder checks. Repeated timing work runs outside the unit suite;
 its [probe checks and method](docs/plan_context/performance-follow-up.md#division-probes)
 remain part of `./test`.
 
+`./bm --verified-powm` measures public modular exponentiation on the retained
+512–3072-bit workloads, with every result checked against GMP. Its
+[method and controls](docs/plan_context/performance-follow-up.md#verified-modular-exponentiation-probe)
+include modulus setup and arithmetic allocations in timing. GMP supplies the
+correctness oracle; this probe does not time GMP itself.
+
 `./bm --verified-multiplication` compares schoolbook and blocked products on
 identical inputs around the 2:1 dispatch boundary and at 4:1, 8:1 and 16:1 ratios.
 It also compares public calls with reused and freshly allocated result/scratch

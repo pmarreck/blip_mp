@@ -8,6 +8,7 @@ pub extern "c" fn __gmpz_export(bytes: [*]u8, count: *usize, order: c_int, size:
 pub extern "c" fn __gmpz_invert(result: *Z, a: *const Z, m: *const Z) c_int;
 pub extern "c" fn __gmpz_tdiv_qr(q: *Z, r: *Z, a: *const Z, b: *const Z) void;
 pub extern "c" fn __gmpz_mul(result: *Z, a: *const Z, b: *const Z) void;
+pub extern "c" fn __gmpz_powm(result: *Z, a: *const Z, exponent: *const Z, modulus: *const Z) void;
 
 pub fn product(a: []const u8, b: []const u8, output: []u8) !usize {
 	const capacity = std.math.add(usize, a.len, b.len) catch return error.BufferTooSmall;

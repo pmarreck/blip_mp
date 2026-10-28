@@ -56,7 +56,7 @@
 						performance-profiling.packages.${system}.default
 						self.packages.${system}.add-probe self.packages.${system}.inverse-probe
 						self.packages.${system}.division-probe self.packages.${system}.multiplication-probe
-						self.packages.${system}.gold-probe ];
+						self.packages.${system}.gold-probe self.packages.${system}.powm-probe ];
 					shellHook = ''
 						export GMP_INCLUDE_PATH="${pkgs.gmp.dev}/include"
 						export GMP_LIB_PATH="${pkgs.gmp}/lib"
@@ -117,6 +117,14 @@
 					buildPhase = ''
 						${commonBuild}
 						zig build gold-probe --prefix "$out" -Doptimize=ReleaseFast -Dgmp-lib-path=${pkgs.gmp}/lib
+					'';
+				};
+
+				packages.powm-probe = self.packages.${system}.add-probe.overrideAttrs {
+					pname = "${pname}-powm-probe";
+					buildPhase = ''
+						${commonBuild}
+						zig build powm-probe --prefix "$out" -Doptimize=ReleaseFast -Dgmp-lib-path=${pkgs.gmp}/lib
 					'';
 				};
 
@@ -353,6 +361,35 @@
 							exit 1
 						fi
 						test ! -s output.json
+						mkdir -p "$out"
+					'';
+
+					powm-probe-cli = pkgs.runCommand "${pname}-powm-probe-cli" {
+						nativeBuildInputs = [ pkgs.jq ];
+					} ''
+						${self.packages.${system}.powm-probe}/bin/blip-mp-powm-probe 512 > output.json 2> stderr
+						test ! -s stderr
+						jq -e '
+							.schema == "performance-measurement/v1" and .correct == true and
+							.build_mode == "ReleaseFast" and .method == "powm-gmp-verified-v1" and
+							[.rows[].size] == [512] and all(.rows[];
+								.iterations == 256 and .fixture_count == 256 and .warmup_cases == 256 and
+								all(.samples[]; length == 5 and all(.[]; . > 0)))
+						' output.json > /dev/null
+						if ${self.packages.${system}.powm-probe}/bin/blip-mp-powm-probe 513 > output.json 2> stderr; then exit 1; fi
+						test ! -s output.json
+						mkdir bin
+						cat > bin/nix <<-'STUB'
+						#!${pkgs.bash}/bin/bash
+						printf '%s\n' "$@" > "$ARGV"
+						STUB
+						chmod +x bin/nix
+						export ARGV="$PWD/argv"
+						PATH="$PWD/bin:$PATH" bash ${./bm} --verified-powm --seed 0 > stdout 2> stderr
+						printf '%s\n' develop -c performance-profile run --config profiling-powm.json --mode bm --seed 0 > expected
+						cmp expected argv
+						test ! -s stdout
+						test ! -s stderr
 						mkdir -p "$out"
 					'';
 

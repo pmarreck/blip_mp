@@ -483,3 +483,52 @@ names and definitions suffixed by that condition; each source digest remained
 stable within its run. The binaries and measured work were identical across
 conditions. Execution waited for shared admission before starting; queue time
 is excluded from the recorded probe samples.
+
+## Verified modular-exponentiation probe
+
+`./bm --verified-powm` measures the public `Mp.powm` path at 512, 1024, 2048 and
+3072 bits. It reuses the existing positive-value generators and their per-case
+base/exponent/modulus seeds. Moduli are odd. The named bit widths are nominal
+payload capacities with the sign bit clear. Each sample visits all 256 cases
+after one complete warmup pass; five samples preserve separate process-CPU and
+monotonic-wall times. Historical benchmarks used different iteration counts
+by size and did not verify each timed result, so their timings are not directly
+interchangeable with this method.
+
+GMP supplies every expected result before timing. Inside timing, each public
+call includes its conversions, modulus setup, arithmetic allocation and full
+result comparison. The result object is reused; inputs and expected values are
+prepared outside timing. The two configured affinity cohorts use five processes
+each and explicit 120-second process deadlines. These measurements establish a
+current verified workload, not a timed comparison against GMP or an allocation
+benchmark.
+
+The empty adapter first failed parsing, fixture and allocation-cleanup tests.
+Controls then check corrupted-reference rejection, native modular-power oracle
+agreement including zero exponent/base and unit modulus, and every allocation
+failure. Injected clocks and work recorders verify exact operation counts,
+CPU/wall normalization and error propagation, including stopped/backward clocks.
+That timing control failed against its placeholder before implementation. The
+CLI check also failed against the empty executable, then verifies its schema,
+positive samples, argument rejection and `./bm` routing. All checks are included
+in the complete test entry point and the exact-commit CI manifest.
+
+The [Montgomery carry derivation](../benchmarks/storage-aware/MONTGOMERY.md)
+shows why a scalar schoolbook truncated reduction has no product-count advantage
+over the current cancellation loop. Profile the measured public path before
+selecting a replacement. SIMD is deferred until that baseline identifies the
+dominant work; batch AVX512 results from other implementations do not establish
+a benefit for a single public call here.
+
+The initial ReleaseFast probe had SHA-256
+`49022cec702e48b07c44651d1a3b8982ea65092634e1a7595ace66fa1827b4dc`.
+Its `montMul` occupied 639 bytes. The two inner loops used scalar BMI2 `MULX`,
+64-bit loads from the byte buffers, and scalar carry chains; no packed SIMD
+arithmetic appeared in that function. This confirms that temporary chunk reads
+compile to native loads. It does not identify the dominant runtime cost of the
+whole public exponentiation.
+
+After merging with the Goldilocks occupancy selection, the complete native
+suite passed with 13,231 GMP comparisons in 115 seconds of mixed Nix
+preparation/check time. The production build and all-system evaluation passed.
+This is not a fresh performance measurement or a test-execution-only duration.

@@ -9,3 +9,4 @@ checks.x86_64-linux.inverse-probe-cli
 checks.x86_64-linux.division-probe-cli
 checks.x86_64-linux.multiplication-probe-cli
 checks.x86_64-linux.gold-probe-cli
+checks.x86_64-linux.powm-probe-cli

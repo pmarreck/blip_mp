@@ -44,6 +44,7 @@ annotate=[
 	profiling-linux-counters.json = Interleaved add diagnostic cases with Linux hardware counters
 	profiling-multiplication.json = Asymmetric multiplication boundary, ratio and allocation measurement cohorts
 	profiling-paired-tail.json = Paired ABBA final-block multiplication timing cohorts
+	profiling-powm.json = Single- and twelve-CPU verified modular exponentiation cohorts
 	profiling-short-tail.json = Padded and register-tail multiplication controls at one, eight and nine trailing bytes
 	profiling-truncated.json = Paired truncated Goldilocks product cohorts across padding boundaries
 	profiling.json = Shared performance engine cases for immediate-add fixtures and CPU cohorts
@@ -58,6 +59,7 @@ annotate=[
 	tests/benchmark/inverse.zig = Historical inverse fixtures, GMP oracle and optimized CPU/wall probe
 	tests/benchmark/linux_counters.zig = Checked Linux grouped cycle/instruction counters and lifecycle tests
 	tests/benchmark/multiplication.zig = GMP-verified blocked and schoolbook multiplication with cold/warm allocation controls
+	tests/benchmark/powm.zig = Verified retained-workload modular exponentiation timing and controls
 	tests/benchmark/shifted_residues.zig = Interleaved comparison of three canonical BLIP residue representations
 	tests/benchmark/storage_aware.zig = Seeded full-product FFT and Toom CPU/wall comparisons
 ]

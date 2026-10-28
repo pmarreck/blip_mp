@@ -370,7 +370,7 @@ fn benchmarkMpMulLarge(allocator: std.mem.Allocator, lb: LargeBucket) !f64 {
 }
 
 // Helper: build a positive Mp of given byte length with random payload.
-fn buildRandomPositiveMp(allocator: std.mem.Allocator, byte_count: usize, seed: u64) !blip_mp.Mp {
+pub fn buildRandomPositiveMp(allocator: std.mem.Allocator, byte_count: usize, seed: u64) !blip_mp.Mp {
 	var mp = blip_mp.Mp.init(allocator);
 	const payload = try allocator.alloc(u8, byte_count);
 	defer allocator.free(payload);
@@ -388,7 +388,7 @@ fn buildRandomPositiveMp(allocator: std.mem.Allocator, byte_count: usize, seed: 
 }
 
 // Same as buildRandomPositiveMp but forces the low bit set (odd modulus).
-fn buildRandomPositiveOddMp(allocator: std.mem.Allocator, byte_count: usize, seed: u64) !blip_mp.Mp {
+pub fn buildRandomPositiveOddMp(allocator: std.mem.Allocator, byte_count: usize, seed: u64) !blip_mp.Mp {
 	var mp = blip_mp.Mp.init(allocator);
 	const payload = try allocator.alloc(u8, byte_count);
 	defer allocator.free(payload);

@@ -207,6 +207,21 @@ pub fn build(b: *std.Build) void {
 	const install_gold = b.addInstallArtifact(gold_probe, .{});
 	b.step("gold-probe", "Build the verified Goldilocks layout probe").dependOn(&install_gold.step);
 
+	const powm_module = b.createModule(.{
+		.root_source_file = b.path("tests/benchmark/powm.zig"),
+		.target = target, .optimize = optimize, .link_libc = true,
+		.imports = &.{.{ .name = "blip_mp", .module = core_module }},
+	});
+	if (gmp_lib_path) |path| powm_module.addLibraryPath(.{ .cwd_relative = path });
+	powm_module.linkSystemLibrary("gmp", .{});
+	const powm_tests = b.addTest(.{ .root_module = powm_module });
+	const run_powm_tests = b.addRunArtifact(powm_tests);
+	b.step("powm-probe-test", "Check verified modular exponentiation measurements").dependOn(&run_powm_tests.step);
+	test_step.dependOn(&run_powm_tests.step);
+	const powm_probe = b.addExecutable(.{ .name = "blip-mp-powm-probe", .root_module = powm_module });
+	const install_powm = b.addInstallArtifact(powm_probe, .{});
+	b.step("powm-probe", "Build the verified modular exponentiation probe").dependOn(&install_powm.step);
+
 	// Shared monotonic-clock helper module for the benchmark + cross-check exes.
 	const time_util_module = b.createModule(.{
 		.root_source_file = b.path("tests/time_util.zig"),

@@ -12,6 +12,7 @@
 #   ./bm --verified-goldilocks [engine options] # paired and fused transform layouts
 #   ./bm --verified-truncated [engine options] # truncated products vs full transforms
 #   ./bm --verified-hybrid [engine options] # truncation with fused complete subtrees
+#   ./bm --verified-powm [engine options] # GMP-verified modular exponentiation
 #   ./bm                  # full bench: blip_mp + GMP-asm + GMP-noasm,
 #                        # all sizes, with side-by-side ratios where
 #                        # bucket names match
@@ -59,6 +60,11 @@ fi
 if [ "${1:-}" = "--verified-hybrid" ]; then
 	shift
 	exec nix develop -c performance-profile run --config profiling-hybrid.json --mode bm "$@"
+fi
+
+if [ "${1:-}" = "--verified-powm" ]; then
+	shift
+	exec nix develop -c performance-profile run --config profiling-powm.json --mode bm "$@"
 fi
 
 mode="full"
