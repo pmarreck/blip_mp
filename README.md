@@ -119,6 +119,13 @@ and the odd-width control stays near parity. All 50 processes verified their
 results; all ten cohorts are unbaselined. Public dispatch stays unchanged while
 neighboring-width alignment and quotient geometry are qualified.
 
+The [byte-padding experiment](docs/plan_context/performance-follow-up.md#byte-padding-results)
+saves 26–51% CPU against that fixed BLIP kernel on sampled balanced odd-width
+inputs near 8–16 KiB, but regresses up to 2.85× just above the quotient-gap
+cutoff and at some other balanced widths. It remains experimental. All 180
+processes verified their results; 22 cohorts are unbaselined and four
+inconclusive. This experiment does not time GMP.
+
 ## Quick start
 
 The [verified immediate-add probe](docs/plan_context/performance-follow-up.md#verified-immediate-add-probe-october-27-2026)

@@ -1743,6 +1743,51 @@ execution were not separately instrumented, so this does not establish the
 five-second execution budget. The focused probe check took 35 seconds for its
 combined build phase and execution.
 
+### Byte-padding results
+
+The first paired sweep rejects unconditional padding above the existing
+1,024-byte gap guard. Common scaling helps some balanced inputs but can force
+expensive recursion when the quotient is still relatively short. The fixed
+control is the selected B-Z kernel with its 1,024-byte Knuth fallback; these
+are BLIP-to-BLIP ratios, with no timed GMP competitor.
+
+| Divisor bytes | Padding / fixed CPU, gap 1,025 | Padding / fixed CPU, gap = divisor width |
+|---:|---:|---:|
+| 4,097 | 2.174 / 2.183 | 1.048 / 1.049 |
+| 4,098 | 1.754 / 1.758 | 1.268 / 1.268 |
+| 8,191 | 2.528 / 2.534 | 0.694 / 0.697 |
+| 8,193 | 2.517 / 2.469 | 0.743 / 0.742 |
+| 8,194 | 1.790 / 1.795 | 1.039 / 1.042 |
+| 16,383 | 2.850 / 2.847 | 0.493 / 0.490 |
+| 16,385 | 2.797 / 2.807 | 0.516 / 0.516 |
+| 16,386 | 1.881 / 1.887 | 0.817 / 0.817 |
+
+Cells give paired medians for the 1-CPU / 12-CPU affinity cohorts. Every
+process-mean ratio, including diagnostic attempts, agrees with the direction
+of each listed cell. The candidate delegates to the fixed kernel at gaps
+through 1,024, at widths below 4,096, and at already suitable aligned widths;
+those controls have paired medians near parity. This is evidence for an
+operand-shape-dependent choice, not a general alignment benefit. The default
+divider and public threshold remain unchanged. A follow-up must sample more
+intermediate widths and quotient geometries before selecting a guard.
+
+Campaign `blip-mp-pad-20261028T212730Z` measured commit
+`00e0bb924a8bf86cd2202f750a710952101a97de` using
+`profiling-division-padding.json`. All 180 processes verified their complete
+results, including ten five-process timing retries. Twenty-two cohorts are
+unbaselined. Four remain inconclusive: 4,094/12 CPU, 8,192/12 CPU,
+8,193/12 CPU and 16,383/1 CPU. No baseline was approved. The
+[summary](../benchmarks/storage-aware/division-padding-summary.json) preserves
+all process means and the verdict attached to each row.
+
+The platform was Linux x86_64 with a Threadripper 3990X, Zig 0.16.0
+ReleaseFast and GMP 6.3.0 reference generation. Source digest
+`2d0de98ee6dfb5f70a64fc9ccb4b00e81104aec111db7b8b8b389d110e2e829f`
+remained unchanged; the probe SHA-256 was
+`4b051d0ba07f3953a11b3263f3d036eb8383ce4722f7d66d175c9bbf553472f2`.
+Exact-commit CI passed in 227 seconds. The single-threaded kernels do not
+become parallel merely because a cohort permits 12 CPUs.
+
 ### Exact-capacity remainder regression
 
 Reviewing the B-Z entry point exposed a separate single-byte-divisor bug. With
