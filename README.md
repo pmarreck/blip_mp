@@ -77,6 +77,10 @@ divisor widths by reusing chunk-reading Knuth. The default fallback now uses
 that leaf. Recursive controls stayed near parity; the cohorts remain unbaselined
 or inconclusive. These kernel measurements do not time GMP or establish a public
 division speedup.
+The subsequent [recursive-cutoff comparison](docs/plan_context/performance-follow-up.md#recursive-cutoff-result-and-selection)
+cut B-Z kernel CPU time by about 78–94% at sampled 64–2048-byte divisor widths.
+The default recursive cutoff is now 128 bytes; the public B-Z integration
+threshold is unchanged pending a comparison against the existing public path.
 
 `./bm --verified-powm` measures public modular exponentiation on the retained
 512–3072-bit workloads, with every result checked against GMP. Its
@@ -183,7 +187,7 @@ bp ': real-fact ! ;
 **Operators** (`bp --help` for full list with stack-effect comments):
 `+ - * / % ^ neg abs dup drop swap factorial ! fibonacci fib binomial isqrt sqrt gcd lcm`
 
-**Definitions**: `:` enters compile mode and consumes the next token as the new word's name. `;` is "immediate" — it executes even in compile mode and finalises the definition. The body is a list of *resolved* instruction pointers (builtin / user-word / literal-Fp), not text — so re-defining a builtin shadows it for *future* lookups but does NOT retroactively rebind any earlier compiled body. Classic Forth threaded code.
+**Definitions**: `:` enters compile mode and consumes the next token as the new word's name. `;` is "immediate" — it executes even in compile mode and finalizes the definition. The body is a list of *resolved* instruction pointers (builtin / user-word / literal-Fp), not text — so re-defining a builtin shadows it for *future* lookups but does NOT retroactively rebind any earlier compiled body. Classic Forth threaded code.
 
 ## Use as a library
 

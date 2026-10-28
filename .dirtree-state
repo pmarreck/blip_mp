@@ -31,6 +31,7 @@ annotate=[
 	docs/benchmarks/storage-aware/RESEARCH.md = Recursive Toom and blocked multiplication results and correctness findings
 	docs/benchmarks/storage-aware/crossover-summary.jsonl = Selected-process crossover and allocation observations with cohort verdicts
 	docs/benchmarks/storage-aware/division-boundary-summary.json = Division baseline ratios at small, odd and recursive dispatch boundaries
+	docs/benchmarks/storage-aware/division-cutoff-summary.json = Paired recursive division cutoff ratios, controls and cohort verdicts
 	docs/benchmarks/storage-aware/division-fallback-summary.json = Paired chunk versus byte division fallback ratios and cohort verdicts
 	docs/benchmarks/storage-aware/division-paired-summary.json = Identical-input Burnikel-Ziegler versus Knuth baseline ratios and verdicts
 	docs/benchmarks/storage-aware/paired-tail-summary.jsonl = Paired final-block timing components and process ratios

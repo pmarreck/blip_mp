@@ -418,7 +418,7 @@ pub fn signExtByte(payload: []const u8) u8 {
 
 /// Read byte `i` from a payload, sign-extending past its end with the
 /// appropriate fill byte. Used to do "logically-padded-to-N" reads without
-/// materialising a padded copy.
+/// materializing a padded copy.
 inline fn payloadByteAt(payload: []const u8, i: usize, sign_ext: u8) u8 {
 	return if (i < payload.len) payload[i] else sign_ext;
 }
@@ -452,7 +452,7 @@ pub fn addPayloads(
 	var i: usize = 0;
 	// Chunked u512 path: 64 bytes per iter when operands are large enough
 	// (4096-bit and up). Each u512 add compiles to 8 ADCS instructions on
-	// aarch64 — same per-byte throughput as smaller chunks but minimises
+	// aarch64 — same per-byte throughput as smaller chunks but minimizes
 	// loop branches and load/store insn count. This closes most of the
 	// remaining gap to GMP at 4096+ bits.
 	const both_end = chunkEndForLen(@min(a.len, b.len), n);
@@ -671,7 +671,7 @@ pub fn canonicalLen(payload: []const u8) usize {
 
 // ── BLIP-level wrappers ──────────────────────────────────────────────────────
 
-/// Materialise the payload portion of a BLIP-encoded value. For an immediate
+/// Materialize the payload portion of a BLIP-encoded value. For an immediate
 /// (b0 < 0x80) returns a one-byte slice of the immediate value. For length-
 /// prefixed, returns the payload slice (no header). Caller may need to
 /// allocate an extension if downstream code wants a specific min length.
@@ -1023,7 +1023,7 @@ pub fn squareMagnitudes(a: []const u8, r: []u8) void {
 
 /// Empirically-tuned crossover where Karatsuba starts beating chunked
 /// schoolbook on aarch64. The Karatsuba overhead (sum/sub/add helper
-/// byte-loops + memset of z1_full + recursive call frames) amortises only
+/// byte-loops + memset of z1_full + recursive call frames) amortizes only
 /// when the saved sub-multiplication is bigger than the overhead.
 ///
 /// Re-tuned 2026-05-02: for our chunked-u64 schoolbook (≈ 0.0105 ns/byte²
@@ -1933,10 +1933,11 @@ fn bzDiv2nByN(
 	return .{ .q_len = q_len, .r_len = got2.r_len };
 }
 
-/// Threshold (in bytes of `n`) below which `bzDiv3n_2n` delegates to byte-
-/// direct Knuth D instead of recursing. Empirically calibrated later — for
-/// correctness this can be any value ≥ 2.
-const BZ_RECURSE_THRESHOLD: usize = 4;
+/// Below this divisor width, use the Knuth leaf instead of further recursion.
+/// Paired 64–2048-byte measurements support 128 over the original four bytes;
+/// this is a measured improvement, not a claim of an optimal cutoff.
+const BZ_RECURSE_THRESHOLD: usize = 128;
+const BZ_LEGACY_RECURSE_THRESHOLD: usize = 4;
 
 /// Magnitude multiplication with auto-dispatch to Toom-3 / Karatsuba / chunked
 /// schoolbook based on operand sizes. Equal-length operands ≥ TOOM3_THRESHOLD
@@ -2115,8 +2116,7 @@ inline fn decrementMagInPlace(buf: []u8, len_ptr: *usize) void {
 /// Then compute D = Q·B2, R' = R·β^half + A3 - D; correct (≤ 2 iters)
 /// if R' went negative by Q -= 1, R' += v.
 ///
-/// Below `BZ_RECURSE_THRESHOLD`, delegates to byte-direct Knuth D (the
-/// algorithm's base case).
+/// Below the supplied recursive cutoff, delegates to the Knuth leaf.
 ///
 /// Preconditions:
 ///   - u.len == 3 * (n / 2)
@@ -2265,21 +2265,21 @@ fn bzDiv3n_2n(
 /// 64 (= 512-bit divisor) is a conservative starting point.
 const BZ_TOPLEVEL_THRESHOLD: usize = 64;
 
-/// Experimental 128-byte recursive cutoff, with chunk-reading fallback.
+/// Explicit 128-byte recursive cutoff, with chunk-reading fallback.
 pub fn divModBurnikelZieglerCutoff128(u: []const u8, u_len: usize, v: []const u8, v_len: usize, q: []u8, r: []u8, allocator: std.mem.Allocator) std.mem.Allocator.Error!struct { q_len: usize, r_len: usize } {
 	const got = try divModBurnikelZieglerImpl(true, 128, u, u_len, v, v_len, q, r, allocator);
 	return .{ .q_len = got.q_len, .r_len = got.r_len };
 }
 
-/// Explicit chunk-reading fallback control; recursion is unchanged.
+/// Explicit chunk-reading fallback control with the original recursive cutoff.
 pub fn divModBurnikelZieglerChunkFallback(u: []const u8, u_len: usize, v: []const u8, v_len: usize, q: []u8, r: []u8, allocator: std.mem.Allocator) std.mem.Allocator.Error!struct { q_len: usize, r_len: usize } {
-	const got = try divModBurnikelZieglerImpl(true, BZ_RECURSE_THRESHOLD, u, u_len, v, v_len, q, r, allocator);
+	const got = try divModBurnikelZieglerImpl(true, BZ_LEGACY_RECURSE_THRESHOLD, u, u_len, v, v_len, q, r, allocator);
 	return .{ .q_len = got.q_len, .r_len = got.r_len };
 }
 
 /// Historical byte fallback retained for paired measurements.
 pub fn divModBurnikelZieglerByteFallback(u: []const u8, u_len: usize, v: []const u8, v_len: usize, q: []u8, r: []u8, allocator: std.mem.Allocator) std.mem.Allocator.Error!struct { q_len: usize, r_len: usize } {
-	const got = try divModBurnikelZieglerImpl(false, BZ_RECURSE_THRESHOLD, u, u_len, v, v_len, q, r, allocator);
+	const got = try divModBurnikelZieglerImpl(false, BZ_LEGACY_RECURSE_THRESHOLD, u, u_len, v, v_len, q, r, allocator);
 	return .{ .q_len = got.q_len, .r_len = got.r_len };
 }
 
@@ -2977,7 +2977,7 @@ pub fn divModSigned(
 	// Cheap upper bound on b's magnitude byte length: canonical 2's-comp can
 	// shrink by at most one byte (a sign-extension byte). So b_mag_len ≤ 8
 	// implies b_pay.len ≤ 9. We can dispatch the multi-byte fast path early
-	// without materialising the byte magnitude buffer.
+	// without materializing the byte magnitude buffer.
 	if (b_pay.len >= 10) {
 		return divModSignedLarge(a_pay, b_pay, a_neg, b_neg, q_pay, r_pay, work);
 	}
@@ -3121,7 +3121,7 @@ fn divModSignedLarge(
 
 	// Maximum chunk counts we may write into. We use the payload byte length
 	// upper bound (canonical magnitude can be slightly less). Knuth needs
-	// u with (a_chunks + 1) slots so the D1 normalisation shift has carry-out
+	// u with (a_chunks + 1) slots so the D1 normalization shift has carry-out
 	// space.
 	const a_chunks_max = (a_pay.len + 7) / 8;
 	const b_chunks_max = (b_pay.len + 7) / 8;
@@ -6034,7 +6034,7 @@ test "bzDiv2nByN: regression — previously-failing seed at n=16 (slice-bounds U
 	defer allocator.free(q_bz);
 	const r_bz = try allocator.alloc(u8, n);
 	defer allocator.free(r_bz);
-	const got_bz = try bzDiv2nByN(BZ_RECURSE_THRESHOLD, &u, n, &v, q_bz, r_bz, allocator);
+	const got_bz = try bzDiv2nByN(BZ_LEGACY_RECURSE_THRESHOLD, &u, n, &v, q_bz, r_bz, allocator);
 
 	try testing.expectEqualSlices(u8, q_ref[0..got_ref.q_len], q_bz[0..got_bz.q_len]);
 	try testing.expectEqualSlices(u8, r_ref[0..got_ref.r_len], r_bz[0..got_bz.r_len]);
@@ -6101,7 +6101,7 @@ test "bzDiv2nByN: cross-check vs divModKnuth at n=2,4,8,16,32 bytes" {
 			defer allocator.free(q_bz);
 			const r_bz = try allocator.alloc(u8, n);
 			defer allocator.free(r_bz);
-			const got_bz = try bzDiv2nByN(BZ_RECURSE_THRESHOLD, u, n, v, q_bz, r_bz, allocator);
+			const got_bz = try bzDiv2nByN(BZ_LEGACY_RECURSE_THRESHOLD, u, n, v, q_bz, r_bz, allocator);
 
 			try testing.expectEqual(got_ref.q_len, got_bz.q_len);
 			try testing.expectEqualSlices(u8, q_ref[0..got_ref.q_len], q_bz[0..got_bz.q_len]);

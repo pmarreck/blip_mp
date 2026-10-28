@@ -32,7 +32,7 @@
 // that previously dominated tier-3 add at small sizes (256-2048 bit). Cache
 // is maintained atomically with the bytes by every set/setBytes/tier3Op call.
 //
-// heap_offset enables tier3Op's direct-write optimisation: write the canonical
+// heap_offset enables tier3Op's direct-write optimization: write the canonical
 // payload at a fixed offset (HDR_RESERVE = 10) inside heap_buf, compute the
 // header length, then write the header at HDR_RESERVE - hdr_len. Set
 // heap_offset = HDR_RESERVE - hdr_len. bytes() returns the contiguous slice
@@ -64,7 +64,7 @@ pub const ArithError = SetError || GetError || error{
 };
 
 /// Reduce `a` modulo |m| (Euclidean), into a buffer-managed Mp.
-/// Centralised so invMod and other modular ops can normalise inputs.
+/// Centralized so invMod and other modular ops can normalize inputs.
 fn euclideanReduce(out: *Mp, a: *const Mp, m_abs: *const Mp) ArithError!void {
 	try out.mod(a, m_abs);
 	if (out.cached_sign < 0) try out.add(out, m_abs);
@@ -176,7 +176,7 @@ pub const Mp = struct {
 
 	/// Ensure heap_buf has at least `cap` bytes. If a realloc happens it
 	/// drops the previous contents (caller must re-write). For monotonically
-	/// growing workloads, doubles the existing cap to amortise realloc cost.
+	/// growing workloads, doubles the existing cap to amortize realloc cost.
 	inline fn ensureHeapCapacity(self: *Mp, cap: usize) std.mem.Allocator.Error!void {
 		if (self.heap_buf.len >= cap) return;
 		const new_cap = @max(cap, 2 * self.heap_buf.len);
@@ -763,7 +763,7 @@ pub const Mp = struct {
 	///
 	/// Algorithm: dispatches on exponent bit-length:
 	///   - For tiny exponents (bitLen ≤ 8) uses right-to-left square-and-multiply
-	///     (M7-4.1) — precompute amortisation isn't worth it.
+	///     (M7-4.1) — precompute amortization isn't worth it.
 	///   - For larger exponents uses left-to-right sliding-window (M7-4.2)
 	///     with adaptive window size (w=4 for ≤256-bit exp, w=5 for ≤2048-bit,
 	///     w=6 above) — saves ~25-35% of multiplications vs square-and-multiply.
@@ -792,7 +792,7 @@ pub const Mp = struct {
 		if (exp.cached_sign < 0) return error.NegativeExponentNotSupported;
 		const allocator = r.allocator;
 
-		// Normalise the modulus to its absolute value (GMP behavior).
+		// Normalize the modulus to its absolute value (GMP behavior).
 		var m_abs = Mp.init(allocator);
 		defer m_abs.deinit();
 		if (m.cached_sign < 0) {
@@ -828,7 +828,7 @@ pub const Mp = struct {
 
 		const e_bits = exp.bitLen();
 		// Tiny exponent or zero base: fall back to square-and-multiply (no
-		// precompute amortisation). Also handles base == 0 cleanly.
+		// precompute amortization). Also handles base == 0 cleanly.
 		if (e_bits <= 8 or base_red.cached_sign == 0) {
 			try powmSquareAndMultiply(r, &base_red, exp, &m_abs);
 			return;
@@ -839,10 +839,10 @@ pub const Mp = struct {
 		const w: u8 = if (e_bits <= 256) 4 else if (e_bits <= 2048) 5 else 6;
 
 		// Montgomery dispatch: requires odd modulus AND a magnitude large enough
-		// to amortise the per-call setup (modInvNeg64, R^2 mod m, base/result
+		// to amortize the per-call setup (modInvNeg64, R^2 mod m, base/result
 		// conversions). Cutoff chosen so 64-bit-and-up modular workloads (RSA,
 		// DH, ECC field primes) take the Mont path; tiny moduli stay on
-		// schoolbook+Knuth (where setup amortisation would exceed savings).
+		// schoolbook+Knuth (where setup amortization would exceed savings).
 		const m_pay = m_abs.payload();
 		const m_is_odd = (m_pay.len > 0) and ((m_pay[0] & 1) == 1);
 		// Magnitude byte length: positive payload may carry a trailing 0x00
@@ -1933,7 +1933,7 @@ pub const Mp = struct {
 	}
 
 	/// Set this Mp's value to the unsigned u128 magnitude `value`.
-	/// Used by HGCD to materialise multi-precision matrix coefficients.
+	/// Used by HGCD to materialize multi-precision matrix coefficients.
 	fn setU128(self: *Mp, value: u128) ArithError!void {
 		if (value == 0) {
 			try self.setI64(0);
@@ -2293,7 +2293,7 @@ pub const Mp = struct {
 				continue;
 			}
 
-			// Materialise the multi-precision (u128) matrix coefficients.
+			// Materialize the multi-precision (u128) matrix coefficients.
 			try coeff_a.setU128(aa);
 			try coeff_b.setU128(bb);
 			try coeff_c.setU128(cc);
@@ -2353,13 +2353,13 @@ pub const Mp = struct {
 	///
 	/// Falls back to `invModHGCD` (M10 wider-window Lehmer) for moduli below
 	/// the recursive HGCD threshold (~1024 bits) where the recursive
-	/// matrix-composition overhead doesn't yet amortise.
+	/// matrix-composition overhead doesn't yet amortize.
 	pub fn invModHGCDRecursive(r: *Mp, a: *const Mp, m: *const Mp) ArithError!bool {
 		if (m.cached_sign == 0) return error.DivisionByZero;
 		const allocator = r.allocator;
 
 		// Threshold: only profitable above ~4096 bits where matrix-composition
-		// cost amortises across many EEA steps. Below, defer to wider-window
+		// cost amortizes across many EEA steps. Below, defer to wider-window
 		// Lehmer (M10) which itself defers to classical Lehmer below 256 bits.
 		const HGCD_REC_THRESHOLD: usize = 4096;
 		if (m.bitLen() < HGCD_REC_THRESHOLD) return invModHGCD(r, a, m);
@@ -2853,7 +2853,7 @@ pub const Mp = struct {
 				continue;
 			}
 
-			// Materialise inner-loop matrix as Mp values, apply to (r0, r1),
+			// Materialize inner-loop matrix as Mp values, apply to (r0, r1),
 			// then compose into out_M.
 			try inner.a.setU64(aa);
 			try inner.b.setU64(bb);
@@ -2865,12 +2865,12 @@ pub const Mp = struct {
 		}
 	}
 
-	/// Materialise the magnitude `(src >> shift_down)` as a non-negative Mp
+	/// Materialize the magnitude `(src >> shift_down)` as a non-negative Mp
 	/// in `out`. Used by the recursive HGCD to extract the top window of bits
 	/// from a multi-precision r0 / r1 into a smaller Mp suitable for a
 	/// subordinate HGCD call.
 	///
-	/// `src` must be non-negative (HGCD's r0/r1 invariant); behaviour for
+	/// `src` must be non-negative (HGCD's r0/r1 invariant); behavior for
 	/// negative inputs is undefined. If `shift_down >= bitLen(src)`, sets out = 0.
 	fn setFromShiftedRight(out: *Mp, src: *const Mp, shift_down: usize) ArithError!void {
 		const src_bits = src.bitLen();
@@ -2956,7 +2956,7 @@ pub const Mp = struct {
 
 		// Below this threshold, defer to the iterative form. Tuned to be
 		// large enough that the recursion + matrix-compose overhead is
-		// amortised, but small enough to keep recursion depth bounded.
+		// amortized, but small enough to keep recursion depth bounded.
 		const RECURSION_BASE_BITS: usize = 256;
 
 		const n0 = a.bitLen();
@@ -3477,29 +3477,14 @@ fn powmMontgomery(comptime symmetric: bool, r: *Mp, base_red: *const Mp, exp: *c
 	try r.setBytes(enc_buf);
 }
 
-/// Tier-3 truncated division: writes a/b into q.heap_buf and a%b into rem.heap_buf.
-/// Sign-magnitude dispatch + Knuth Algorithm D (or single-u64 division for small b).
-/// Sign convention matches GMP `mpz_tdiv_qr` (see `Mp.divMod` doc).
 /// Threshold (in payload bytes of the divisor) above which `tier3DivModOp`
-/// routes to the byte-direct Burnikel-Ziegler divider instead of the existing
-/// limb-packed Knuth path. Currently gated OFF in production (set to a value
-/// the system never reaches): empirical benchmark shows B-Z at 4K-bit
-/// divisor is ~40× SLOWER than limb-Knuth (244K vs 6K ns/op) because the
-/// byte-direct base case + per-call malloc dominate. The B-Z scaffolding is
-/// correct (verified by 12K+ GMP cross-checks) but needs the perf-work
-/// follow-ups to win: (a) Karatsuba-aware mulMagnitudes inside the recursion,
-/// (b) limb-Knuth at the leaf instead of byte-Knuth, (c) per-thread scratch
-/// caching to eliminate per-call malloc. Until those land, the existing
-/// limb-Knuth path with Möller-Granlund reciprocal q_hat is faster up
-/// through the largest tested size (8K-bit).
-const BZ_INTEGRATION_THRESHOLD: usize = 99999; // gated off
-// Arena-cached B-Z (tier3.bzArena) eliminates the per-call malloc overhead
-// that previously dominated B-Z. With arena warm, B-Z at 8K-bit drops from
-// ~162K ns → ~92K ns/op (43% better). But limb-Knuth at the same size is
-// 6K ns: B-Z is still 15× slower because the schoolbook/Karatsuba mul work
-// per recursion level dominates. Arena scaffolding stays for future use
-// when FFT mul becomes viable in production.
+/// routes to byte-buffer Burnikel-Ziegler instead of chunk-reading Knuth.
+/// Retained while paired kernel improvements are qualified against the public
+/// path. This is a real large-input threshold, not a disabled branch. Current
+/// measurements and their limits are in docs/plan_context/performance-follow-up.md.
+const BZ_INTEGRATION_THRESHOLD: usize = 99999;
 
+/// Tier-3 truncated division with GMP `mpz_tdiv_qr` sign conventions.
 fn tier3DivModOp(q: *Mp, rem: *Mp, a: *const Mp, b: *const Mp) ArithError!void {
 	const a_bytes = a.bytes();
 	const b_bytes = b.bytes();
@@ -3507,20 +3492,13 @@ fn tier3DivModOp(q: *Mp, rem: *Mp, a: *const Mp, b: *const Mp) ArithError!void {
 	const b_pay = b_bytes[b.cached_pay_off .. b.cached_pay_off + b.cached_pay_len];
 
 	// Burnikel-Ziegler dispatch for large divisors. Falls through to the
-	// limb-Knuth path otherwise.
+	// chunk-reading Knuth path otherwise.
 	if (b_pay.len >= BZ_INTEGRATION_THRESHOLD) {
 		try tier3DivModOpBZ(q, rem, a_pay, b_pay);
 		return;
 	}
 
-	// M15-2 byte-direct path scaffolding (tier3.divModSignedLargeBytes) exists
-	// and is tested, but production stays on the limb path until M15-2 step 3
-	// lands: rewriting divModKnuthU64's body byte-direct via readChunkOrZero
-	// is what actually unlocks the perf win. The wiring-alone change measured
-	// at ~equal or marginally slower (per-call malloc dominates at small
-	// sizes; at large sizes both paths converge on the same Knuth core).
-
-	// Quotient/remainder buffers must be large enough to hold the LIMB-aligned
+	// Quotient/remainder byte buffers must hold the chunk-aligned
 	// (8-byte multiple) raw write from divModKnuthU64 before its trailing-zero
 	// trim. Round up to the next multiple of 8, then add +2 slack for sign
 	// bytes and canonicalization.

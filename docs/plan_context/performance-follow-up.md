@@ -552,8 +552,8 @@ The default B-Z entry point now reuses the chunk-reading leaf for its fallback.
 The old byte fallback remains explicit as `divModBurnikelZieglerByteFallback`,
 and the paired probe labels it `burnikel_ziegler_byte_fallback` so later runs
 keep a fixed control. GMP and allocation checks also exercise the default
-entry point. The four-byte recursive cutoff and the public B-Z integration
-threshold remain unchanged. This is a magnitude-kernel improvement; it neither
+entry point. That selection left the four-byte recursive cutoff and the public
+B-Z integration threshold unchanged. This is a magnitude-kernel improvement; it neither
 times GMP nor establishes a public signed-division speedup at the sampled sizes.
 
 After selection, the complete native suite passed in 93 seconds of mixed Nix
@@ -581,10 +581,52 @@ cover both batch orders and exact input coverage for every comparison pair.
 This experiment reduces recursive work before considering instruction-level
 changes. No SIMD or compiler-vectorization claim follows from the baseline:
 the current evidence measures complete calls, not an instruction profile.
-The production cutoff remains four bytes until measurements support a change.
+The initial experiment kept the production cutoff at four bytes.
 
 The complete native suite passed in 91 seconds of mixed Nix preparation/check
 time. The production/probe build and all-system evaluation passed as well.
+
+### Recursive cutoff result and selection
+
+Campaign `blip-mp-division-cutoff-20261028T102909Z` measured commit
+`64a07ec3f4c920af74a14993fcd640f6546ffffb`, with source hash
+`24a6a526c5185b847b0cf40d1a8147c6b9f2863bad89d6e43035139baee323c5`
+unchanged. All 20 processes verified their results. Both cohorts used their
+single variation retry: the one-CPU cohort finished `UNBASELINED`, while the
+12-CPU cohort remained `INCONCLUSIVE`. No baseline was approved. Admission
+waited about seven minutes before the measured processes started.
+
+| Divisor bytes | Path | Cutoff 128/4 paired CPU median, 1 CPU | Cutoff 128/4 paired CPU median, 12 CPUs |
+|---:|---|---:|---:|
+| 63 | Unchanged fallback | 1.001 | 1.002 |
+| 64 | Recursive | 0.062 | 0.062 |
+| 127 | Unchanged fallback | 0.998 | 1.002 |
+| 128 | Recursive | 0.098 | 0.098 |
+| 129 | Unchanged fallback | 1.000 | 0.999 |
+| 256 | Recursive | 0.125 | 0.125 |
+| 512 | Recursive | 0.150 | 0.150 |
+| 1024 | Recursive | 0.181 | 0.182 |
+| 2048 | Recursive | 0.220 | 0.220 |
+
+Each median uses 25 paired ratios from its selected attempt. Every recursive
+process mean, including diagnostics, favored the larger cutoff. The sampled
+CPU savings are about 78–94%, or 4.6–16× speedups. Unchanged-control medians
+remain within 0.25% of parity; their process means range more widely, about
+0.923–1.130. The [summary](../benchmarks/storage-aware/division-cutoff-summary.json)
+preserves the process ratios and cohort verdicts.
+
+The default B-Z entry now uses the 128-byte recursive cutoff and chunk-reading
+fallback. Both historical controls retain an explicit four-byte cutoff, and
+the private recursion regressions still exercise that deeper tree. The public
+B-Z integration threshold remains 99,999 divisor payload bytes. These kernel
+measurements do not establish a crossover against Knuth or GMP, nor do they
+calibrate 128 as the optimum. Lowering the public threshold requires a separate
+comparison against the current public path.
+
+After selecting the cutoff, the complete native suite passed in 101 seconds
+of mixed Nix preparation/check time. The production/probe build and all-system
+evaluation also passed. Existing private recursion regressions continue to
+use the original four-byte cutoff so their deeper recursion remains covered.
 
 ### Exact-capacity remainder regression
 
