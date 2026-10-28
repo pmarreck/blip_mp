@@ -4,15 +4,15 @@ Purpose: [INTENT.md](INTENT.md). The [legacy roadmap](docs/plan_context/legacy-r
 
 ## Current bounded milestone
 
+- [x] Add rotating paired Goldilocks product/pass measurements, corruption and allocation-failure controls, CLI/CI integration and 1/12-CPU cohorts; pass full native tests/build and all-system evaluation (context: docs/benchmarks/goldilocks/README.md; done 2026-10-28 01:14 EDT; this commit).
 - [x] Add experimental paired/fused Goldilocks transforms, independently check field DFTs/canonical bytes and GMP products, fix one-point twiddle initialization, inspect scalar code and pass the complete native suite/build (context: docs/benchmarks/goldilocks/README.md; done 2026-10-28 01:01 EDT; this commit).
 - [x] Enable the native-sized blocked tail after paired medians show 14–18% gains and a near-zero nine-byte fallback; retain the padded control and pass the complete native suite/build (context: docs/benchmarks/storage-aware/RESEARCH.md; done 2026-10-28 00:53 EDT; this commit).
 - [x] Add ABBA paired tail measurements with injected timing/error controls and full CLI checks; reproduce and fix the two-product CLI clock failure; pass full native tests/build and all-system evaluation (context: docs/benchmarks/storage-aware/RESEARCH.md; done 2026-10-28 00:44 EDT; this commit).
-- [x] Add a byte-direct register-sized tail candidate with the padded kernel retained; pass native-width/carry/zero/canary and GMP controls, the full native suite/build and all-system evaluation (context: docs/benchmarks/storage-aware/RESEARCH.md; done 2026-10-28 00:28 EDT; this commit).
 
 ## Follow-up and existing backlog
 
 
-- [ ] Validate and measure paired/fused Goldilocks layouts against Stockham, including complete products, isolated passes and generated-code inspection before production selection (context: docs/benchmarks/goldilocks/README.md).
+- [ ] Measure the verified paired/fused Goldilocks layouts against Stockham and inspect all component ratios before production selection (context: docs/benchmarks/goldilocks/README.md).
 - [ ] Continue sparse/truncated FFT and Montgomery experiments after the Goldilocks measurements (context: docs/benchmarks/storage-aware/RESEARCH.md).
 
 - [ ] Profile remaining non-FFT multiplication/powm regressions; the initial FFT overhead is partly recovered by a80073f (evidence: RESULTS.md).

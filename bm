@@ -9,6 +9,7 @@
 #   ./bm --verified-inverse [engine options] # GMP-verified inverse algorithm probes
 #   ./bm --verified-division [engine options] # GMP-verified division kernel probes
 #   ./bm --verified-multiplication [engine options] # blocked products and allocation costs
+#   ./bm --verified-goldilocks [engine options] # paired and fused transform layouts
 #   ./bm                  # full bench: blip_mp + GMP-asm + GMP-noasm,
 #                        # all sizes, with side-by-side ratios where
 #                        # bucket names match
@@ -44,6 +45,10 @@ fi
 if [ "${1:-}" = "--verified-multiplication" ]; then
 	shift
 	exec nix develop -c performance-profile run --config profiling-multiplication.json --mode bm "$@"
+fi
+if [ "${1:-}" = "--verified-goldilocks" ]; then
+	shift
+	exec nix develop -c performance-profile run --config profiling-goldilocks.json --mode bm "$@"
 fi
 
 mode="full"

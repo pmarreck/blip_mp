@@ -192,6 +192,21 @@ pub fn build(b: *std.Build) void {
 	const install_multiplication = b.addInstallArtifact(multiplication_probe, .{});
 	b.step("multiplication-probe", "Build the GMP-verified multiplication probe").dependOn(&install_multiplication.step);
 
+	const gold_module = b.createModule(.{
+		.root_source_file = b.path("tests/benchmark/goldilocks.zig"),
+		.target = target, .optimize = optimize, .link_libc = true,
+		.imports = &.{.{ .name = "blip_mp", .module = core_module }},
+	});
+	if (gmp_lib_path) |path| gold_module.addLibraryPath(.{ .cwd_relative = path });
+	gold_module.linkSystemLibrary("gmp", .{});
+	const gold_tests = b.addTest(.{ .root_module = gold_module });
+	const run_gold_tests = b.addRunArtifact(gold_tests);
+	b.step("gold-probe-test", "Check Goldilocks layout measurements").dependOn(&run_gold_tests.step);
+	test_step.dependOn(&run_gold_tests.step);
+	const gold_probe = b.addExecutable(.{ .name = "blip-mp-gold-probe", .root_module = gold_module });
+	const install_gold = b.addInstallArtifact(gold_probe, .{});
+	b.step("gold-probe", "Build the verified Goldilocks layout probe").dependOn(&install_gold.step);
+
 	// Shared monotonic-clock helper module for the benchmark + cross-check exes.
 	const time_util_module = b.createModule(.{
 		.root_source_file = b.path("tests/time_util.zig"),

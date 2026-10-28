@@ -75,3 +75,42 @@ full arithmetic checks, component CPU/wall timings, separate 1/12-CPU cohorts,
 process variation and the shared engine's external history. Inspect the generated
 code for scalar arithmetic, spills and vectorization before selecting a layout.
 Neither pairing nor stage fusion is claimed as a new algorithm.
+
+## Verified measurement adapter
+
+Run `./bm --verified-goldilocks` through the shared measurement engine. The
+configuration declares complete products and forward/inverse pairs as separate
+cases, each with five processes in separate 1/12-CPU affinity cohorts. Product
+sizes are balanced operand byte lengths; pass sizes are transform lengths.
+Products include 65535, 65536 and 65537 bytes to cross a padding jump, and
+100000 bytes to reach the existing production Goldilocks region.
+
+Each process records six samples. A sample runs mirrored batches of the three
+layouts, then rotates their roles in the next sample. Across six samples each
+layout occupies outer, middle and central positions equally. Each component
+reports CPU/wall nanoseconds per operation over two batches of two operations.
+The primary engine sample averages the three components. Its variation gate
+therefore does not replace inspection of each component and paired ratio.
+
+Product timing includes packing, twiddle generation, all three transforms,
+carry/output work and the full GMP-derived result comparison. GMP computes its
+reference outside timing. Pass timing uses prepared twiddles and includes
+restoring the input, a forward/inverse pair without final scaling, and checking
+every canonical output against an independently computed `N*x mod p` value.
+All layouts share prepared arena storage; allocation costs are not measured.
+
+The adapter's initial stubs failed all five behavioral tests. Controls cover
+input classification, mirrored/rotated batch order, linear drift cancellation,
+error propagation, corruption rejection for every layout/mode, and cleanup at
+every allocation failure. The command route and CLI report failed before their
+implementations; their checks are included in `./test` and the CI manifest.
+
+The final adapter passed the complete native suite and production build in
+129 seconds, including 128 seconds of mixed Nix preparation/check time.
+All-system evaluation passed. Its ReleaseFast probe had SHA-256
+`e42c7707d90986d2b056372502f0890c819082ef3c9e9ab68c9cb01d84a91d0c`.
+Forward function sizes matched the initial inspection. The paired radix-2
+inverse occupied 620 bytes; the fused inverse occupied 2178 bytes and reserved
+another 136 stack bytes, with stack traffic inside the transform. Neither
+inverse function contained packed SIMD arithmetic. These are compiler-output
+observations, not runtime instruction counts or performance results.

@@ -55,7 +55,8 @@
 					buildInputs = [ zig pkgs.hyperfine pkgs.gmp
 						performance-profiling.packages.${system}.default
 						self.packages.${system}.add-probe self.packages.${system}.inverse-probe
-						self.packages.${system}.division-probe self.packages.${system}.multiplication-probe ];
+						self.packages.${system}.division-probe self.packages.${system}.multiplication-probe
+						self.packages.${system}.gold-probe ];
 					shellHook = ''
 						export GMP_INCLUDE_PATH="${pkgs.gmp.dev}/include"
 						export GMP_LIB_PATH="${pkgs.gmp}/lib"
@@ -108,6 +109,14 @@
 					buildPhase = ''
 						${commonBuild}
 						zig build multiplication-probe --prefix "$out" -Doptimize=ReleaseFast -Dgmp-lib-path=${pkgs.gmp}/lib
+					'';
+				};
+
+				packages.gold-probe = self.packages.${system}.add-probe.overrideAttrs {
+					pname = "${pname}-gold-probe";
+					buildPhase = ''
+						${commonBuild}
+						zig build gold-probe --prefix "$out" -Doptimize=ReleaseFast -Dgmp-lib-path=${pkgs.gmp}/lib
 					'';
 				};
 
@@ -258,6 +267,13 @@
 							zig build multiplication-probe-test -Doptimize=ReleaseSafe -Dgmp-lib-path=${pkgs.gmp}/lib
 						'';
 					};
+					gold-probe = self.checks.${system}.probe.overrideAttrs {
+						pname = "${pname}-gold-probe-tests";
+						buildPhase = ''
+							${commonBuild}
+							zig build gold-probe-test -Doptimize=ReleaseSafe -Dgmp-lib-path=${pkgs.gmp}/lib
+						'';
+					};
 					gmp-oracle = self.checks.${system}.probe.overrideAttrs {
 						pname = "${pname}-gmp-oracle-tests";
 						buildPhase = ''
@@ -336,6 +352,42 @@
 						if ${self.packages.${system}.multiplication-probe}/bin/blip-mp-multiplication-probe blocked two 0 2 > output.json 2> stderr; then
 							exit 1
 						fi
+						test ! -s output.json
+						mkdir -p "$out"
+					'';
+
+					gold-probe-cli = pkgs.runCommand "${pname}-gold-probe-cli" {
+						nativeBuildInputs = [ pkgs.jq ];
+					} ''
+						mkdir bin
+						cat > bin/nix <<-'STUB'
+						#!${pkgs.bash}/bin/bash
+						printf '%s\n' "$@" > "$ARGV"
+						STUB
+						chmod +x bin/nix
+						export ARGV="$PWD/argv"
+						PATH="$PWD/bin:$PATH" bash ${./bm} --verified-goldilocks --seed 0 > stdout 2> stderr
+						printf '%s\n' develop -c performance-profile run --config profiling-goldilocks.json --mode bm --seed 0 > expected
+						cmp expected argv
+						test ! -s stdout
+						test ! -s stderr
+						for mode in product passes; do
+							${self.packages.${system}.gold-probe}/bin/blip-mp-gold-probe "$mode" 64,128 8 > output.json 2> stderr
+							test ! -s stderr
+							jq -e --arg mode "$mode" '
+								.schema == "performance-measurement/v1" and .correct == true and
+								.build_mode == "ReleaseFast" and .mode == $mode and .method == "gold-paired-layouts-v1" and
+								[.rows[].size] == [64,128] and [.rows[].transform_length] == [64,128] and
+								all(.rows[]; . as $row | .iterations == 8 and
+									[.components[].layout] == ["stockham","paired","fused"] and
+									all(.samples[]; length == 6 and all(.[]; . > 0)) and
+									all(.components[]; (.cpu_ns|length) == 6 and (.wall_ns|length) == 6 and all(.cpu_ns[], .wall_ns[]; . > 0)) and
+									all(range(6); . as $i |
+										$row.samples.cpu_ns[$i] == ([$row.components[].cpu_ns[$i]] | add / 3) and
+										$row.samples.wall_ns[$i] == ([$row.components[].wall_ns[$i]] | add / 3)))
+							' output.json > /dev/null
+						done
+						if ${self.packages.${system}.gold-probe}/bin/blip-mp-gold-probe passes 65 8 > output.json 2> stderr; then exit 1; fi
 						test ! -s output.json
 						mkdir -p "$out"
 					'';
