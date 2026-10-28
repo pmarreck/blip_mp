@@ -432,9 +432,17 @@
 						test ! -s stderr
 						# Two tiny products can fall within one CPU-clock accounting quantum.
 						for kind in schoolbook blocked mp_warm mp_cold blocked_tail paired_tail; do
-							${self.packages.${system}.multiplication-probe}/bin/blip-mp-multiplication-probe "$kind" two 64,128 128 > output.json 2> stderr
-							test ! -s stderr
-							jq -e --arg kind "$kind" '
+							if ! ${self.packages.${system}.multiplication-probe}/bin/blip-mp-multiplication-probe "$kind" two 64,128 128 > output.json 2> stderr; then
+								echo "multiplication probe failed: $kind two 64,128 128" >&2
+								cat stderr >&2
+								exit 1
+							fi
+							if test -s stderr; then
+								echo "multiplication probe emitted unexpected stderr: $kind" >&2
+								cat stderr >&2
+								exit 1
+							fi
+							if ! jq -e --arg kind "$kind" '
 								.schema == "performance-measurement/v1" and .correct == true and
 								.build_mode == "ReleaseFast" and .algorithm == $kind and .shape == "two" and
 								[.rows[].size] == [64,128] and [.rows[].longer_bytes] == [128,256] and
@@ -448,7 +456,11 @@
 											$row.samples.cpu_ns[$i] == (($row.pair.baseline_cpu_ns[$i] + $row.pair.candidate_cpu_ns[$i]) / 2) and
 											$row.samples.wall_ns[$i] == (($row.pair.baseline_wall_ns[$i] + $row.pair.candidate_wall_ns[$i]) / 2)))
 								else .method == "multiplication-gmp-verified-v1" and all(.rows[]; .pair == null) end)
-							' output.json > /dev/null
+							' output.json > /dev/null; then
+								echo "multiplication probe output failed validation: $kind" >&2
+								cat output.json >&2
+								exit 1
+							fi
 						done
 						if ${self.packages.${system}.multiplication-probe}/bin/blip-mp-multiplication-probe blocked two 0 2 > output.json 2> stderr; then
 							exit 1

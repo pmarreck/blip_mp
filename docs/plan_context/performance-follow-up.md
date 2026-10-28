@@ -1619,6 +1619,34 @@ preserves every process mean, sample range and timing verdict; configuration
 remains `profiling-division-selected-competitors.json` and method
 `division-selected-competitors-v1`. Public integration remains unchanged.
 
+### Measurement infrastructure follow-up
+
+The first corrected signed campaign used a logical run ID that, after the
+engine appended a case name, exceeded its 100-character record-ID limit.
+The shared engine rejected the history write, leaving no observation records
+or JSON report. That failed campaign supplies no retained timing evidence.
+Future invocations precheck the combined identifiers and use a shorter prefix.
+It is a storage failure, not a timing retry or baseline approval.
+
+Exact-commit CI for `92c2c6e64e1353cb50cf32ce65dd27f04b8856fb` separately
+failed `multiplication-probe-cli` after 182 seconds. The log was empty because
+the check captured the probe's stderr and suppressed the JSON assertion output.
+An exact-check reproduction with diagnostic capture passed once. A subsequent
+bounded Nix-sandbox campaign passed 500 repetitions of all six multiplication
+modes at 64/128-byte sizes and 128 iterations, including positive timing and
+paired-average JSON assertions. The original failure remains unexplained;
+these passes do not establish that it cannot recur.
+
+The CLI check now reports the failing mode and captured stderr on probe
+failure, unexpected stderr, or the JSON output on validation failure. Its
+timed work and assertions are unchanged. Future failures should distinguish
+a probe error from an output-contract failure instead of producing an empty
+log. These diagnostic runs are not arithmetic benchmark observations.
+
+The complete local suite passed with the diagnostic change in 93 seconds of
+mixed Nix preparation/check time. Production build and all-system evaluation
+passed. A fresh exact-commit CI result is still required.
+
 ### Exact-capacity remainder regression
 
 Reviewing the B-Z entry point exposed a separate single-byte-divisor bug. With
