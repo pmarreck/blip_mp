@@ -6,9 +6,9 @@ const Case = @import("division_competitors.zig").Case;
 const timing = @import("division_crossover.zig");
 const widths = [_]usize{64,65,8192,12288,16384,16385};
 const Geometry = enum { short_quotient, one_chunk_limit, two_chunk_start, balanced, long_dividend };
-const Method = enum { current, burnikel_ziegler, leading_block, short_quotient };
+const Method = enum { current, burnikel_ziegler, leading_block, short_quotient, short_carry };
 const methods = [2]Method{.current,.burnikel_ziegler};
-const Comparison = enum { public, leading, short, short_public };
+const Comparison = enum { public, leading, short, short_public, carry };
 const Options = struct { geometry: Geometry, sizes: [widths.len]usize, count: usize };
 
 fn parse(args: []const []const u8) !Options {
@@ -61,6 +61,7 @@ const Pool = struct {
 			.burnikel_ziegler => try Mp.divModBurnikelZiegler(&self.q,&self.r,&case.a,&case.b),
 			.leading_block => try Mp.divModBurnikelZieglerLeadingBlock(&self.q,&self.r,&case.a,&case.b),
 			.short_quotient => try Mp.divModBurnikelZieglerShortQuotient(&self.q,&self.r,&case.a,&case.b),
+			.short_carry => try Mp.divModBurnikelZieglerShortCarry(&self.q,&self.r,&case.a,&case.b),
 		}
 		if (!std.mem.eql(u8,self.q.bytes(),case.mq.bytes()) or !std.mem.eql(u8,self.r.bytes(),case.mr.bytes())) return error.IncorrectWork;
 	}
@@ -138,10 +139,15 @@ pub fn runShort(init: std.process.Init, args: []const []const u8, comptime again
 	return runPair(if (against_public) .short_public else .short,init,args);
 }
 
+pub fn runCarry(init: std.process.Init, args: []const []const u8) !void {
+	return runPair(.carry,init,args);
+}
+
 fn runPair(comptime comparison: Comparison, init: std.process.Init, args: []const []const u8) !void {
 	const pair: [2]Method = switch (comparison) {
 		.public => methods, .leading => .{.burnikel_ziegler,.leading_block},
 		.short => .{.leading_block,.short_quotient}, .short_public => .{.current,.short_quotient},
+		.carry => .{.short_quotient,.short_carry},
 	};
 	const options = try parse(args);
 	const Component = struct { method: []const u8, cpu_ns: [6]f64, wall_ns: [6]f64 };
@@ -174,6 +180,7 @@ fn runPair(comptime comparison: Comparison, init: std.process.Init, args: []cons
 		.method = switch (comparison) {
 			.public => "division-public-paired-v1", .leading => "division-leading-block-paired-v1",
 			.short => "division-short-quotient-paired-v1", .short_public => "division-short-public-paired-v1",
+			.carry => "division-short-carry-paired-v1",
 		}, .geometry = @tagName(options.geometry),
 		.cpu_clock = "CLOCK_PROCESS_CPUTIME_ID", .wall_clock = "CLOCK_MONOTONIC",
 		.seed_usage = "0xB2D151A5 + divisor_bytes*257 + index; four sign combinations crossed with eight normalization shifts; engine seed does not alter inputs",
@@ -182,6 +189,7 @@ fn runPair(comptime comparison: Comparison, init: std.process.Init, args: []cons
 			.leading => "explicit signed B-Z versus leading-block shortcut; magnitude byte widths; identical canonical BLIP input/output comparison adapters",
 			.short => "fixed leading-block B-Z versus short-quotient fallback; magnitude byte widths; identical canonical BLIP input/output comparison adapters",
 			.short_public => "current public signed division versus short-quotient B-Z; magnitude byte widths; identical canonical BLIP input/output comparison adapters",
+			.carry => "fixed short-quotient B-Z versus carried-remainder leaf selection; magnitude byte widths; identical canonical BLIP input/output comparison adapters",
 		},
 		.normalization = "six ABBA/BAAB half-pool samples; 32 verified calls per method/sample; primary averages both methods; no subtraction",
 		.verification = "GMP quotient/remainder magnitudes with truncated sign rules outside timing; full canonical-byte comparison on every call",

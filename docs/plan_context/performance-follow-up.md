@@ -1127,12 +1127,49 @@ loop already receives each remainder's significant length. A short carried
 remainder can imply a short quotient for the next block, even in a balanced or
 long division. Reuse that length to choose a leaf before recursive work, retain
 the current entry as a fixed comparator, and measure complete signed calls.
-This proposed internal shortcut has not yet been implemented or measured.
+The next experiment implements this internal shortcut with a fixed comparator.
 
 After selection, the complete native suite passed in 91 seconds of mixed Nix
 preparation/check time. The optimized production build and all-system evaluation
 also passed. The default entry now passes the same allocation-bound classifier
 as the measured candidate.
+
+### Short carried-remainder experiment
+
+`Mp.divModBurnikelZieglerShortCarry` retains the outer short-quotient fallback
+and selects the Knuth leaf inside the top-level block loop when the carried
+remainder has fewer than eight significant bytes. Normalization can turn a
+balanced `2n`-byte dividend into `2n+1` bytes; its first carried remainder then
+has only one byte. Recursing on the next padded block ignores that information.
+The candidate uses the remainder length already returned by the preceding
+division or subtraction. A zero carry requires trimming only the next low block.
+The default and explicit short-quotient entry remain unchanged during measurement.
+
+The failing-first resource check compares allocation counts with the fixed
+short-quotient implementation at 64, 65, 128 and 256 bytes. Dense balanced inputs
+that gain a normalization byte must allocate less; unshifted and odd-width
+controls retain their counts. Every result is compared with GMP, with exact
+quotient capacity, canaries and complete allocation cleanup. The placeholder
+failed the reduced-allocation assertion. A separate exact identity covers a
+highest block equal to the divisor, followed by zero and small blocks, producing
+a power-of-256 quotient and remainder 123. Signed boundaries, input aliases,
+allocation failures and the five-geometry corruption controls include the
+candidate. The complete suite passed in 87 seconds of mixed Nix preparation/check
+time; the optimized production build and all-system evaluation passed too.
+
+Two preceding CLI-check attempts stopped with `ClockFailed`. All 25 signed
+mode/geometry combinations subsequently passed outside the sandbox and under
+syscall tracing inside it; temporary raw-clock instrumentation also passed.
+The cause remains unestablished. Instrumentation was removed before the final
+suite, and failure context now identifies the mode and geometry. Clock checks
+remain strict; these diagnostic runs are not performance observations.
+
+`profiling-division-carry.json` pairs the fixed short-quotient entry with this
+candidate at the same four widths, five geometries and 1/12-CPU affinities as
+the preceding campaign. It retains 32 signed/normalization cases, six paired
+samples and five processes per cohort. GMP supplies references outside timing;
+this campaign does not time GMP. SIMD remains deferred while the experiment
+tests whether significant-length metadata avoids unnecessary recursive work.
 
 ### Exact-capacity remainder regression
 

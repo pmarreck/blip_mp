@@ -55,6 +55,7 @@ annotate=[
 	profiling-centered-fast.json = Paired Goldilocks common eight-byte BLIP header experiment
 	profiling-centered.json = Paired positive and centered signed-BLIP Goldilocks product measurements
 	profiling-division-boundary.json = Paired division controls around small and odd-divisor fallback boundaries
+	profiling-division-carry.json = Paired B-Z leaf selection from significant carried remainder lengths
 	profiling-division-competitors.json = Matched public BLIP, selected division kernels and GMP timing cohorts
 	profiling-division-cutoff.json = Paired four-byte versus 128-byte recursive division cutoffs
 	profiling-division-fallback.json = Paired byte versus chunk fallback measurements with recursive controls
