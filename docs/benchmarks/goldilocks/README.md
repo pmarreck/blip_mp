@@ -2,8 +2,8 @@
 
 This experiment follows the [blocked multiplication measurements](../storage-aware/RESEARCH.md).
 It compares three layouts with the same Goldilocks field arithmetic and canonical
-signed-BLIP residue codec. Production continues to select Stockham until measured
-evidence supports a change.
+signed-BLIP residue codec. The October 28 comparison supports selecting the fused
+layout at the existing production threshold; Stockham remains a measurement control.
 
 | Layout | Forward output / inverse input | Transform storage |
 |---|---|---|
@@ -26,8 +26,8 @@ access order could outweigh the saved codec work; that is a measurement question
 The experimental multiplication entry point accepts an empty Stockham scratch
 slice for either paired layout. Its transform buffers require `3*N` ten-byte
 slots, versus `4*N` for the control, including both twiddle tables. This describes
-the workspace contract, not measured resident memory or a production allocation
-change. SIMD work is deferred until the scalar layout comparison and generated
+the workspace contract. Production now omits the permutation allocation as well;
+resident memory and cold allocation time have not been measured. SIMD work is deferred until the scalar layout comparison and generated
 machine code establish the remaining bottleneck.
 
 ## Correctness controls
@@ -52,7 +52,7 @@ random and all-255 inputs. Paired calls receive no permutation scratch.
 
 The complete native suite, including 13,135 GMP comparisons, and the production
 build passed in 100 seconds. Mixed Nix preparation/check time was 99 seconds.
-Execution coverage is Linux x86_64; the new layouts remain experimental.
+Execution coverage is Linux x86_64; this was the initial experimental implementation.
 
 ## Initial generated-code inspection
 
@@ -67,7 +67,7 @@ storage through the red zone. Static references are not dynamic spill counts.
 This confirms that register pressure is a real concern, but establishes no
 timing result. Inspect the final measurement binary as well.
 
-## Next measurement
+## Measurement requirements
 
 Measure complete products and isolated forward/inverse passes in ReleaseFast,
 with Stockham, paired radix-2 and fused layouts in the same process. Preserve
@@ -114,3 +114,59 @@ inverse occupied 620 bytes; the fused inverse occupied 2178 bytes and reserved
 another 136 stack bytes, with stack traffic inside the transform. Neither
 inverse function contained packed SIMD arithmetic. These are compiler-output
 observations, not runtime instruction counts or performance results.
+
+## October 28 result and production selection
+
+Campaign `blip-mp-gold-layouts-20261028T051646Z-` measured commit
+`5ac7a7ad4699c81d2892ae684653e7a433719371`. Its source hash stayed
+`9bf3382d1a351958d66c7e42cc16f0e8665db4ef2a20266901143b78953c6353`
+throughout. The host used a Ryzen Threadripper 3990X, Linux 6.18, Zig 0.16.0
+ReleaseFast and GMP 6.3.0. The shared engine was pinned to
+`ecf713b81a74a51f76719bf9debc44fe23a0b331`. Admission took about 14 minutes;
+the admitted campaign ran about 119 seconds. No host settings changed.
+
+All 30 processes, including two five-process retries, verified their results.
+Both product cohorts and the one-CPU pass cohort were `UNBASELINED`: no accepted
+historical baseline exists. The 12-CPU pass cohort remained `INCONCLUSIVE` for
+sample variation after its single allowed retry. These are within-process
+layout comparisons, not green historical performance gates.
+
+| Operand bytes each | Fused CPU reduction, 1 CPU | Fused CPU reduction, 12 CPUs |
+|---:|---:|---:|
+| 1024 | 24.7% | 24.6% |
+| 4096 | 23.9% | 24.0% |
+| 16384 | 23.8% | 23.8% |
+| 65535 | 24.0% | 24.1% |
+| 65536 | 24.2% | 24.1% |
+| 65537 | 22.7% | 22.7% |
+| 100000 | 22.8% | 22.8% |
+
+Each table cell uses the median of 30 paired sample ratios from the final
+five-process attempt (the upper middle value for this even sample count).
+Every complete-product process mean favored fusion, including the retained
+retry attempt: the fused/Stockham ratios ranged from 0.664 to 0.816 across
+105 size/process observations. Paired radix-2 alone saved roughly 7–8% at the
+median, with one final-attempt process/size regression. The
+[summary records](layout-summary.jsonl) preserve component CPU/wall means,
+sample ratios, final-attempt process ratios and verdicts. Full attempts remain
+in the configured external performance history.
+
+The one-CPU isolated pass medians favored fusion by 22–24%. The inconclusive
+12-CPU pass result remains a limitation; it is not evidence for a historical
+gate pass. Complete-product evidence supports selecting fusion while retaining
+the 99999-byte threshold and all existing eligibility conditions. This does
+not establish a new crossover against Toom, a full public-call speedup, or a
+GMP timing win. GMP supplies correctness references outside the timed region.
+
+Production scratch now allocates four buffers totaling `3*N` ten-byte slots,
+down from five buffers totaling `4*N`. The allocation test first failed with
+five allocations, then checks exact capacity, reuse, growth and idempotent
+release. Allocation-failure controls cover both cache types. Public GMP checks
+use exact 99998-, 99999- and 100000-byte payloads, all four sign combinations
+and both operand-alias positions. The encoded-residue representation is unchanged.
+
+The final complete native suite passed in 98 seconds of mixed Nix preparation
+and checking, with 13,159 GMP comparisons. The production build and all-system
+evaluation also passed. This is executed Linux x86_64 coverage; evaluation alone
+does not establish runtime coverage on other platforms. The suite's previously
+recorded five-second execution target remains unmet.

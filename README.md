@@ -81,7 +81,10 @@ the unchanged nine-byte control stayed near zero at the median.
 
 `./bm --verified-goldilocks` compares Stockham, paired radix-2 and fused stages
 using [verified products and transform pairs](docs/benchmarks/goldilocks/README.md).
-The new FFT layouts remain experimental until their measured costs justify selection.
+The fused layout reduced complete-product CPU time by about 23–25% versus
+Stockham in the sampled sizes and is selected at the existing large-input
+threshold. This comparison establishes no new GMP crossover; the measurement
+notes retain the unbaselined and inconclusive cohort verdicts.
 
 Requires [Nix](https://nixos.org/) (handles the Zig 0.16.0 toolchain and GMP build for benchmarks).
 

@@ -56,8 +56,8 @@ pub const FFT_THRESHOLD: usize = 99999;
 // time we allocate; reused thereafter. If a different allocator is passed
 // later the cache transparently reallocates — but in practice every caller
 // uses the same `Mp.allocator` for its lifetime.
-const FftScratch = TransformScratch(fft.residue.slot_bytes);
-fn TransformScratch(comptime slot_bytes: usize) type {
+const FftScratch = TransformScratch(fft.residue.slot_bytes, true);
+fn TransformScratch(comptime slot_bytes: usize, comptime needs_stockham: bool) type {
 	return struct {
 		cached_N: usize = 0,
 		pa: []u8 = &.{},
@@ -76,7 +76,7 @@ fn TransformScratch(comptime slot_bytes: usize) type {
 			next.pb = try allocator.alloc(u8, N * slot_bytes);
 			next.tw_fwd = try allocator.alloc(u8, N / 2 * slot_bytes);
 			next.tw_inv = try allocator.alloc(u8, N / 2 * slot_bytes);
-			next.stockham = try allocator.alloc(u8, N * slot_bytes);
+			if (needs_stockham) next.stockham = try allocator.alloc(u8, N * slot_bytes);
 			next.cached_N = N;
 			self.releaseUnsafe();
 			self.* = next;
@@ -111,8 +111,8 @@ pub fn releaseFftScratch() void {
 }
 
 // ── Per-thread Goldilocks-NTT scratch cache (Phase 2) ─────────────────────────
-// Goldilocks keeps the same five encoded buffers, including Stockham scratch.
-const GoldFftScratch = TransformScratch(fft.gold_residue.slot_bytes);
+// The paired transforms need two data buffers and two half-length twiddle tables.
+const GoldFftScratch = TransformScratch(fft.gold_residue.slot_bytes, false);
 
 threadlocal var gold_fft_scratch: GoldFftScratch = .{};
 
@@ -121,10 +121,9 @@ pub fn releaseGoldFftScratch() void {
 	gold_fft_scratch.releaseUnsafe();
 }
 
-/// Goldilocks-NTT dispatch threshold. Below this operand byte length, the
-/// 30-bit single-prime NTT path or Toom-3 wins. Above this, Goldilocks's
-/// halved N + halved bandwidth pays off. Bench-tuned in Phase 2.
-pub const GOLD_FFT_THRESHOLD: usize = 99999; // gated off: see comment below
+/// Retained Goldilocks dispatch threshold for equal-length operands.
+/// The fused layout comparison does not establish a new Toom/GMP crossover.
+pub const GOLD_FFT_THRESHOLD: usize = 99999;
 // 2026-05-18 Phase 2 result: empirically loses to Toom-3 across all bench sizes
 // on aarch64. The bandwidth-escape model (Phase 1 projected 1.50× speedup) is
 // blocked by an architectural ceiling: Goldilocks's mulMod needs a u64×u64=u128
@@ -135,10 +134,11 @@ pub const GOLD_FFT_THRESHOLD: usize = 99999; // gated off: see comment below
 //   8K-bit mul:  Toom-3   7.5K ns  vs Goldilocks  33.5K ns  (4.26× SLOWER)
 //   16K-bit mul: Toom-3  23.7K ns  vs Goldilocks  72.0K ns  (3.04× SLOWER)
 //   32K-bit mul: Toom-3  96.5K ns  vs Goldilocks 155K ns    (1.60× SLOWER)
-// Trend says Goldilocks could win at larger sizes (the gap shrinks), but it
-// never crosses on the bench. Code retained: it cross-checks vs schoolbook for
-// all sizes (correctness validated); when x86_64 with AVX2 mulx becomes a
-// target where vectorized 64×64→128 IS available, this path can win there.
+// These historical Stockham measurements do not characterize the current fused
+// layout. The October x86_64 comparison found 23–25% lower complete-product CPU
+// time versus Stockham; see docs/benchmarks/goldilocks/README.md. Generated code
+// uses scalar BMI2 MULX, not packed SIMD multiplication. The high threshold is
+// reachable, and stays unchanged pending a new comparison with other backends.
 
 // ── Per-thread tier-3 mul scratch cache ──────────────────────────────────────
 //
@@ -3720,7 +3720,8 @@ pub fn mulRawBlip(
 		while (N_gold < need_digit_len) N_gold <<= 1;
 		try gold_fft_scratch.ensureCapacity(fft_alloc.?, N_gold);
 		@memset(scratch_r[0..r_len], 0);
-		_ = fft.goldMulMagnitudesWithScratch(
+		_ = fft.goldMulMagnitudesWithLayout(
+			.fused,
 			a_mag,
 			b_mag,
 			scratch_r[0..r_len],
@@ -3728,7 +3729,7 @@ pub fn mulRawBlip(
 			gold_fft_scratch.pb,
 			gold_fft_scratch.tw_fwd,
 			gold_fft_scratch.tw_inv,
-			gold_fft_scratch.stockham,
+			&.{},
 		);
 	} else if (can_fft_crt) {
 		_ = try fft.mulMagnitudesCRT(fft_alloc.?, a_mag, b_mag, scratch_r[0..r_len]);
@@ -6265,15 +6266,34 @@ test "byte division spans partial chunks and every normalization shift" {
 }
 
 test "FFT scratch growth remains releasable after allocation failure" {
-	const Case = struct {
-		fn run(allocator: std.mem.Allocator) !void {
-			var cache: FftScratch = .{};
-			defer cache.releaseUnsafe();
-			try cache.ensureCapacity(allocator, 16);
-			try cache.ensureCapacity(allocator, 32);
-		}
-	};
-	try std.testing.checkAllAllocationFailures(std.testing.allocator, Case.run, .{});
+	inline for (.{ FftScratch, GoldFftScratch }) |Scratch| {
+		const Case = struct {
+			fn run(allocator: std.mem.Allocator) !void {
+				var cache: Scratch = .{};
+				defer cache.releaseUnsafe();
+				try cache.ensureCapacity(allocator, 16);
+				try cache.ensureCapacity(allocator, 32);
+			}
+		};
+		try std.testing.checkAllAllocationFailures(std.testing.allocator, Case.run, .{});
+	}
+}
+
+test "Goldilocks scratch omits permutation storage and reuses capacity" {
+	var tracked = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+	var cache: GoldFftScratch = .{};
+	defer cache.releaseUnsafe();
+	try cache.ensureCapacity(tracked.allocator(), 16);
+	try std.testing.expectEqual(@as(usize, 4), tracked.allocations);
+	try std.testing.expectEqual(@as(usize, 3 * 16 * fft.gold_residue.slot_bytes), tracked.allocated_bytes - tracked.freed_bytes);
+	try std.testing.expectEqual(@as(usize, 0), cache.stockham.len);
+	try cache.ensureCapacity(tracked.allocator(), 8);
+	try std.testing.expectEqual(@as(usize, 4), tracked.allocations);
+	try cache.ensureCapacity(tracked.allocator(), 32);
+	try std.testing.expectEqual(@as(usize, 3 * 32 * fft.gold_residue.slot_bytes), tracked.allocated_bytes - tracked.freed_bytes);
+	cache.releaseUnsafe();
+	cache.releaseUnsafe();
+	try std.testing.expectEqual(tracked.allocated_bytes, tracked.freed_bytes);
 }
 
 test "Toom products across recursive boundaries preserve scratch canaries" {

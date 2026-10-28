@@ -1085,6 +1085,45 @@ pub fn main() !u8 {
 	}
 	std.debug.print("  PASS asymmetric public/aliasing products: 24 GMP comparisons\n", .{});
 
+	// Exact payload widths exercise both sides of the Goldilocks dispatch.
+	for ([_]usize{ 99998, 99999, 100000 }) |width| {
+		const encoded = try allocator.alloc(u8, width + 16);
+		defer allocator.free(encoded);
+		const header = try blip_mp.tier3.writeHeader(encoded, width);
+		const payload = encoded[header..][0..width];
+		for (0..4) |signs| {
+			for (0..2) |alias| {
+				rng.bytes(payload);
+				payload[width - 1] = 0x51;
+				try blip_a.setBytes(encoded[0 .. header + width]);
+				__gmpz_import(&gmp_a, width, -1, 1, 0, 0, payload.ptr);
+				rng.bytes(payload);
+				payload[width - 1] = 0x61;
+				try blip_b.setBytes(encoded[0 .. header + width]);
+				__gmpz_import(&gmp_b, width, -1, 1, 0, 0, payload.ptr);
+				if (signs & 1 != 0) {
+					try blip_mp.sign.neg(&blip_a, &blip_a);
+					__gmpz_neg(&gmp_a, &gmp_a);
+				}
+				if (signs & 2 != 0) {
+					try blip_mp.sign.neg(&blip_b, &blip_b);
+					__gmpz_neg(&gmp_b, &gmp_b);
+				}
+				try std.testing.expectEqual(width, blip_a.payload().len);
+				try std.testing.expectEqual(width, blip_b.payload().len);
+				__gmpz_mul(&gmp_r, &gmp_a, &gmp_b);
+				if (alias == 0) try blip_a.mul(&blip_a, &blip_b) else try blip_a.mul(&blip_b, &blip_a);
+				var got = try normalizeBlip(blip_a.bytes(), allocator);
+				defer got.deinit();
+				var expected = try normalizeGmp(&gmp_r, allocator);
+				defer expected.deinit();
+				if (got.sign != expected.sign or !std.mem.eql(u8, got.magnitude, expected.magnitude)) return error.GoldPublicProductMismatch;
+				total_checks += 1;
+			}
+		}
+	}
+	std.debug.print("  PASS Goldilocks public/sign/aliasing boundaries: 24 GMP comparisons\n", .{});
+
 	std.debug.print("\n=== Summary ===\n", .{});
 	std.debug.print("Total checks: {d}\n", .{total_checks});
 	std.debug.print("Failures:     {d}\n", .{total_failures});

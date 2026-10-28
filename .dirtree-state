@@ -18,6 +18,7 @@ annotate=[
 	docs/benchmarks/2026-09-27-process-times.json = Hyperfine CPU and wall times for complete benchmark before and after
 	docs/benchmarks/2026-09-27-process-times.txt = Human-readable hyperfine full benchmark output
 	docs/benchmarks/goldilocks/README.md = Paired/fused Goldilocks experiment and correctness evidence
+	docs/benchmarks/goldilocks/layout-summary.jsonl = Paired Goldilocks layout CPU and wall timing summaries
 	docs/benchmarks/shifted-residues = Shifted-residue benchmark samples, validation and measured conclusions
 	docs/benchmarks/storage-aware = Storage-aware FFT ablation samples and analysis
 	docs/benchmarks/storage-aware/RESEARCH.md = Recursive Toom and blocked multiplication results and correctness findings
