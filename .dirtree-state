@@ -44,6 +44,7 @@ annotate=[
 	docs/plan_context/roadmap-reconciliation.md = Current dispositions and evidence for unchecked historical roadmap tasks
 	profiling-centered-fast.json = Paired Goldilocks common eight-byte BLIP header experiment
 	profiling-centered.json = Paired positive and centered signed-BLIP Goldilocks product measurements
+	profiling-division-boundary.json = Paired division controls around small and odd-divisor fallback boundaries
 	profiling-division-paired.json = Identical-input Burnikel-Ziegler and Knuth division measurement cohorts
 	profiling-division.json = Verified division workloads with separate 1/12 CPU cohorts
 	profiling-goldilocks.json = Paired Goldilocks product and transform-pass timing cohorts
