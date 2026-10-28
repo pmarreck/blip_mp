@@ -278,7 +278,7 @@ cohorts remained unbaselined and three were inconclusive. No baseline was
 approved. The fixed 128-bit and 8192-bit operand pairs have no inverse; their
 timings measure the negative result path, not successful inversion.
 
-The 4096-bit pair does have an inverse. Selected-process mean CPU microseconds
+The nominal 4096-bit pair does have an inverse. Selected-process mean CPU microseconds
 per verified call are shown below, including result comparison overhead.
 Algorithms ran in separate cases, so host variation limits comparisons.
 
@@ -288,8 +288,8 @@ Algorithms ran in separate cases, so host variation limits comparisons.
 | Lehmer | 12 | 191.19 | 2 | Inconclusive |
 | Wider HGCD | 1 | 131.10 | 1 | Unbaselined |
 | Wider HGCD | 12 | 132.54 | 2 | Inconclusive |
-| Recursive HGCD | 1 | 132.34 | 1 | Unbaselined |
-| Recursive HGCD | 12 | 137.66 | 2 | Inconclusive |
+| Recursive entry, wider-HGCD fallback | 1 | 132.34 | 1 | Unbaselined |
+| Recursive entry, wider-HGCD fallback | 12 | 137.66 | 2 | Inconclusive |
 | Stein | 1 | 7885.17 | 1 | Unbaselined |
 | Stein | 12 | 8171.44 | 2 | Unbaselined |
 
@@ -299,6 +299,26 @@ The source digest stayed
 `f3ef329623ba01cb7ca7cd5aa667655eb96e455df23c1dd3aa428014860b1708`.
 GMP supplied correctness results outside timing; this campaign did not measure
 GMP's performance or justify changing production inverse dispatch thresholds.
+
+An October 28 width audit found that the historical generator sets the modulus's
+highest payload byte to `01xxxxxx`. Every modulus therefore has one fewer
+significant bit than its nominal payload capacity. In particular, the largest
+allowed recursive-entry fixture is 4095 bits, below that entry point's
+4096-bit recursive threshold. Every row labeled `recursive` in this campaign
+executes a fallback; none measures recursive HGCD performance. The table above
+now names that distinction explicitly.
+
+The probe now reports each row's `modulus_bits` alongside its unchanged nominal
+`size`. The CLI check failed before that field was added, and fixture tests
+assert the exact significant width at every historical size. This metadata
+addition preserves the inputs and timed work. A separate exact-width corpus
+at and above the recursive threshold is required before comparing recursive
+HGCD or changing its dispatch. Existing direct `hgcdRecursive` matrix tests
+exercise a different entry point and do not fill this measurement gap.
+
+The metadata correction passed the complete native suite in 132 seconds of
+mixed Nix preparation/check time, plus the production/probe build and all-system
+evaluation. It introduces no arithmetic or dispatch change.
 
 ## Division probes
 

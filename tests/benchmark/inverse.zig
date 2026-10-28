@@ -34,7 +34,7 @@ pub fn main(init: std.process.Init) !void {
 	defer blip.tier3.releaseMulScratch();
 	defer blip.tier3.releaseDivScratch();
 	defer blip.tier3.releaseVnScratch();
-	const Row = struct { size: usize, iterations: usize, inverse_exists: bool, samples: struct { cpu_ns: [5]f64, wall_ns: [5]f64 } };
+	const Row = struct { size: usize, modulus_bits: usize, iterations: usize, inverse_exists: bool, samples: struct { cpu_ns: [5]f64, wall_ns: [5]f64 } };
 	var rows: [widths.len]Row = undefined;
 	const now = @import("immediate_add.zig").now;
 	for (options.indexes[0..options.count], 0..) |index, row_index| {
@@ -44,7 +44,7 @@ pub fn main(init: std.process.Init) !void {
 		defer result.deinit();
 		try verify(&result, try run(options.algorithm, &result, &fixture), fixture.expected, fixture.has_inverse);
 		const iterations = repetitions[index];
-		rows[row_index] = .{ .size = widths[index], .iterations = iterations, .inverse_exists = fixture.has_inverse, .samples = undefined };
+		rows[row_index] = .{ .size = widths[index], .modulus_bits = fixture.m.bitLen(), .iterations = iterations, .inverse_exists = fixture.has_inverse, .samples = undefined };
 		for (&rows[row_index].samples.cpu_ns, &rows[row_index].samples.wall_ns) |*cpu, *wall| {
 			const wall_start = try now(.MONOTONIC);
 			const cpu_start = try now(.PROCESS_CPUTIME_ID);
@@ -64,6 +64,7 @@ pub fn main(init: std.process.Init) !void {
 		.schema = "performance-measurement/v1", .correct = true, .build_mode = "ReleaseFast",
 		.compiler = @import("builtin").zig_version_string, .method = "inverse-gmp-verified-v1",
 		.algorithm = @tagName(options.algorithm), .fixture_seed = "0xBABE_CAFE_F00D",
+		.size_definition = "nominal signed-payload bits; modulus_bits is the significant width used by algorithm dispatch",
 		.seed_usage = "fixed historical fixtures; engine seed does not alter inputs",
 		.cpu_clock = "CLOCK_PROCESS_CPUTIME_ID", .wall_clock = "CLOCK_MONOTONIC",
 		.normalization = "nanoseconds per inverse plus full GMP-result comparison; no subtraction",
@@ -197,6 +198,7 @@ test "every historical inverse fixture agrees with GMP for all bounded algorithm
 	for (widths) |bits| {
 		var fixture = try Fixture.init(std.testing.allocator, bits);
 		defer fixture.deinit();
+		try std.testing.expectEqual(bits - 1, fixture.m.bitLen());
 		for (std.enums.values(Algorithm)) |algorithm| {
 			if (algorithm == .recursive and bits > 4096) continue;
 			const ok = try run(algorithm, &result, &fixture);

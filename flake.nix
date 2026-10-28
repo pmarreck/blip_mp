@@ -244,6 +244,7 @@
 								.schema == "performance-measurement/v1" and .correct == true and
 								.build_mode == "ReleaseFast" and .algorithm == $algorithm and
 								[.rows[].size] == [64,96] and [.rows[].iterations] == [2000,1500] and
+								[.rows[].modulus_bits] == [63,95] and
 								all(.rows[]; (.samples.cpu_ns|length) == 5 and (.samples.wall_ns|length) == 5) and
 								all(.rows[].samples.cpu_ns[], .rows[].samples.wall_ns[]; . > 0)
 							' output.json > /dev/null
