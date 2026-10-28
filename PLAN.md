@@ -6,13 +6,13 @@ Purpose: [INTENT.md](INTENT.md). The [legacy roadmap](docs/plan_context/legacy-r
 
 - [x] Qualify longer fixed tiny-division batches after a reproduced non-advancing CPU clock; 500 native reproductions and the full suite pass, strict clock errors retained, changed methods versioned, underlying cause unresolved (context: docs/plan_context/performance-follow-up.md#tiny-division-clock-follow-up; done 2026-10-28 18:21 EDT; this commit).
 - [x] Measure guarded padding through signed wrappers; Answer: 6,145-byte cases save 11–12% CPU and 16,385-byte cases save 44–45%, while 12,290-byte cases gain only 1–2% with some process losses; all 55 processes correct, ten cohorts unbaselined, candidate stays experimental (context: docs/plan_context/performance-follow-up.md#guarded-signed-results; done 2026-10-28 18:26 EDT; this commit).
-- [ ] Qualify and run a direct guarded-kernel/public-BLIP/GMP comparison at sampled odd and aligned divisor widths, with fixed controls and complete result checks (context: docs/plan_context/performance-follow-up.md#guarded-signed-results).
+- [x] Qualify the direct public/fixed/guarded/GMP comparison with failing-first width, binding and CLI checks; full suite, production build and all-system evaluation pass (context: docs/plan_context/performance-follow-up.md#guarded-direct-comparison-qualification; done 2026-10-28 18:32 EDT; this commit).
+- [ ] Measure the direct guarded-kernel/public-BLIP/GMP comparison at sampled odd and aligned divisor widths, preserve all attempts and update benchmark documentation (context: docs/plan_context/performance-follow-up.md#guarded-direct-comparison-qualification).
 
 ## Follow-up and existing backlog
 
 
 
-- [x] Measure padding by odd recursion leaf and quotient gap; Answer: a candidate guard of leaf >=6 KiB and dividend >=2*divisor covers 8–52% median CPU savings in 36 cells, with one diagnostic process losing 0.5%; all 165 processes correct, 32 cohorts unbaselined, dispatch unchanged (context: docs/plan_context/performance-follow-up.md#padding-shape-results; done 2026-10-28 17:57 EDT; this commit).
 - [x] Qualify the guarded padding entry and signed wrapper against the fixed kernel; classifier, binding, alias/OOM, full suite, production build and all-system evaluation pass, normal divider unchanged (context: docs/plan_context/performance-follow-up.md#guarded-padding-qualification; done 2026-10-28 18:21 EDT; this commit).
 - [ ] Continue GMP performance work across operand sizes; measure FFT viability, recursive HGCD dependencies, division thresholds and small-divisor paths; hand assembly remains deferred per the May 18 record (context: docs/plan_context/legacy-roadmap.md).
 - [ ] Resolve strict unsigned-BLIP interoperability and conditional binary-base GMP float cross-validation requirements before implementation (context: docs/plan_context/legacy-roadmap.md).

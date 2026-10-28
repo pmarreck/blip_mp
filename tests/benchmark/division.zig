@@ -30,6 +30,7 @@ pub fn main(init: std.process.Init) !void {
 	if (args.len > 1 and std.mem.eql(u8,args[1],"carry")) return @import("division_public.zig").runCarry(init,args[2..]);
 	if (args.len > 1 and std.mem.eql(u8, args[1], "competitors")) return @import("division_competitors.zig").run(init, args[2..]);
 	if (args.len > 1 and std.mem.eql(u8, args[1], "selected-competitors")) return @import("division_competitors.zig").runSelected(init, args[2..]);
+	if (args.len > 1 and std.mem.eql(u8, args[1], "guarded-competitors")) return @import("division_competitors.zig").runGuarded(init, args[2..]);
 	if (args.len > 1 and std.mem.eql(u8,args[1],"geometry")) return @import("division_geometry.zig").run(init,args[2..]);
 	if (args.len > 1 and std.mem.eql(u8,args[1],"wide-quotient")) return @import("division_geometry.zig").runWide(init,args[2..]);
 	if (args.len > 1 and std.mem.eql(u8,args[1],"byte-padding")) return @import("division_geometry.zig").runPadding(init,args[2..]);

@@ -350,16 +350,21 @@
 							exit 1
 						fi
 						test ! -s output.json
-						for comparison in competitors selected-competitors; do
-						${self.packages.${system}.division-probe}/bin/blip-mp-division-probe "$comparison" 8,64 > competitors.json 2> stderr
+						for comparison in competitors selected-competitors guarded-competitors; do
+						if test "$comparison" = guarded-competitors; then sizes=64,6145; else sizes=8,64; fi
+						if ! ${self.packages.${system}.division-probe}/bin/blip-mp-division-probe "$comparison" "$sizes" > competitors.json 2> stderr; then
+							echo "division competitors failed: $comparison" >&2
+							cat stderr >&2
+							exit 1
+						fi
 						test ! -s stderr
-						jq -e --arg comparison "$comparison" '
+						jq -e --arg comparison "$comparison" --arg sizes "$sizes" '
 							.schema == "performance-measurement/v1" and .correct == true and
-							.method == (if $comparison == "competitors" then "division-native-competitors-v2" else "division-selected-competitors-v2" end) and .build_mode == "ReleaseFast" and
-							(.gmp_version|length) > 0 and [.rows[].size] == [8,64] and
+							.method == (if $comparison == "competitors" then "division-native-competitors-v2" elif $comparison == "selected-competitors" then "division-selected-competitors-v2" else "division-guarded-competitors-v1" end) and .build_mode == "ReleaseFast" and
+							(.gmp_version|length) > 0 and [.rows[].size] == ($sizes|split(",")|map(tonumber)) and
 							all(.rows[]; . as $row |
-								.fixture_count == 64 and .iterations == 16384 and .warmup_cases == 256 and
-								[.components[].method] == (if $comparison == "competitors" then ["public_blip","knuth","bz128","gmp"] else ["public_blip","knuth","selected_bz","gmp"] end) and
+								.fixture_count == 64 and .iterations == (if .size<=128 then 16384 else 64 end) and .warmup_cases == 256 and
+								[.components[].method] == (if $comparison == "competitors" then ["public_blip","knuth","bz128","gmp"] elif $comparison == "selected-competitors" then ["public_blip","knuth","selected_bz","gmp"] else ["public_blip","quotient_1024","guarded","gmp"] end) and
 								all(.samples[]; length == 8 and all(.[]; . > 0)) and
 								all(.components[]; (.cpu_ns|length) == 8 and (.wall_ns|length) == 8 and all(.cpu_ns[],.wall_ns[]; . > 0)) and
 								all(range(8); . as $i |

@@ -4,12 +4,51 @@ const blip = @import("blip_mp");
 const Mp = blip.Mp;
 const gmp = @import("gmp.zig");
 const widths = [_]usize{ 8,16,32,64,128,256,512,1024,2048,4096,8192,16384 };
-pub const Method = enum { public_blip, knuth, bz128, gmp, selected_bz, short_carry, wide_quotient, quotient_1024, padded };
+const guarded_widths = [_]usize{8,64,6145,8192,8194,12290,16384,16385};
+pub const Method = enum { public_blip, knuth, bz128, gmp, selected_bz, short_carry, wide_quotient, quotient_1024, padded, guarded };
 const original_methods = [4]Method{.public_blip,.knuth,.bz128,.gmp};
 const selected_methods = [4]Method{.public_blip,.knuth,.selected_bz,.gmp};
+const guarded_methods = [4]Method{.public_blip,.quotient_1024,.guarded,.gmp};
+const Comparison = enum { original, selected, guarded };
 const Timing = struct { cpu_ns: f64, wall_ns: f64 };
 const Sample = struct { cpu_ns: [4]f64, wall_ns: [4]f64 };
 const Options = struct { sizes: [widths.len]usize, count: usize };
+
+fn parseGuarded(args: []const []const u8) !Options { return parseWidths(&guarded_widths,args); }
+
+test "guarded competitors classify the full width domain" {
+	const allowed = [_]usize{8,64,6145,8192,8194,12290,16384,16385};
+	for (0..16400) |width| {
+		var buffer: [24]u8 = undefined;
+		const arg = try std.fmt.bufPrint(&buffer,"{d}",.{width});
+		const accepted = if (parseGuarded(&.{arg})) |options| blk: {
+			try std.testing.expectEqual(@as(usize,1),options.count);
+			try std.testing.expectEqual(width,options.sizes[0]); break :blk true;
+		} else |err| blk: { try std.testing.expectEqual(error.InvalidArguments,err); break :blk false; };
+		try std.testing.expectEqual(std.mem.indexOfScalar(usize,&allowed,width)!=null,accepted);
+	}
+	const options = try parseGuarded(&.{"8,64,6145,8192,8194,12290,16384,16385"});
+	try std.testing.expectEqualSlices(usize,&allowed,options.sizes[0..options.count]);
+	for ([_][]const u8{"","8,","8,8","64,8","-1","x","18446744073709551616"}) |arg| try std.testing.expectError(error.InvalidArguments,parseGuarded(&.{arg}));
+	try std.testing.expectError(error.InvalidArguments,parseGuarded(&.{}));
+	try std.testing.expectError(error.InvalidArguments,parseGuarded(&.{"8","64"}));
+}
+
+test "guarded competitor binds the padded kernel and checks full results" {
+	var allocated: [2]usize = undefined;
+	for ([_]Method{.padded,.guarded},0..) |method,mi| {
+		var counted = std.testing.FailingAllocator.init(std.testing.allocator,.{});
+		var fixture = try Fixture.init(counted.allocator(),6145,1);
+		const before = counted.allocated_bytes;
+		fixture.run(method,0) catch |err| { fixture.deinit(); return err; };
+		allocated[mi] = counted.allocated_bytes-before;
+		try fixture.corruptQuotient(0);
+		try std.testing.expectError(error.IncorrectWork,fixture.run(method,0));
+		fixture.deinit();
+		try std.testing.expectEqual(counted.allocated_bytes,counted.freed_bytes);
+	}
+	try std.testing.expectEqual(allocated[0],allocated[1]);
+}
 
 test "padding guard classifies odd-leaf multiples and dividend length boundaries" {
 	const limit = 65536;
@@ -180,12 +219,16 @@ test "padded divider keeps trivial cases ahead of scaling allocation" {
 }
 
 fn parse(args: []const []const u8) !Options {
+	return parseWidths(&widths,args);
+}
+
+fn parseWidths(allowed: []const usize, args: []const []const u8) !Options {
 	if (args.len != 1) return error.InvalidArguments;
 	var options: Options = .{ .sizes = undefined, .count = 0 };
 	var parts = std.mem.splitScalar(u8,args[0],',');
 	while (parts.next()) |part| {
 		const width = std.fmt.parseInt(usize,part,10) catch return error.InvalidArguments;
-		if (std.mem.indexOfScalar(usize,&widths,width) == null or options.count == widths.len) return error.InvalidArguments;
+		if (std.mem.indexOfScalar(usize,allowed,width) == null or options.count == options.sizes.len) return error.InvalidArguments;
 		if (options.count > 0 and width <= options.sizes[options.count-1]) return error.InvalidArguments;
 		options.sizes[options.count] = width;
 		options.count += 1;
@@ -489,7 +532,7 @@ pub const Fixture = struct {
 				gmp.__gmpz_tdiv_qr(&self.gq,&self.gr,&case.ga,&case.gb);
 				if (gmp.__gmpz_cmp(&self.gq,&case.gq) != 0 or gmp.__gmpz_cmp(&self.gr,&case.gr) != 0) return error.IncorrectWork;
 			},
-			.knuth, .bz128, .selected_bz, .short_carry, .wide_quotient, .quotient_1024, .padded => {
+			.knuth, .bz128, .selected_bz, .short_carry, .wide_quotient, .quotient_1024, .padded, .guarded => {
 				if (!self.scratch.reset(.retain_capacity)) return error.OutOfMemory;
 				@memset(self.quotient,0xa5); @memset(self.remainder,0xa5);
 				const q = self.quotient[1..self.quotient.len-1]; const r = self.remainder[1..self.remainder.len-1];
@@ -504,6 +547,9 @@ pub const Fixture = struct {
 					break :blk .{got.q_len,got.r_len};
 				} else if (method == .wide_quotient) blk: {
 					const got = try blip.tier3.divModBurnikelZieglerWideQuotient(case.dividend,case.dividend.len,case.divisor,case.divisor.len,q,r,self.scratch.allocator());
+					break :blk .{got.q_len,got.r_len};
+				} else if (method == .guarded) blk: {
+					const got = try blip.tier3.divModBurnikelZieglerGuarded(case.dividend,case.dividend.len,case.divisor,case.divisor.len,q,r,self.scratch.allocator());
 					break :blk .{got.q_len,got.r_len};
 				} else if (method == .quotient_1024) blk: {
 					const got = try blip.tier3.divModBurnikelZieglerQuotient1024(case.dividend,case.dividend.len,case.divisor,case.divisor.len,q,r,self.scratch.allocator());
@@ -601,16 +647,20 @@ pub fn nativeBatch(fixture: *Fixture, method: Method, start: usize, count: usize
 }
 
 pub fn run(init: std.process.Init, args: []const []const u8) !void {
-	return runWith(false,init,args);
+	return runWith(.original,init,args);
 }
 
 pub fn runSelected(init: std.process.Init, args: []const []const u8) !void {
-	return runWith(true,init,args);
+	return runWith(.selected,init,args);
 }
 
-fn runWith(comptime selected: bool, init: std.process.Init, args: []const []const u8) !void {
-	const methods = if (selected) selected_methods else original_methods;
-	const options = try parse(args);
+pub fn runGuarded(init: std.process.Init, args: []const []const u8) !void {
+	return runWith(.guarded,init,args);
+}
+
+fn runWith(comptime comparison: Comparison, init: std.process.Init, args: []const []const u8) !void {
+	const methods = switch (comparison) { .original=>original_methods, .selected=>selected_methods, .guarded=>guarded_methods };
+	const options = if (comparison==.guarded) try parseGuarded(args) else try parse(args);
 	const count = 64;
 	const Component = struct { method: []const u8, cpu_ns: [8]f64, wall_ns: [8]f64 };
 	const Row = struct {
@@ -643,7 +693,7 @@ fn runWith(comptime selected: bool, init: std.process.Init, args: []const []cons
 	const report = .{
 		.schema = "performance-measurement/v1", .correct = true, .build_mode = "ReleaseFast",
 		.compiler = @import("builtin").zig_version_string, .gmp_version = std.mem.span(gmp.__gmp_version),
-		.method = if (selected) "division-selected-competitors-v2" else "division-native-competitors-v2",
+		.method = switch (comparison) { .original=>"division-native-competitors-v2", .selected=>"division-selected-competitors-v2", .guarded=>"division-guarded-competitors-v1" },
 		.cpu_clock = "CLOCK_PROCESS_CPUTIME_ID", .wall_clock = "CLOCK_MONOTONIC",
 		.seed_usage = "0xB2D151A5 + divisor_bytes*257 + case_index; eight normalization shifts; engine seed does not alter inputs",
 		.normalization = "rotating ABCDDCBA half-pool batches; eight samples; 256 repeats at widths <=128, otherwise one; primary averages four methods per operation; no subtraction",

@@ -1942,6 +1942,37 @@ remained stable and the probe SHA-256 was
 The Linux x86_64 / Threadripper 3990X / Zig 0.16.0 ReleaseFast / GMP 6.3.0
 configuration is unchanged. Exact-commit CI passed in 211 seconds.
 
+### Guarded direct comparison qualification
+
+The `guarded-competitors` mode times public BLIP, the fixed quotient-1024
+byte kernel, the guarded byte kernel and ordinary GMP on identical positive
+2:1 operands. `profiling-division-guarded-competitors.json` selects divisor
+widths 6,145, 8,192, 8,194, 12,290, 16,384 and 16,385 bytes, retaining aligned
+and excluded controls alongside the padded cases. Five fresh processes run
+in each 1-CPU and 12-CPU cohort. The method is
+`division-guarded-competitors-v1`.
+
+This retains the existing 64-fixture, eight-normalization-shift corpus,
+256-call warmup and eight rotating ABCDDCBA samples. Each method visits all
+64 cases per sample at these large widths. Full results are checked on every
+call. Public BLIP compares canonical encodings, byte kernels compare quotient
+and remainder magnitudes plus canaries, and GMP uses `mpz_cmp`; those adapter
+costs remain included and differ between representations.
+
+The new width classifier failed against a rejecting placeholder. A deliberately
+miswired guarded method returned correct arithmetic through the fixed kernel,
+but failed the allocation-based binding control against the padded kernel at
+6,145 bytes. The CLI separately failed on the missing mode. Its checks now
+exercise both 64-byte and 6,145-byte divisors, including component identities,
+work counts, sample dimensions and normalization. Arithmetic dispatch is
+unchanged.
+
+The complete suite passed in 94 seconds of mixed Nix preparation/check time,
+with the unit/C-API build phase accounting for 91 seconds including compilation
+and execution. The production build and all-system evaluation passed. This
+qualifies the measurement method; it does not establish execution-only test
+latency or a new performance result.
+
 ### Tiny division clock follow-up
 
 The first complete guarded-padding suite failed on a non-advancing process CPU
