@@ -4,15 +4,14 @@ Purpose: [INTENT.md](INTENT.md). The [legacy roadmap](docs/plan_context/legacy-r
 
 ## Current bounded milestone
 
+- [x] Enable the native-sized blocked tail after paired medians show 14–18% gains and a near-zero nine-byte fallback; retain the padded control and pass the complete native suite/build (context: docs/benchmarks/storage-aware/RESEARCH.md; done 2026-10-28 00:53 EDT; this commit).
 - [x] Add ABBA paired tail measurements with injected timing/error controls and full CLI checks; reproduce and fix the two-product CLI clock failure; pass full native tests/build and all-system evaluation (context: docs/benchmarks/storage-aware/RESEARCH.md; done 2026-10-28 00:44 EDT; this commit).
 - [x] Add a byte-direct register-sized tail candidate with the padded kernel retained; pass native-width/carry/zero/canary and GMP controls, the full native suite/build and all-system evaluation (context: docs/benchmarks/storage-aware/RESEARCH.md; done 2026-10-28 00:28 EDT; this commit).
 - [x] Measure 24 multiplication shapes across four methods and 1/12-CPU cohorts: all 315 processes verify, 42 cases are unbaselined and six inconclusive; preserve boundary wins, padded-tail cost and unresolved allocation timing modes (context: docs/benchmarks/storage-aware/RESEARCH.md; done 2026-10-28 00:20 EDT; this commit).
-- [x] Add the GMP-verified multiplication probe, dispatch-boundary and wider-ratio cohorts, cold/warm allocation controls, CLI routing and complete-suite/CI integration; pass full native tests/build and all-system evaluation (context: docs/benchmarks/storage-aware/RESEARCH.md; done 2026-10-28 00:09 EDT; this commit).
 
 ## Follow-up and existing backlog
 
 
-- [ ] Complete paired ABBA final-block measurements after the separate-process nine-byte control proved inconclusive; require eligible-tail gains and a stable fallback before production selection (context: docs/benchmarks/storage-aware/RESEARCH.md).
 - [ ] Continue fused Goldilocks, sparse/truncated FFT and Montgomery experiments in ranked order after the blocked-product measurements (context: docs/benchmarks/storage-aware/RESEARCH.md).
 
 - [ ] Profile remaining non-FFT multiplication/powm regressions; the initial FFT overhead is partly recovered by a80073f (evidence: RESULTS.md).

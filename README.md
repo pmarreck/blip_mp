@@ -75,6 +75,9 @@ identical inputs around the 2:1 dispatch boundary and at 4:1, 8:1 and 16:1 ratio
 It also compares public calls with reused and freshly allocated result/scratch
 buffers. Every product is checked against GMP. See the
 [measurement method](docs/benchmarks/storage-aware/RESEARCH.md#verified-crossover-and-allocation-probe).
+The [paired final-block experiment](docs/benchmarks/storage-aware/RESEARCH.md#paired-tail-result-and-production-selection)
+measured roughly 14–18% less CPU time for the sampled one- and eight-byte tails;
+the unchanged nine-byte control stayed near zero at the median.
 
 Requires [Nix](https://nixos.org/) (handles the Zig 0.16.0 toolchain and GMP build for benchmarks).
 

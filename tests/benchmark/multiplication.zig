@@ -239,8 +239,8 @@ pub const Fixture = struct {
 			.schoolbook, .blocked, .blocked_tail => {
 				switch (kind) {
 					.schoolbook => blip.tier3.mulMagnitudes(self.a, self.b, self.out),
-					.blocked => blip.tier3.mulBlocked(self.a, self.b, self.out, self.scratch),
-					.blocked_tail => blip.tier3.mulBlockedShortTail(self.a, self.b, self.out, self.scratch),
+					.blocked => blip.tier3.mulBlockedPadded(self.a, self.b, self.out, self.scratch),
+					.blocked_tail => blip.tier3.mulBlocked(self.a, self.b, self.out, self.scratch),
 					else => unreachable,
 				}
 				if (!std.mem.eql(u8, std.mem.trimEnd(u8, self.out, &.{0}), self.expected)) return error.IncorrectWork;

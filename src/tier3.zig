@@ -3613,12 +3613,12 @@ pub fn blockedScratchNeed(short_len: usize) usize {
 /// Multiply unequal magnitudes in balanced blocks; a and b may be reversed.
 /// Inputs, output and scratch must not overlap. Output needs a.len+b.len bytes.
 pub fn mulBlocked(a: []const u8, b: []const u8, out: []u8, scratch: []u8) void {
-	mulBlockedImpl(false, a, b, out, scratch);
+	mulBlockedImpl(true, a, b, out, scratch);
 }
 
-/// Experimental blocked product with a native-register-sized final block.
-pub fn mulBlockedShortTail(a: []const u8, b: []const u8, out: []u8, scratch: []u8) void {
-	mulBlockedImpl(true, a, b, out, scratch);
+/// Padded final-block control retained for reproducible comparisons.
+pub fn mulBlockedPadded(a: []const u8, b: []const u8, out: []u8, scratch: []u8) void {
+	mulBlockedImpl(false, a, b, out, scratch);
 }
 
 fn mulBlockedImpl(comptime short_tail: bool, a: []const u8, b: []const u8, out: []u8, scratch: []u8) void {
@@ -6373,7 +6373,7 @@ test "blocked short tails preserve products and bounds across native-width edges
 			for (0..2) |reverse| {
 				@memset(actual, 0xa5);
 				@memset(work, 0xa5);
-				mulBlockedShortTail(if (reverse == 0) a else b, if (reverse == 0) b else a, actual[1..][0..expected.len], work[1 .. work.len - 1]);
+				mulBlocked(if (reverse == 0) a else b, if (reverse == 0) b else a, actual[1..][0..expected.len], work[1 .. work.len - 1]);
 				try std.testing.expectEqualSlices(u8, expected, actual[1..][0..expected.len]);
 				try std.testing.expectEqual(@as(u8, 0xa5), actual[0]);
 				try std.testing.expectEqual(@as(u8, 0xa5), actual[actual.len - 1]);

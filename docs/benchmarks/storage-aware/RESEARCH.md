@@ -220,13 +220,13 @@ from this campaign.
 
 ## Register-sized tail candidate
 
-`mulBlockedShortTail` retains the same byte-buffer workspace and balanced full
+The short-tail candidate retains the same byte-buffer workspace and balanced full
 blocks as `mulBlocked`. For a final block of one through eight bytes, with a
 shorter operand of at least eight bytes, it reads one temporary `u64` factor
 and calls `mulMagnitudeByU64`. Only the returned significant product bytes are
 added to the result. A zero factor therefore adds no stale workspace bytes.
-Larger tails keep the padded balanced path. Production dispatch still uses
-the original padded implementation while this candidate is measured.
+Larger tails keep the padded balanced path. Production initially kept the
+original padded implementation while this candidate was measured.
 
 The focused ReleaseSafe controls compare dense random, all-255 and zero-tail
 inputs in both operand orders, with exact output/scratch canaries, across shorter
@@ -244,7 +244,7 @@ separate 1/12-CPU affinity cohorts. No baseline is approved by running it.
 
 The complete native suite and production build passed in 125 seconds combined,
 with 124 seconds of mixed Nix preparation/check time. All-system evaluation
-passed. The candidate remains separate from production selection until measured.
+passed. Production selection followed the paired experiment below.
 
 The first campaign, `blip-mp-short-tail-20261028T042949Z-`, completed 80
 processes at 04:30:03–04:30:38 UTC, including four automatic retries. Every
@@ -279,3 +279,40 @@ and their relationship to the primary samples.
 The paired adapter's full native suite and production build passed in 89 seconds,
 including 87 seconds of mixed Nix preparation/check time. All-system evaluation
 passed; execution coverage remains Linux x86_64.
+
+## Paired tail result and production selection
+
+Campaign `blip-mp-paired-tail-20261028T044541Z-` waited about three minutes for
+admission, then recorded six cases at 04:49:02–04:49:49 UTC. All 35 processes,
+including one five-process retry, verified their products. Every case finished
+unbaselined; no historical baseline was approved. The source digest stayed
+`965674a9e6d867cbdba5b0ecae2a57d78160e003f71d3b0042fe3b3309f7a6c7`.
+
+The [paired summary](paired-tail-summary.jsonl) retains component timings,
+selected-sample ratios, all-process sample-ratio ranges and each process's
+mean ratio. The following ranges are median per-sample CPU reductions across
+the six shorter lengths, using all five processes of each final attempt.
+
+| Final block | One CPU allowed | 12 CPUs allowed |
+|---|---:|---:|
+| One byte | 14.2–17.8% | 14.3–17.9% |
+| Eight bytes | 14.3–17.9% | 13.9–17.8% |
+| Nine bytes, unchanged fallback | -0.3–0.0% | -0.1–0.1% |
+
+Every eligible-tail process mean favored the candidate, including the noisier
+12-CPU eight-byte cohort. Individual fallback process means still ranged from
+about 3.1% faster to 4.3% slower; pairing does not remove all interference.
+Its near-zero medians support attributing the repeatable eligible-tail gains
+to the reduced final-block work. These are kernel comparisons including full
+result verification, not new GMP-relative speed claims or evidence for every
+operand shape and platform.
+
+Production `mulBlocked` now uses the measured shortcut. `mulBlockedPadded`
+retains the old path; the probe's `blocked` label continues to mean that padded
+control, while `blocked_tail` selects production. Existing public dispatch
+thresholds and workspace bounds are unchanged. The native-width/carry/zero/
+canary tests now exercise the production entry point directly; public signed,
+aliased and GMP comparisons remain in the complete suite.
+
+After selection, the complete native suite and production build passed in
+127 seconds, including 126 seconds of mixed Nix preparation/check time.
