@@ -3996,6 +3996,81 @@ pub fn montMul(
 	montReduceCios(scratch, m, m_inv_neg, out);
 }
 
+/// Montgomery square using the existing symmetric byte-buffer product.
+/// Reduced input and odd modulus have equal, nonzero multiples-of-eight lengths.
+/// Output may alias the input; scratch must be disjoint and hold 2*m.len+8 bytes.
+pub fn montSquare(a: []const u8, m: []const u8, m_inv_neg: u64, out: []u8, scratch: []u8) void {
+	std.debug.assert(m.len != 0 and m.len % 8 == 0);
+	std.debug.assert(a.len == m.len and out.len == m.len);
+	std.debug.assert(scratch.len >= 2 * m.len + 8);
+	squareMagnitudesU64(a, scratch[0 .. 2 * m.len]);
+	@memset(scratch[2 * m.len .. 2 * m.len + 8], 0);
+	montReduceCios(scratch, m, m_inv_neg, out);
+}
+
+test "Montgomery square matches GMP with dirty scratch, unaligned buffers and aliasing" {
+	const gmp = @import("gmp_test_support");
+	var gm: gmp.Z = undefined; gmp.__gmpz_init(&gm); defer gmp.__gmpz_clear(&gm);
+	var ga: gmp.Z = undefined; gmp.__gmpz_init(&ga); defer gmp.__gmpz_clear(&ga);
+	var ri: gmp.Z = undefined; gmp.__gmpz_init(&ri); defer gmp.__gmpz_clear(&ri);
+	var gr: gmp.Z = undefined; gmp.__gmpz_init(&gr); defer gmp.__gmpz_clear(&gr);
+	var quotient: gmp.Z = undefined; gmp.__gmpz_init(&quotient); defer gmp.__gmpz_clear(&quotient);
+	var rng = std.Random.DefaultPrng.init(0x5a7a_2026);
+	const allocator = testing.allocator;
+	for ([_]usize{ 8, 16, 24, 32, 64, 128, 256, 384, 512 }) |width| {
+		const m = try allocator.alloc(u8, width); defer allocator.free(m);
+		const input = try allocator.alloc(u8, width + 2); defer allocator.free(input);
+		const output = try allocator.alloc(u8, width + 2); defer allocator.free(output);
+		const workspace = try allocator.alloc(u8, 2 * width + 10); defer allocator.free(workspace);
+		const expected = try allocator.alloc(u8, width); defer allocator.free(expected);
+		const radix = try allocator.alloc(u8, width + 1); defer allocator.free(radix);
+		@memset(radix, 0); radix[width] = 1;
+		const a = input[1 .. width + 1];
+		const out = output[1 .. width + 1];
+		const scratch = workspace[1 .. 2 * width + 9];
+		for (0..4) |modulus_pattern| {
+			rng.random().bytes(m); m[0] |= 1;
+			switch (modulus_pattern) {
+				0 => @memset(m, 255),
+				1 => { @memset(m, 0); m[0] = 1; m[width - 1] = 128; },
+				2 => m[width - 1] = 1,
+				else => m[width - 1] |= 128,
+			}
+			gmp.__gmpz_import(&gm, width, -1, 1, 0, 0, m.ptr);
+			gmp.__gmpz_import(&ri, radix.len, -1, 1, 0, 0, radix.ptr);
+			try testing.expectEqual(@as(c_int, 1), gmp.__gmpz_invert(&ri, &ri, &gm));
+			for (0..4) |pattern| {
+				@memset(input, 0xa5);
+				switch (pattern) {
+					0 => { rng.random().bytes(a); a[width - 1] %= m[width - 1]; },
+					1 => { @memcpy(a, m); a[0] -= 1; },
+					2 => @memset(a, 0),
+					else => { @memset(a, 0); a[0] = 1; },
+				}
+				gmp.__gmpz_import(&ga, width, -1, 1, 0, 0, a.ptr);
+				gmp.__gmpz_mul(&gr, &ga, &ga);
+				gmp.__gmpz_mul(&gr, &gr, &ri);
+				gmp.__gmpz_tdiv_qr(&quotient, &gr, &gr, &gm);
+				@memset(expected, 0);
+				var count: usize = 0;
+				_ = gmp.__gmpz_export(expected.ptr, &count, -1, 1, 0, 0, &gr);
+				for (0..2) |alias| {
+					@memset(output, 0xa5); @memset(workspace, 0xa5);
+					const result = if (alias == 0) out else a;
+					montSquare(a, m, modInvNeg64(byte_chunks.read(m, 0)), result, scratch);
+					try testing.expectEqualSlices(u8, expected, result);
+					try testing.expectEqual(@as(u8, 0xa5), input[0]);
+					try testing.expectEqual(@as(u8, 0xa5), input[width + 1]);
+					try testing.expectEqual(@as(u8, 0xa5), output[0]);
+					try testing.expectEqual(@as(u8, 0xa5), output[width + 1]);
+					try testing.expectEqual(@as(u8, 0xa5), workspace[0]);
+					try testing.expectEqual(@as(u8, 0xa5), workspace[2 * width + 9]);
+				}
+			}
+		}
+	}
+}
+
 /// Copy magnitude bytes with zero extension, truncating to output capacity.
 pub fn copyMagnitudePadded(bytes: []const u8, out: []u8) void {
 	@memset(out, 0);

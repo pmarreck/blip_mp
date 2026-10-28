@@ -5,12 +5,27 @@ const Mp = blip.Mp;
 const gmp = @import("gmp.zig");
 const legacy = @import("blip_mp_bench.zig");
 const widths = [_]usize{ 512, 1024, 2048, 3072 };
-const Options = struct { sizes: [widths.len]usize, count: usize };
+const Options = struct { sizes: [widths.len]usize, count: usize, paired: bool = false };
+
+const Method = enum { general, symmetric };
+const PairSample = struct { cpu_ns: [2]f64, wall_ns: [2]f64 };
+fn pairedSample(work: anytype, comptime batch: anytype, count: usize, round: usize) !PairSample {
+	if (count == 0 or count % 2 != 0) return error.InvalidArguments;
+	var result: PairSample = .{ .cpu_ns = .{0,0}, .wall_ns = .{0,0} };
+	for ([_]usize{0,1,1,0}, 0..) |position, visit| {
+		const method = (position + round % 2) % 2;
+		const timing = try batch(work, @as(Method, @enumFromInt(method)), if (visit < 2) 0 else count / 2, count / 2);
+		result.cpu_ns[method] += timing.cpu_ns / 2;
+		result.wall_ns[method] += timing.wall_ns / 2;
+	}
+	return result;
+}
 
 fn parse(args: []const []const u8) !Options {
-	if (args.len != 1) return error.InvalidArguments;
-	var options: Options = .{ .sizes = undefined, .count = 0 };
-	var values = std.mem.splitScalar(u8, args[0], ',');
+	const paired = args.len == 2 and std.mem.eql(u8, args[0], "paired");
+	if (args.len != 1 and !paired) return error.InvalidArguments;
+	var options: Options = .{ .sizes = undefined, .count = 0, .paired = paired };
+	var values = std.mem.splitScalar(u8, args[args.len - 1], ',');
 	while (values.next()) |value| {
 		const bits = std.fmt.parseInt(usize, value, 10) catch return error.InvalidArguments;
 		if (std.mem.indexOfScalar(usize, &widths, bits) == null or options.count == widths.len) return error.InvalidArguments;
@@ -27,26 +42,45 @@ pub fn main(init: std.process.Init) !void {
 	}
 	const args = try init.minimal.args.toSlice(init.arena.allocator());
 	const options = try parse(args[1..]);
-	const Row = struct { size: usize, iterations: usize = 256, fixture_count: usize = 256, warmup_cases: usize = 256, samples: struct { cpu_ns: [5]f64, wall_ns: [5]f64 } };
+	const Component = struct { method: []const u8, cpu_ns: [5]f64, wall_ns: [5]f64 };
+	const Row = struct { size: usize, iterations: usize = 256, fixture_count: usize = 256, warmup_cases: usize = 256, samples: struct { cpu_ns: [5]f64, wall_ns: [5]f64 }, components: ?[2]Component = null };
 	var rows: [widths.len]Row = undefined;
 	for (options.sizes[0..options.count], 0..) |bits, index| {
 		var fixture = try Fixture.init(std.heap.c_allocator, bits, 256);
 		defer fixture.deinit();
 		for (0..fixture.cases.len) |i| try fixture.run(i);
 		var row: Row = .{ .size = bits, .samples = undefined };
-		var clock: NativeClock = .{};
-		for (&row.samples.cpu_ns, &row.samples.wall_ns) |*cpu, *wall| {
-			const timing = try sample(&fixture, &clock, fixture.cases.len);
-			cpu.* = timing.cpu_ns; wall.* = timing.wall_ns;
+		if (options.paired) {
+			for (0..fixture.cases.len) |i| try fixture.runWith(.symmetric, i);
+			row.warmup_cases = 512;
+			row.components = .{
+				.{ .method = "general", .cpu_ns = undefined, .wall_ns = undefined },
+				.{ .method = "symmetric", .cpu_ns = undefined, .wall_ns = undefined },
+			};
+			for (0..5) |round| {
+				const timing = try pairedSample(&fixture, timedPairedBatch, fixture.cases.len, round);
+				for (&row.components.?, 0..) |*component, method| {
+					component.cpu_ns[round] = timing.cpu_ns[method];
+					component.wall_ns[round] = timing.wall_ns[method];
+				}
+				row.samples.cpu_ns[round] = (timing.cpu_ns[0] + timing.cpu_ns[1]) / 2;
+				row.samples.wall_ns[round] = (timing.wall_ns[0] + timing.wall_ns[1]) / 2;
+			}
+		} else {
+			var clock: NativeClock = .{};
+			for (&row.samples.cpu_ns, &row.samples.wall_ns) |*cpu, *wall| {
+				const timing = try sample(&fixture, &clock, fixture.cases.len);
+				cpu.* = timing.cpu_ns; wall.* = timing.wall_ns;
+			}
 		}
 		rows[index] = row;
 	}
 	const report = .{
 		.schema = "performance-measurement/v1", .correct = true, .build_mode = "ReleaseFast",
-		.compiler = @import("builtin").zig_version_string, .method = "powm-gmp-verified-v1",
+		.compiler = @import("builtin").zig_version_string, .method = if (options.paired) "powm-paired-squaring-v1" else "powm-gmp-verified-v1",
 		.cpu_clock = "CLOCK_PROCESS_CPUTIME_ID", .wall_clock = "CLOCK_MONOTONIC",
 		.seed_usage = "retained seeds 0xBA5E+i, 0x77+i, 0x70D+i for base/exponent/modulus; engine seed does not alter inputs",
-		.normalization = "nanoseconds per Mp.powm plus full GMP-derived result comparison; one complete 256-case pool per sample; no subtraction",
+		.normalization = if (options.paired) "rotating ABBA/BAAB half-pool batches; 256 verified public calls per method per sample; primary averages both methods; no subtraction" else "nanoseconds per Mp.powm plus full GMP-derived result comparison; one complete 256-case pool per sample; no subtraction",
 		.operation = "positive base and exponent using retained byte-width distributions; odd modulus; public setup and reduction included",
 		.allocator_coverage = "c_allocator; fixtures and GMP references outside timing; reused output; arithmetic allocations included",
 		.rows = rows[0..options.count],
@@ -60,6 +94,16 @@ const Timing = struct { cpu_ns: f64, wall_ns: f64 };
 const NativeClock = struct {
 	fn read(_: *@This(), kind: std.c.CLOCK) !u64 { return @import("immediate_add.zig").now(kind); }
 };
+
+fn timedPairedBatch(fixture: *Fixture, method: Method, start: usize, count: usize) !Timing {
+	const Work = struct {
+		fixture: *Fixture, method: Method, start: usize,
+		fn run(self: *@This(), index: usize) !void { return self.fixture.runWith(self.method, self.start + index); }
+	};
+	var work: Work = .{ .fixture = fixture, .method = method, .start = start };
+	var clock: NativeClock = .{};
+	return sample(&work, &clock, count);
+}
 fn sample(work: anytype, clock: anytype, count: usize) !Timing {
 	if (count == 0) return error.InvalidArguments;
 	const wall_start = try clock.read(.MONOTONIC);
@@ -134,8 +178,14 @@ const Fixture = struct {
 		return .{ .allocator = allocator, .cases = cases, .output = Mp.init(allocator) };
 	}
 	fn run(self: *@This(), index: usize) !void {
+		return self.runWith(.general, index);
+	}
+	fn runWith(self: *@This(), method: Method, index: usize) !void {
 		const case = &self.cases[index];
-		try Mp.powm(&self.output, &case.a, &case.exponent, &case.modulus);
+		switch (method) {
+			.general => try Mp.powm(&self.output, &case.a, &case.exponent, &case.modulus),
+			.symmetric => try Mp.powmSymmetric(&self.output, &case.a, &case.exponent, &case.modulus),
+		}
 		const actual = std.mem.trimEnd(u8, self.output.payload(), &.{0});
 		if (try self.output.sign() < 0 or !std.mem.eql(u8, actual, case.expected)) return error.IncorrectWork;
 	}
@@ -151,6 +201,8 @@ const Fixture = struct {
 test "powm probe accepts only ordered supported widths" {
 	const all = try parse(&.{"512,1024,2048,3072"});
 	try std.testing.expectEqualSlices(usize, &widths, all.sizes[0..all.count]);
+	const paired = try parse(&.{"paired", "512,3072"});
+	try std.testing.expectEqualSlices(usize, &.{512,3072}, paired.sizes[0..paired.count]);
 	for ([_][]const u8{"", "0", "511", "513", "4096", "512,", "512,512", "1024,512", "x"}) |value|
 		try std.testing.expectError(error.InvalidArguments, parse(&.{value}));
 	try std.testing.expectError(error.InvalidArguments, parse(&.{}));
@@ -198,8 +250,10 @@ test "powm fixture verifies retained inputs and rejects a corrupted oracle" {
 		defer fixture.deinit();
 		for (0..2) |i| {
 			try fixture.run(i);
+			try fixture.runWith(.symmetric, i);
 			fixture.corrupt(i);
 			try std.testing.expectError(error.IncorrectWork, fixture.run(i));
+			try std.testing.expectError(error.IncorrectWork, fixture.runWith(.symmetric, i));
 		}
 	}
 }
@@ -210,9 +264,35 @@ test "powm fixture releases every partial allocation" {
 			var fixture = try Fixture.init(allocator, 512, 1);
 			defer fixture.deinit();
 			try fixture.run(0);
+			try fixture.runWith(.symmetric, 0);
 		}
 	};
 	try std.testing.checkAllAllocationFailures(std.testing.allocator, FailureCase.run, .{});
+}
+
+test "paired powm batches cover identical cases and cancel linear drift" {
+	const State = struct {
+		calls: usize = 0, round: usize, fail: bool = false,
+		fn batch(self: *@This(), method: Method, start: usize, count: usize) !Timing {
+			if (self.fail) return error.IncorrectWork;
+			const order = [_]usize{0,1,1,0};
+			try std.testing.expectEqual((order[self.calls] + self.round % 2) % 2, @intFromEnum(method));
+			try std.testing.expectEqual(@as(usize, 2), count);
+			try std.testing.expectEqual(if (self.calls < 2) @as(usize, 0) else 2, start);
+			const cpu: f64 = @floatFromInt(100 * (1 + @as(usize, @intFromEnum(method))) + 10 * self.calls);
+			self.calls += 1;
+			return .{ .cpu_ns = cpu, .wall_ns = 2 * cpu };
+		}
+	};
+	for (0..6) |round| {
+		var state: State = .{ .round = round };
+		const got = try pairedSample(&state, State.batch, 4, round);
+		try std.testing.expectEqualDeep(PairSample{ .cpu_ns = .{115,215}, .wall_ns = .{230,430} }, got);
+		try std.testing.expectEqual(@as(usize, 4), state.calls);
+	}
+	var bad: State = .{ .round = 0, .fail = true };
+	try std.testing.expectError(error.IncorrectWork, pairedSample(&bad, State.batch, 4, 0));
+	for ([_]usize{0,1,3}) |count| try std.testing.expectError(error.InvalidArguments, pairedSample(&bad, State.batch, count, 0));
 }
 
 test "powm GMP oracle agrees with native modular powers including zero and unit modulus" {

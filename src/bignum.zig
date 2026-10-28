@@ -773,6 +773,16 @@ pub const Mp = struct {
 	///   - exp must be non-negative for now (negative needs modular inverse — M7-5).
 	///   - Result is reduced into [0, |mod|-1] (Euclidean), even if base is negative.
 	pub fn powm(r: *Mp, base: *const Mp, exp: *const Mp, m: *const Mp) ArithError!void {
+		return powmImpl(false, r, base, exp, m);
+	}
+
+	/// Explicit symmetric-squaring Montgomery variant for algorithm comparisons.
+	/// Other dispatch, setup, sign and aliasing behavior matches `powm`.
+	pub fn powmSymmetric(r: *Mp, base: *const Mp, exp: *const Mp, m: *const Mp) ArithError!void {
+		return powmImpl(true, r, base, exp, m);
+	}
+
+	fn powmImpl(comptime symmetric: bool, r: *Mp, base: *const Mp, exp: *const Mp, m: *const Mp) ArithError!void {
 		if (m.cached_sign == 0) return error.DivisionByZero;
 		if (exp.cached_sign < 0) return error.NegativeExponentNotSupported;
 		const allocator = r.allocator;
@@ -836,7 +846,7 @@ pub const Mp = struct {
 		while (m_mag_len > 0 and m_pay[m_mag_len - 1] == 0) m_mag_len -= 1;
 		const MONT_MIN_BYTES: usize = 8;
 		if (m_is_odd and m_mag_len >= MONT_MIN_BYTES) {
-			try powmMontgomery(r, &base_red, exp, &m_abs, w);
+			try powmMontgomery(symmetric, r, &base_red, exp, &m_abs, w);
 			return;
 		}
 
@@ -3302,7 +3312,7 @@ fn powmSlidingWindow(r: *Mp, base_red: *const Mp, exp: *const Mp, m: *const Mp, 
 /// Inputs: base_red already reduced into [0, |m|-1]; m positive, ODD,
 /// magnitude length >= 8 bytes (caller decides — Mont's setup makes it
 /// uneconomic below ~64-bit moduli). w in [2, 8].
-fn powmMontgomery(r: *Mp, base_red: *const Mp, exp: *const Mp, m: *const Mp, w: u8) ArithError!void {
+fn powmMontgomery(comptime symmetric: bool, r: *Mp, base_red: *const Mp, exp: *const Mp, m: *const Mp, w: u8) ArithError!void {
 	const allocator = r.allocator;
 	std.debug.assert(w >= 2 and w <= 8);
 
@@ -3367,7 +3377,8 @@ fn powmMontgomery(r: *Mp, base_red: *const Mp, exp: *const Mp, m: *const Mp, w: 
 
 	// table[0] = base_mont; sq_mont = base_mont^2 (Mont form).
 	@memcpy(table[0], base_mont);
-	tier3.montMul(base_mont, base_mont, m_bytes, m_inv_neg, sq_mont, scratch);
+	if (symmetric) tier3.montSquare(base_mont, m_bytes, m_inv_neg, sq_mont, scratch)
+	else tier3.montMul(base_mont, base_mont, m_bytes, m_inv_neg, sq_mont, scratch);
 	// table[k] = table[k-1] * sq_mont (Mont form).
 	var k_idx: usize = 1;
 	while (k_idx < tbl_count) : (k_idx += 1) {
@@ -3380,7 +3391,8 @@ fn powmMontgomery(r: *Mp, base_red: *const Mp, exp: *const Mp, m: *const Mp, w: 
 	while (i >= 0) {
 		if (exp.bitAt(@intCast(i)) == 0) {
 			// Single squaring; advance by 1 bit. result = result^2 (Mont).
-			tier3.montMul(result_mont, result_mont, m_bytes, m_inv_neg, tmp_bytes, scratch);
+			if (symmetric) tier3.montSquare(result_mont, m_bytes, m_inv_neg, tmp_bytes, scratch)
+			else tier3.montMul(result_mont, result_mont, m_bytes, m_inv_neg, tmp_bytes, scratch);
 			@memcpy(result_mont, tmp_bytes);
 			i -= 1;
 		} else {
@@ -3397,7 +3409,8 @@ fn powmMontgomery(r: *Mp, base_red: *const Mp, exp: *const Mp, m: *const Mp, w: 
 			// Square `win_width` times.
 			var sq_iter: usize = 0;
 			while (sq_iter < win_width) : (sq_iter += 1) {
-				tier3.montMul(result_mont, result_mont, m_bytes, m_inv_neg, tmp_bytes, scratch);
+				if (symmetric) tier3.montSquare(result_mont, m_bytes, m_inv_neg, tmp_bytes, scratch)
+				else tier3.montMul(result_mont, result_mont, m_bytes, m_inv_neg, tmp_bytes, scratch);
 				@memcpy(result_mont, tmp_bytes);
 			}
 			// Multiply by table[(win_val - 1) / 2].

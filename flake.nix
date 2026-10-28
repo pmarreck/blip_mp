@@ -376,6 +376,18 @@
 								.iterations == 256 and .fixture_count == 256 and .warmup_cases == 256 and
 								all(.samples[]; length == 5 and all(.[]; . > 0)))
 						' output.json > /dev/null
+						${self.packages.${system}.powm-probe}/bin/blip-mp-powm-probe paired 512 > paired.json 2> stderr
+						test ! -s stderr
+						jq -e '
+							.schema == "performance-measurement/v1" and .correct == true and
+							.method == "powm-paired-squaring-v1" and [.rows[].size] == [512] and
+							all(.rows[]; . as $row | .iterations == 256 and .warmup_cases == 512 and
+								[.components[].method] == ["general","symmetric"] and
+								all(.components[]; all(.cpu_ns, .wall_ns; length == 5 and all(.[]; . > 0))) and
+								all(range(5); . as $i |
+									$row.samples.cpu_ns[$i] == ([$row.components[].cpu_ns[$i]]|add/2) and
+									$row.samples.wall_ns[$i] == ([$row.components[].wall_ns[$i]]|add/2)))
+						' paired.json > /dev/null
 						if ${self.packages.${system}.powm-probe}/bin/blip-mp-powm-probe 513 > output.json 2> stderr; then exit 1; fi
 						test ! -s output.json
 						mkdir bin

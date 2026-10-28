@@ -75,6 +75,10 @@ remain part of `./test`.
 [method and controls](docs/plan_context/performance-follow-up.md#verified-modular-exponentiation-probe)
 include modulus setup and arithmetic allocations in timing. GMP supplies the
 correctness oracle; this probe does not time GMP itself.
+The [Montgomery experiment](docs/benchmarks/storage-aware/MONTGOMERY.md)
+records the baseline and a symmetric-squaring candidate. Its separate-process
+results favor the candidate at 2048/3072 bits; a paired comparison is required
+before choosing production dispatch.
 
 `./bm --verified-multiplication` compares schoolbook and blocked products on
 identical inputs around the 2:1 dispatch boundary and at 4:1, 8:1 and 16:1 ratios.

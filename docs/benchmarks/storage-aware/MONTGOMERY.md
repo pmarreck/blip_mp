@@ -144,3 +144,51 @@ The symmetric product and Montgomery reduction compiled to scalar BMI2 `MULX`
 and carry loops, occupying 428 and 427 bytes respectively. The wrapper and
 general multiplication were inlined in this build. SIMD remains deferred while
 the existing algorithmic saving is measured on the complete public operation.
+
+## Separate-process result and paired follow-up
+
+Campaign `blip-mp-powm-square-20261028T072227Z` measured the isolated candidate
+tree based on `c6f00e0`, with source digest
+`ae38a780e1a696df3d84b9b230572e45849ce935d2818113be2903c5570e40be`
+unchanged throughout. All ten processes verified their results; both cohorts
+were `UNBASELINED` after one attempt. The candidate changes the three Montgomery
+squaring call sites and adds the symmetric primitive and its GMP tests. It
+does not change the exponentiation window, input generators or measurement
+method. The [summary](powm-square-summary.json) preserves process means.
+
+| Nominal bits | Candidate/baseline median CPU, 1 CPU | Candidate/baseline median CPU, 12 CPUs |
+|---:|---:|---:|
+| 512 | 1.019 | 0.980 |
+| 1024 | 1.010 | 0.914 |
+| 2048 | 0.844 | 0.850 |
+| 3072 | 0.861 | 0.861 |
+
+These ratios divide medians of five final process means from separate
+campaigns. They suggest savings at 2048/3072 bits, but the inconsistent smaller
+results and the baseline's inconclusive cohort prevent choosing a cutoff from
+this comparison alone. Production continues to use general Montgomery products.
+
+The paired follow-up uses explicit `Mp.powm` and `Mp.powmSymmetric` entry points
+in one executable. The latter retains the same validation, setup, sign and
+aliasing behavior and changes only the Montgomery squaring primitive. Each
+sample runs ABBA or BAAB half-pool batches, alternating order by round. Both
+methods visit all 256 identical cases once per sample. Five samples keep each
+method's CPU/wall components; the primary engine samples average both methods.
+Each method receives a full warmup pass. This controls linear timing drift,
+while nonlinear interference and code-layout effects can still matter.
+
+Run `./bm --verified-powm --config profiling-powm-paired.json`. The method
+`powm-paired-squaring-v1` and separate case names preserve the original workload
+history. Its two affinity cohorts use five processes each and 180-second
+per-process deadlines. Deterministic injected batches check order, case ranges,
+normalization, drift cancellation and error propagation; they failed against
+the empty adapter. The new argument form and CLI report also failed before
+implementation. Both arithmetic paths retain GMP corruption and allocation
+failure controls. No production squaring selection follows until measured.
+
+The paired implementation passed the complete native suite with 13,231 GMP
+comparisons in 96 seconds of mixed Nix preparation/check time. The production
+build and all-system evaluation passed. The independent Montgomery-square
+corpus adds 288 direct GMP cases in the unit suite; those are separate from
+the integration comparison count. Production `Mp.powm` still uses the general
+product, and the original single-method probe retains its measurement label.
