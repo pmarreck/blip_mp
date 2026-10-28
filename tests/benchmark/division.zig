@@ -22,6 +22,7 @@ pub fn main(init: std.process.Init) !void {
 	}
 	const args = try init.minimal.args.toSlice(init.arena.allocator());
 	if (args.len > 1 and std.mem.eql(u8,args[1],"public")) return @import("division_public.zig").run(init,args[2..]);
+	if (args.len > 1 and std.mem.eql(u8,args[1],"leading")) return @import("division_public.zig").runLeading(init,args[2..]);
 	if (args.len > 1 and std.mem.eql(u8, args[1], "competitors")) return @import("division_competitors.zig").run(init, args[2..]);
 	if (args.len > 1 and std.mem.eql(u8, args[1], "paired")) return @import("division_crossover.zig").run(init, args[2..], .kernels);
 	if (args.len > 1 and std.mem.eql(u8, args[1], "paired-fallback")) return @import("division_crossover.zig").run(init, args[2..], .fallbacks);

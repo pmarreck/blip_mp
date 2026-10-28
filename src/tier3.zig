@@ -2265,21 +2265,27 @@ fn bzDiv3n_2n(
 /// 64 (= 512-bit divisor) is a conservative starting point.
 const BZ_TOPLEVEL_THRESHOLD: usize = 64;
 
+/// Experimental leading-block shortcut; the cutoff-128 entry is its fixed control.
+pub fn divModBurnikelZieglerLeadingBlock(u: []const u8, u_len: usize, v: []const u8, v_len: usize, q: []u8, r: []u8, allocator: std.mem.Allocator) std.mem.Allocator.Error!struct { q_len: usize, r_len: usize } {
+	const got = try divModBurnikelZieglerImpl(true, 128, true, u, u_len, v, v_len, q, r, allocator);
+	return .{ .q_len = got.q_len, .r_len = got.r_len };
+}
+
 /// Explicit 128-byte recursive cutoff, with chunk-reading fallback.
 pub fn divModBurnikelZieglerCutoff128(u: []const u8, u_len: usize, v: []const u8, v_len: usize, q: []u8, r: []u8, allocator: std.mem.Allocator) std.mem.Allocator.Error!struct { q_len: usize, r_len: usize } {
-	const got = try divModBurnikelZieglerImpl(true, 128, u, u_len, v, v_len, q, r, allocator);
+	const got = try divModBurnikelZieglerImpl(true, 128, false, u, u_len, v, v_len, q, r, allocator);
 	return .{ .q_len = got.q_len, .r_len = got.r_len };
 }
 
 /// Explicit chunk-reading fallback control with the original recursive cutoff.
 pub fn divModBurnikelZieglerChunkFallback(u: []const u8, u_len: usize, v: []const u8, v_len: usize, q: []u8, r: []u8, allocator: std.mem.Allocator) std.mem.Allocator.Error!struct { q_len: usize, r_len: usize } {
-	const got = try divModBurnikelZieglerImpl(true, BZ_LEGACY_RECURSE_THRESHOLD, u, u_len, v, v_len, q, r, allocator);
+	const got = try divModBurnikelZieglerImpl(true, BZ_LEGACY_RECURSE_THRESHOLD, false, u, u_len, v, v_len, q, r, allocator);
 	return .{ .q_len = got.q_len, .r_len = got.r_len };
 }
 
 /// Historical byte fallback retained for paired measurements.
 pub fn divModBurnikelZieglerByteFallback(u: []const u8, u_len: usize, v: []const u8, v_len: usize, q: []u8, r: []u8, allocator: std.mem.Allocator) std.mem.Allocator.Error!struct { q_len: usize, r_len: usize } {
-	const got = try divModBurnikelZieglerImpl(false, BZ_LEGACY_RECURSE_THRESHOLD, u, u_len, v, v_len, q, r, allocator);
+	const got = try divModBurnikelZieglerImpl(false, BZ_LEGACY_RECURSE_THRESHOLD, false, u, u_len, v, v_len, q, r, allocator);
 	return .{ .q_len = got.q_len, .r_len = got.r_len };
 }
 
@@ -2305,13 +2311,14 @@ pub fn divModBurnikelZiegler(
 	r_out: []u8,
 	allocator: std.mem.Allocator,
 ) std.mem.Allocator.Error!struct { q_len: usize, r_len: usize } {
-	const got = try divModBurnikelZieglerImpl(true, BZ_RECURSE_THRESHOLD, u, u_len_in, v, v_len, q_out, r_out, allocator);
+	const got = try divModBurnikelZieglerImpl(true, BZ_RECURSE_THRESHOLD, false, u, u_len_in, v, v_len, q_out, r_out, allocator);
 	return .{ .q_len = got.q_len, .r_len = got.r_len };
 }
 
 fn divModBurnikelZieglerImpl(
 	comptime chunk_fallback: bool,
 	comptime recurse_threshold: usize,
+	comptime leading_block: bool,
 	u: []const u8, u_len_in: usize, v: []const u8, v_len: usize,
 	q_out: []u8, r_out: []u8, allocator: std.mem.Allocator,
 ) std.mem.Allocator.Error!struct { q_len: usize, r_len: usize } {
@@ -2426,6 +2433,18 @@ fn divModBurnikelZieglerImpl(
 
 	// Block iteration: top block first.
 	var i: usize = num_blocks;
+	if (leading_block) {
+		// The highest block is below beta^n, while normalized v is at least
+		// beta^n/2. Its quotient is therefore zero or one, with no recursion.
+		i -= 1;
+		const top = u_padded[i * n_block .. (i + 1) * n_block];
+		if (cmpUnsignedLE(top, n_block, v_norm, n_block) < 0) {
+			@memcpy(r_carry, top);
+		} else {
+			q_total[i * n_block] = 1;
+			_ = subUnsignedLE(top, n_block, v_norm, n_block, r_carry);
+		}
+	}
 	while (i > 0) {
 		i -= 1;
 		// sub_dividend (LE) = [u_block_i || r_carry] of length 2n.

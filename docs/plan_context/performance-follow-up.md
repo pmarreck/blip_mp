@@ -922,6 +922,36 @@ division can benefit from Karatsuba and Toom multiplication already present
 here; [GMP's divide-and-conquer discussion](https://gmplib.org/manual/Divide-and-Conquer-Division)
 does not require FFT multiplication for a crossover.
 
+### Leading-block experiment
+
+`Mp.divModBurnikelZieglerLeadingBlock` is an explicit candidate that initializes
+the highest block's quotient and remainder with a comparison and at most one
+subtraction. All lower blocks use the existing recursive divider. The original
+signed entry point, cutoff-128 kernel and ordinary dispatcher remain fixed
+controls. Both variants share sign handling, canonical BLIP output encoding
+and the same allocation wrapper.
+
+An allocation-budget test first failed against the old implementation. It
+divides a maximal 64-, 128- or 256-byte magnitude by half that byte range,
+checks quotient one and the complete remainder, and protects exact-capacity
+outputs with canaries. Eight allocations cover the top-level buffers; any
+recursive request fails. The old path must report `OutOfMemory` and release
+all bytes under that budget, while the candidate must return the exact result
+without leaking. This is a resource-behavior check, not a timing claim.
+
+The candidate also joins the existing GMP sign/normalization and input-alias
+corpora, optional-cache allocation-failure sweep, native integer boundaries,
+zero-divisor rejection and corrupted-reference checks. The new `leading`
+probe route failed its CLI check before implementation. It compares the fixed
+signed B-Z entry with the candidate under `division-leading-block-paired-v1`,
+sharing the public probe's inputs, paired schedule and full-result checks.
+`profiling-division-leading.json` retains all three operand geometries and the
+odd-width fallback control. Run it through `./bm --verified-division --config
+profiling-division-leading.json`. Performance selection awaits measurements.
+
+The complete native suite passed in 89 seconds of mixed Nix preparation/check
+time. The optimized production build and all-system evaluation also passed.
+
 ### Exact-capacity remainder regression
 
 Reviewing the B-Z entry point exposed a separate single-byte-divisor bug. With
