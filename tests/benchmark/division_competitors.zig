@@ -4,7 +4,7 @@ const blip = @import("blip_mp");
 const Mp = blip.Mp;
 const gmp = @import("gmp.zig");
 const widths = [_]usize{ 8,16,32,64,128,256,512,1024,2048,4096,8192,16384 };
-const Method = enum { public_blip, knuth, bz128, gmp, selected_bz };
+pub const Method = enum { public_blip, knuth, bz128, gmp, selected_bz };
 const original_methods = [4]Method{.public_blip,.knuth,.bz128,.gmp};
 const selected_methods = [4]Method{.public_blip,.knuth,.selected_bz,.gmp};
 const Timing = struct { cpu_ns: f64, wall_ns: f64 };
@@ -244,7 +244,7 @@ pub const Case = struct {
 		self.a.deinit(); self.b.deinit(); self.mq.deinit(); self.mr.deinit();
 	}
 };
-const Fixture = struct {
+pub const Fixture = struct {
 	cases: []Case,
 	arena: std.heap.ArenaAllocator, scratch: std.heap.ArenaAllocator,
 	q: Mp, r: Mp, gq: gmp.Z, gr: gmp.Z,
@@ -252,7 +252,7 @@ const Fixture = struct {
 	fn init(parent: std.mem.Allocator, width: usize, count: usize) !Fixture {
 		return initSized(parent,width,count,2*width);
 	}
-	fn initSized(parent: std.mem.Allocator, width: usize, count: usize, dividend_len: usize) !Fixture {
+	pub fn initSized(parent: std.mem.Allocator, width: usize, count: usize, dividend_len: usize) !Fixture {
 		if (std.mem.indexOfScalar(usize,&widths,width) == null or count == 0 or count > 64) return error.InvalidArguments;
 		var arena = std.heap.ArenaAllocator.init(parent);
 		errdefer arena.deinit();
@@ -301,13 +301,13 @@ const Fixture = struct {
 			},
 		}
 	}
-	fn corruptQuotient(self: *@This(), index: usize) !void {
+	pub fn corruptQuotient(self: *@This(), index: usize) !void {
 		const case = &self.cases[index];
 		case.expected_q[0] ^= 1;
 		try setMagnitude(&case.mq,case.expected_q,self.arena.allocator());
 		gmp.__gmpz_import(&case.gq,case.expected_q.len,-1,1,0,0,case.expected_q.ptr);
 	}
-	fn deinit(self: *@This()) void {
+	pub fn deinit(self: *@This()) void {
 		blip.tier3.releaseBzArena(); blip.tier3.releaseMulScratch(); blip.tier3.releaseDivScratch(); blip.tier3.releaseVnScratch();
 		self.q.deinit(); self.r.deinit();
 		gmp.__gmpz_clear(&self.gq); gmp.__gmpz_clear(&self.gr);
@@ -372,7 +372,7 @@ test "four-way timing rotates mirrored batches and covers each input once" {
 	try std.testing.expectError(error.Injected, balancedSample({}, Failure.batch, 8, 3, 0));
 }
 
-fn nativeBatch(fixture: *Fixture, method: Method, start: usize, count: usize, repeats: usize) !Timing {
+pub fn nativeBatch(fixture: *Fixture, method: Method, start: usize, count: usize, repeats: usize) !Timing {
 	const Clock = struct {
 		pub fn read(_: *@This(), kind: std.c.CLOCK) !u64 { return @import("immediate_add.zig").now(kind); }
 	};

@@ -1283,6 +1283,33 @@ cases do not resolve the short-quotient cliff or unfavorable divisor alignment.
 The original matched comparison remains historical evidence for its fixed
 cutoff-128 kernel; these current results supersede its headline ratios.
 
+### Quotient-geometry crossover qualification
+
+`profiling-division-geometry.json` compares the raw Knuth and selected B-Z
+kernels while varying the dividend length independently of divisor width.
+The engine's size coordinate is the extra magnitude bytes in the dividend,
+not the actual quotient width. Divisors have 4,096, 8,192 or 16,384 bytes;
+gaps are 1, 7, 8, then powers of two through the divisor width. This bounds
+dividends at twice the divisor width. Neighboring and odd divisor alignments
+are outside this initial experiment, and production thresholds are unchanged.
+
+The method is `division-geometry-paired-v1`. Each point has 32 positive cases
+covering all eight normalization shifts four times. Both kernels receive
+identical byte inputs, retained-arena allocation and output poisoning, and
+complete GMP-derived quotient/remainder plus canary checks inside timing.
+Inputs and references are prepared before timing. Six ABBA/BAAB samples follow
+one full warmup pass. Each width has five-process 1/12-CPU cohorts with a
+120-second process deadline. GMP itself is not timed in this experiment.
+
+The parser first failed a classifier test over complete width and gap sets;
+accepted gaps must be ordered, unique and no larger than the chosen width.
+The six small-width geometries verify their normalization coverage, reject
+corrupted references and enumerate partial-allocation failures. The new CLI
+check failed before routing was implemented. Existing injected timing tests
+still govern the shared paired sampler. The complete suite passed in 86 seconds
+of mixed Nix preparation/check time; production build and all-system evaluation
+passed. SIMD remains deferred while these measurements resolve algorithm choice.
+
 ### Exact-capacity remainder regression
 
 Reviewing the B-Z entry point exposed a separate single-byte-divisor bug. With

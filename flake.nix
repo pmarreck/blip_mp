@@ -386,6 +386,16 @@
 							' public.json > /dev/null
 						done
 						done
+						${self.packages.${system}.division-probe}/bin/blip-mp-division-probe geometry 64 1,7,8,16,32,64 > geometry.json 2> stderr
+						test ! -s stderr
+						jq -e '
+							.correct == true and .method == "division-geometry-paired-v1" and .divisor_bytes == 64 and
+							[.rows[].size] == [1,7,8,16,32,64] and all(.rows[]; . as $row |
+								.dividend_bytes == 64+.size and .fixture_count == 32 and .iterations == 32 and .warmup_cases == 64 and
+								[.components[].method] == ["knuth","selected_bz"] and
+								all(.components[]; (.cpu_ns|length)==6 and (.wall_ns|length)==6 and all(.cpu_ns[],.wall_ns[]; .>0)) and
+								all(range(6); . as $i | (($row.samples.cpu_ns[$i] - ([$row.components[].cpu_ns[$i]]|add/2))|fabs)<0.001))
+						' geometry.json > /dev/null
 						mkdir -p "$out"
 					'';
 
