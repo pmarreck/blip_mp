@@ -118,6 +118,23 @@ pub fn build(b: *std.Build) void {
 	const test_step = b.step("test", "Run unit tests");
 	test_step.dependOn(&run_unit_tests.step);
 
+	const add_probe_module = b.createModule(.{
+		.root_source_file = b.path("tests/benchmark/immediate_add.zig"),
+		.target = target,
+		.optimize = optimize,
+		.link_libc = true,
+		.imports = &.{.{ .name = "blip_mp", .module = core_module }},
+	});
+	const add_probe_tests = b.addTest(.{ .root_module = add_probe_module });
+	const run_add_probe_tests = b.addRunArtifact(add_probe_tests);
+	const probe_test_step = b.step("probe-test", "Check the immediate-add measurement oracle");
+	probe_test_step.dependOn(&run_add_probe_tests.step);
+	test_step.dependOn(&run_add_probe_tests.step);
+	const add_probe = b.addExecutable(.{ .name = "blip-mp-add-probe", .root_module = add_probe_module });
+	const install_add_probe = b.addInstallArtifact(add_probe, .{});
+	const probe_step = b.step("add-probe", "Build the verified immediate-add performance probe");
+	probe_step.dependOn(&install_add_probe.step);
+
 	// Shared monotonic-clock helper module for the benchmark + cross-check exes.
 	const time_util_module = b.createModule(.{
 		.root_source_file = b.path("tests/time_util.zig"),

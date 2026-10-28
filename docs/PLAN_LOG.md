@@ -31,3 +31,4 @@ Completed PLAN.md items retired by plan-retire, oldest retirement first.
 - [x] [Current bounded milestone] Honor the temporary scheduling hold through its release; ordinary single-job build budgets apply again. (done 2026-10-14 15:43 EDT; this commit)
 - [x] [Current bounded milestone] Sanitize all 160 history commits with a verified private backup; preserve author metadata, arithmetic behavior and benchmark measurements, and remap current evidence references. (done 2026-10-14 17:29 EDT; this commit)
 - [x] [Current bounded milestone] Pass the sanitized history audit, full suite with 13,111 GMP comparisons, production build and all three native Linux CI targets. (done 2026-10-14 17:29 EDT; this commit)
+- [x] [Current bounded milestone] Publish with an explicit remote lease; verify remote 1fc1c40 and its successful exact-commit CI run (159 seconds). (done 2026-10-14 19:34 EDT; 1fc1c40)

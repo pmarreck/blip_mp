@@ -9,7 +9,8 @@ system=$(nix eval --raw --impure --expr 'builtins.currentSystem') || exit 1
 printf 'Preparing and checking ReleaseSafe units, C API, GMP comparisons and CLI tests through Nix.\n'
 if nix build --no-link --keep-going --print-build-logs \
 	".#checks.$system.test" \
-	".#checks.$system.integration"; then
+	".#checks.$system.integration" \
+	".#checks.$system.probe-cli"; then
 	printf 'All test groups passed (Nix checks may be cached).\n'
 	status=0
 else

@@ -5,6 +5,7 @@
 # the requested bench(es) and prints organized side-by-side output.
 #
 # Usage:
+#   ./bm --verified-add [engine options] # verified CPU/wall immediate-add probes
 #   ./bm                  # full bench: blip_mp + GMP-asm + GMP-noasm,
 #                        # all sizes, with side-by-side ratios where
 #                        # bucket names match
@@ -24,6 +25,11 @@
 # Asserts no `DEBUG BUILD` banner appears in benchmark output (would mean
 # we're benching a debug binary — silently catastrophic).
 set -u
+
+if [ "${1:-}" = "--verified-add" ]; then
+	shift
+	exec nix develop -c performance-profile run --mode bm "$@"
+fi
 
 mode="full"
 stable_runs=7

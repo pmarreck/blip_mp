@@ -54,6 +54,12 @@ by itself isolate BLIP's storage costs from algorithm or compiler differences.
 
 ## Quick start
 
+The [verified immediate-add probe](docs/plan_context/performance-follow-up.md#verified-immediate-add-probe-october-27-2026)
+is available through `./bm --verified-add`. It records CPU and wall samples for
+mixed, immediate and promoted results with separate CPU-affinity cohorts and
+external measurement history. Its checksum overhead makes it a new measurement
+method; it does not replace the historical benchmark numbers above.
+
 Requires [Nix](https://nixos.org/) (handles the Zig 0.16.0 toolchain and GMP build for benchmarks).
 
 ```bash

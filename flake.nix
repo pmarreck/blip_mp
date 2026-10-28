@@ -6,9 +6,10 @@
 		flake-utils.url = "github:numtide/flake-utils";
 		systems.url = "github:nix-systems/default";
 		flake-utils.inputs.systems.follows = "systems";
+		performance-profiling.url = "github:pmarreck/performance_profiling/ecf713b81a74a51f76719bf9debc44fe23a0b331";
 	};
 
-	outputs = { self, nixpkgs, flake-utils, ... }:
+	outputs = { self, nixpkgs, flake-utils, performance-profiling, ... }:
 		flake-utils.lib.eachDefaultSystem (system:
 			let
 				pkgs = nixpkgs.legacyPackages.${system};
@@ -51,10 +52,24 @@
 				'';
 			in {
 				devShells.default = pkgs.mkShell {
-					buildInputs = [ zig pkgs.hyperfine pkgs.gmp ];
+					buildInputs = [ zig pkgs.hyperfine pkgs.gmp
+						performance-profiling.packages.${system}.default
+						self.packages.${system}.add-probe ];
 					shellHook = ''
 						export GMP_INCLUDE_PATH="${pkgs.gmp.dev}/include"
 						export GMP_LIB_PATH="${pkgs.gmp}/lib"
+					'';
+				};
+
+				packages.add-probe = pkgs.stdenv.mkDerivation {
+					pname = "${pname}-add-probe";
+					inherit version nativeBuildInputs;
+					src = self;
+					dontConfigure = true;
+					dontInstall = true;
+					buildPhase = ''
+						${commonBuild}
+						zig build add-probe --prefix "$out" -Doptimize=ReleaseFast
 					'';
 				};
 
@@ -94,6 +109,39 @@
 
 				checks = {
 					build = self.packages.${system}.default;
+					probe-cli = pkgs.runCommand "${pname}-probe-cli" {
+						nativeBuildInputs = [ pkgs.jq ];
+					} ''
+						for kind in mixed immediate promoted; do
+							${self.packages.${system}.add-probe}/bin/blip-mp-add-probe "$kind" 256 > output.json 2> stderr
+							test ! -s stderr
+							jq -e --arg kind "$kind" '
+								.schema == "performance-measurement/v1" and .correct == true and
+								.build_mode == "ReleaseFast" and .fixture == $kind and
+								.checksum == ({mixed: 32516, immediate: 16130, promoted: 48644}[$kind]) and
+								(.rows | length) == 1 and .rows[0].size == 256 and
+								(.rows[0].samples.cpu_ns | length) == 5 and
+								(.rows[0].samples.wall_ns | length) == 5 and
+								all(.rows[0].samples.cpu_ns[], .rows[0].samples.wall_ns[]; . > 0)
+							' output.json > /dev/null
+						done
+						if ${self.packages.${system}.add-probe}/bin/blip-mp-add-probe mixed 0 > output.json 2> stderr; then
+							exit 1
+						fi
+						test ! -s output.json
+						mkdir -p "$out"
+					'';
+					probe = pkgs.stdenv.mkDerivation {
+						pname = "${pname}-probe-tests";
+						inherit version nativeBuildInputs;
+						src = self;
+						dontConfigure = true;
+						buildPhase = ''
+							${commonBuild}
+							zig build probe-test -Doptimize=ReleaseSafe
+						'';
+						installPhase = "mkdir -p $out";
+					};
 
 					test = pkgs.stdenv.mkDerivation {
 						pname = "${pname}-tests";
