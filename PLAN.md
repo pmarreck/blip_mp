@@ -4,14 +4,9 @@ Purpose: [INTENT.md](INTENT.md). The [legacy roadmap](docs/plan_context/legacy-r
 
 ## Current bounded milestone
 
-- [x] Fix the reproduced Mp.addU64(&self, 0) alias panic; require ReleaseSafe unit tests and pass the complete suite, 13,111 GMP checks and production build. (done 2026-10-14 15:38 EDT; this commit)
-- [x] Honor the temporary scheduling hold through its release; ordinary single-job build budgets apply again. (done 2026-10-14 15:43 EDT; this commit)
-- [x] Sanitize all 160 history commits with a verified private backup; preserve author metadata, arithmetic behavior and benchmark measurements, and remap current evidence references. (done 2026-10-14 17:29 EDT; this commit)
-- [x] Pass the sanitized history audit, full suite with 13,111 GMP comparisons, production build and all three native Linux CI targets. (done 2026-10-14 17:29 EDT; this commit)
+- [x] Refresh nixpkgs, flake-utils and systems pins; remove Jujutsu, retain Zig 0.16.0, and pass all three supported-system evaluations, native tests and production build. (done 2026-10-27 21:16 EDT; this commit)
+- [x] Run the complete suite through Nix checks and include C API, 13,111 GMP comparisons and CLI checks in CI without changing checkout output links; native preparation and checks passed in 218 seconds, with execution time not separately measured. (done 2026-10-27 21:16 EDT; this commit)
 - [x] Publish with an explicit remote lease; verify remote 1fc1c40 and its successful exact-commit CI run (159 seconds). (done 2026-10-14 19:34 EDT; 1fc1c40)
-
-## Scoped fixed-length canonical residues
-
 
 ## Follow-up and existing backlog
 

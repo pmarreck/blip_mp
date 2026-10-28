@@ -4,17 +4,20 @@
 	inputs = {
 		nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 		flake-utils.url = "github:numtide/flake-utils";
+		systems.url = "github:nix-systems/default";
+		flake-utils.inputs.systems.follows = "systems";
 	};
 
-	outputs = { self, nixpkgs, flake-utils }:
+	outputs = { self, nixpkgs, flake-utils, ... }:
 		flake-utils.lib.eachDefaultSystem (system:
 			let
 				pkgs = nixpkgs.legacyPackages.${system};
 				pname = "blip_mp";
 				version = "0.0.1";
-				isDarwin = pkgs.stdenv.isDarwin;
+				isDarwin = pkgs.stdenv.hostPlatform.isDarwin;
+				zig = pkgs.zig_0_16;
 
-				nativeBuildInputs = [ pkgs.zig ]
+				nativeBuildInputs = [ zig ]
 					++ pkgs.lib.optionals isDarwin [
 						pkgs.darwin.cctools
 						pkgs.apple-sdk
@@ -48,7 +51,7 @@
 				'';
 			in {
 				devShells.default = pkgs.mkShell {
-					buildInputs = with pkgs; [ zig hyperfine gmp jujutsu ];
+					buildInputs = [ zig pkgs.hyperfine pkgs.gmp ];
 					shellHook = ''
 						export GMP_INCLUDE_PATH="${pkgs.gmp.dev}/include"
 						export GMP_LIB_PATH="${pkgs.gmp}/lib"
@@ -102,13 +105,43 @@
 						buildPhase = ''
 							${commonBuild}
 							# Keep overlap and bounds checks in the complete correctness suite.
-							timeout 600 zig build test -Doptimize=ReleaseSafe || { echo "Tests failed"; exit 1; }
+							failures=0
+							if timeout 600 zig build test -Doptimize=ReleaseSafe; then
+								echo "Unit tests passed"
+							else
+								failures=$((failures + 1))
+							fi
+							if zig build c-smoke-run -Doptimize=ReleaseSafe; then
+								echo "C API tests passed"
+							else
+								failures=$((failures + 1))
+							fi
+							test "$failures" -eq 0
 						'';
 						installPhase = ''
 							mkdir -p $out
 							echo "tests passed" > $out/result
 						'';
 					};
+
+					integration = pkgs.runCommand "${pname}-integration-tests" {
+						nativeBuildInputs = [ pkgs.bash ];
+					} ''
+						failures=0
+						if ${self.packages.${system}.bench}/bin/cross_check; then
+							echo "GMP comparisons passed"
+						else
+							failures=$((failures + 1))
+						fi
+						if BP_BIN=${self.packages.${system}.default}/bin/bp bash ${./tests/cli/bp_smoke.sh}; then
+							echo "CLI tests passed"
+						else
+							failures=$((failures + 1))
+						fi
+						test "$failures" -eq 0
+						mkdir -p "$out"
+						echo "GMP and CLI tests passed" > "$out/result"
+					'';
 				};
 			}
 		);

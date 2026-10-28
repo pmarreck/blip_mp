@@ -24,3 +24,10 @@ Completed PLAN.md items retired by plan-retire, oldest retirement first.
 - [x] [Scoped fixed-length canonical residues] Compare boundary-shifted and arithmetic-shifted small-prime FFTs with the current implementation on identical seeded dense, sparse and carry-heavy products. (done 2026-09-27 22:06 EDT; source and evidence in this commit)
 - [x] [Current bounded milestone] Reconcile the immediate-add benchmark and aggregation backlog against code; record measurement gaps before another performance claim (context: docs/plan_context/performance-follow-up.md). (done 2026-10-14 14:32 EDT; this commit)
 - [x] [Scoped fixed-length canonical residues] Retain only measured improvements, run the full tests/build and GMP oracle, update benchmark/representation docs, and capture successful collaboration evidence in the private ledger. (done 2026-09-27 22:06 EDT; source and evidence in this commit)
+
+## Retired 2026-10-27
+
+- [x] [Current bounded milestone] Fix the reproduced Mp.addU64(&self, 0) alias panic; require ReleaseSafe unit tests and pass the complete suite, 13,111 GMP checks and production build. (done 2026-10-14 15:38 EDT; this commit)
+- [x] [Current bounded milestone] Honor the temporary scheduling hold through its release; ordinary single-job build budgets apply again. (done 2026-10-14 15:43 EDT; this commit)
+- [x] [Current bounded milestone] Sanitize all 160 history commits with a verified private backup; preserve author metadata, arithmetic behavior and benchmark measurements, and remap current evidence references. (done 2026-10-14 17:29 EDT; this commit)
+- [x] [Current bounded milestone] Pass the sanitized history audit, full suite with 13,111 GMP comparisons, production build and all three native Linux CI targets. (done 2026-10-14 17:29 EDT; this commit)

@@ -1,4 +1,5 @@
-# Native Linux library/CLI, benchmark binaries, and ReleaseSafe unit tests.
+# Native Linux library/CLI, benchmarks, and the complete correctness suite.
 packages.x86_64-linux.default
 packages.x86_64-linux.bench
 checks.x86_64-linux.test
+checks.x86_64-linux.integration
