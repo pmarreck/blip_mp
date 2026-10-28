@@ -211,3 +211,33 @@ seconds of mixed Nix preparation/check time; production build and all-system
 evaluation passed. No measurements or production threshold follow from these
 checks alone. Run `./bm --verified-powm --config profiling-powm-boundary.json`
 after the first paired sweep has established the candidate's behavior.
+
+## Paired public result
+
+Campaign `blip-mp-powm-paired-20261028T074614Z` measured commit
+`6300e09cc228eae765ab05e0137e77d89cc6a460`, with source hash
+`09a1ebe085db3dba81274f61e37d8ccec0e7ad8f241a7e52283ae59ff6f7d8e8`
+unchanged. All ten processes verified, and both cohorts were `UNBASELINED`
+after one attempt. The campaign waited roughly thirteen minutes for admission.
+No historical baseline was approved.
+
+| Nominal bits | Paired symmetric/general CPU ratio, 1 CPU | Paired symmetric/general CPU ratio, 12 CPUs |
+|---:|---:|---:|
+| 512 | 0.967 | 0.969 |
+| 1024 | 0.895 | 0.894 |
+| 2048 | 0.840 | 0.840 |
+| 3072 | 0.823 | 0.824 |
+
+These are medians of 25 paired sample ratios across the five processes in
+each cohort. Every process mean favored the symmetric variant. The smallest
+margin was at 512 bits, where one process ratio reached 0.995. The
+[paired summary](powm-paired-summary.json) preserves sample-ratio ranges,
+individual process ratios, selected-process CPU/wall components and verdicts.
+
+The repeated gains justify the smaller-size qualification sweep. They establish
+about 3–18% lower CPU time for these public BLIP exponentiations relative to
+general Montgomery multiplication. They do not establish a GMP-relative
+speedup, an approved historical gate, a gain for other exponent distributions,
+or a benefit on another architecture. Production dispatch awaits a measured
+cutoff, with partial-native-chunk modulus widths included in its correctness
+checks before selection.

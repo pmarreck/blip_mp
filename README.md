@@ -76,9 +76,10 @@ remain part of `./test`.
 include modulus setup and arithmetic allocations in timing. GMP supplies the
 correctness oracle; this probe does not time GMP itself.
 The [Montgomery experiment](docs/benchmarks/storage-aware/MONTGOMERY.md)
-records the baseline and a symmetric-squaring candidate. Its separate-process
-results favor the candidate at 2048/3072 bits; a paired comparison is required
-before choosing production dispatch.
+records the baseline and a symmetric-squaring candidate. Paired measurements
+show about 3–18% lower public-operation CPU time at the sampled 512–3072-bit
+widths. A smaller-size sweep will qualify production dispatch; the cohorts
+remain unbaselined and this comparison does not time GMP.
 
 `./bm --verified-multiplication` compares schoolbook and blocked products on
 identical inputs around the 2:1 dispatch boundary and at 4:1, 8:1 and 16:1 ratios.
