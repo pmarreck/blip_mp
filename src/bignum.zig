@@ -180,8 +180,9 @@ pub const Mp = struct {
 	inline fn ensureHeapCapacity(self: *Mp, cap: usize) std.mem.Allocator.Error!void {
 		if (self.heap_buf.len >= cap) return;
 		const new_cap = @max(cap, 2 * self.heap_buf.len);
+		const replacement = try self.allocator.alloc(u8,new_cap);
 		if (self.heap_buf.len != 0) self.allocator.free(self.heap_buf);
-		self.heap_buf = try self.allocator.alloc(u8, new_cap);
+		self.heap_buf = replacement;
 	}
 
 	pub fn setU64(self: *Mp, value: u64) SetError!void {
@@ -5337,6 +5338,24 @@ test "tier-3 round-trip: (i64.max + 1) - 1 = i64.max (back to tier 0/1)" {
 	try r.add(&a, &one); // r = 2^63 (tier 3)
 	try r.sub(&r, &one); // r = 2^63 - 1 = i64.max (back to tier 0/1, encoded in 9 bytes)
 	try testing.expectEqual(@as(i64, std.math.maxInt(i64)), try r.getI64());
+}
+
+test "heap growth allocation failure retains prior storage and value" {
+	var failing = std.testing.FailingAllocator.init(testing.allocator,.{});
+	var value = Mp.init(failing.allocator());
+	// A broken free-before-allocate implementation has already freed this
+	// sole allocation; avoid a second free while reporting the regression.
+	defer if (failing.freed_bytes == 0) value.deinit();
+	var encoded: [100]u8 = @splat(1);
+	const header = try tier3.writeHeader(&encoded,96);
+	try value.setBytes(encoded[0..header+96]);
+	failing.fail_index = failing.alloc_index;
+	try testing.expectError(error.OutOfMemory,value.ensureHeapCapacity(value.heap_buf.len+1));
+	try testing.expect(failing.has_induced_failure);
+	try testing.expectEqual(@as(usize,0),failing.freed_bytes);
+	try testing.expectEqualSlices(u8,encoded[0..header+96],value.bytes());
+	value.deinit();
+	try testing.expectEqual(failing.allocated_bytes,failing.freed_bytes);
 }
 
 // ── M7-1: Tier 0/1 division (i64 fast path) ───────────────────────────────────

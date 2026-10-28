@@ -1,6 +1,7 @@
 //! Historical division workloads with independent GMP quotient/remainder checks.
 const std = @import("std");
 test { _ = @import("division_competitors.zig"); }
+test { _ = @import("division_public.zig"); }
 const blip = @import("blip_mp");
 const gmp = @import("gmp.zig");
 test { _ = @import("division_crossover.zig"); }
@@ -20,6 +21,7 @@ pub fn main(init: std.process.Init) !void {
 		return error.UnoptimizedBuild;
 	}
 	const args = try init.minimal.args.toSlice(init.arena.allocator());
+	if (args.len > 1 and std.mem.eql(u8,args[1],"public")) return @import("division_public.zig").run(init,args[2..]);
 	if (args.len > 1 and std.mem.eql(u8, args[1], "competitors")) return @import("division_competitors.zig").run(init, args[2..]);
 	if (args.len > 1 and std.mem.eql(u8, args[1], "paired")) return @import("division_crossover.zig").run(init, args[2..], .kernels);
 	if (args.len > 1 and std.mem.eql(u8, args[1], "paired-fallback")) return @import("division_crossover.zig").run(init, args[2..], .fallbacks);

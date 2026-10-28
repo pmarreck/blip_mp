@@ -51,14 +51,14 @@ fn setMagnitude(value: *Mp, bytes: []const u8, allocator: std.mem.Allocator) !vo
 	try value.setBytes(encoded[0..header+magnitude.len+pad]);
 }
 
-const Case = struct {
+pub const Case = struct {
 	dividend: []u8, divisor: []u8, expected_q: []u8, expected_r: []u8,
 	a: Mp, b: Mp, mq: Mp, mr: Mp,
 	ga: gmp.Z, gb: gmp.Z, gq: gmp.Z, gr: gmp.Z,
-	fn init(allocator: std.mem.Allocator, values_allocator: std.mem.Allocator, width: usize, index: usize) !Case {
+	pub fn initSized(allocator: std.mem.Allocator, values_allocator: std.mem.Allocator, width: usize, index: usize, dividend_len: usize) !Case {
 		var result: Case = .{
-			.dividend = try allocator.alloc(u8,2*width), .divisor = try allocator.alloc(u8,width),
-			.expected_q = try allocator.alloc(u8,2*width), .expected_r = try allocator.alloc(u8,width),
+			.dividend = try allocator.alloc(u8,dividend_len), .divisor = try allocator.alloc(u8,width),
+			.expected_q = try allocator.alloc(u8,dividend_len), .expected_r = try allocator.alloc(u8,width),
 			.a = Mp.init(values_allocator), .b = Mp.init(values_allocator), .mq = Mp.init(values_allocator), .mr = Mp.init(values_allocator),
 			.ga = undefined, .gb = undefined, .gq = undefined, .gr = undefined,
 		};
@@ -67,7 +67,7 @@ const Case = struct {
 		var rng = std.Random.DefaultPrng.init(0xB2D1_51A5 + width*257 + index);
 		rng.random().bytes(result.dividend); rng.random().bytes(result.divisor);
 		if (index%16 == 0) { @memset(result.dividend,255); @memset(result.divisor,255); }
-		result.dividend[2*width-1] |= 0x80;
+		result.dividend[dividend_len-1] |= 0x80;
 		const top = @as(u8,1) << @as(u3,@intCast(index%8));
 		result.divisor[width-1] = (result.divisor[width-1] & (top-1)) | top;
 		try setMagnitude(&result.a,result.dividend,allocator);
@@ -83,7 +83,10 @@ const Case = struct {
 		try setMagnitude(&result.mr,result.expected_r,allocator);
 		return result;
 	}
-	fn deinit(self: *@This()) void {
+	fn init(allocator: std.mem.Allocator, values_allocator: std.mem.Allocator, width: usize, index: usize) !Case {
+		return initSized(allocator,values_allocator,width,index,2*width);
+	}
+	pub fn deinit(self: *@This()) void {
 		inline for (.{&self.ga,&self.gb,&self.gq,&self.gr}) |z| gmp.__gmpz_clear(z);
 		self.a.deinit(); self.b.deinit(); self.mq.deinit(); self.mr.deinit();
 	}

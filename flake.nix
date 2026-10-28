@@ -365,6 +365,19 @@
 									$row.samples.cpu_ns[$i] == ([$row.components[].cpu_ns[$i]]|add/4) and
 									$row.samples.wall_ns[$i] == ([$row.components[].wall_ns[$i]]|add/4)))
 						' competitors.json > /dev/null
+						for geometry in short_quotient balanced long_dividend; do
+							${self.packages.${system}.division-probe}/bin/blip-mp-division-probe public "$geometry" 64,65 > public.json 2> stderr
+							test ! -s stderr
+							jq -e --arg geometry "$geometry" '
+								.correct == true and .method == "division-public-paired-v1" and .geometry == $geometry and
+								[.rows[].size] == [64,65] and all(.rows[]; . as $row |
+									.dividend_bytes == (if $geometry == "short_quotient" then .size+1 elif $geometry == "balanced" then .size*2 else .size*4 end) and
+									.fixture_count == 32 and .iterations == 32 and .warmup_cases == 64 and
+									[.components[].method] == ["current","burnikel_ziegler"] and
+									all(.components[]; (.cpu_ns|length)==6 and (.wall_ns|length)==6 and all(.cpu_ns[],.wall_ns[]; .>0)) and
+									all(range(6); . as $i | (($row.samples.cpu_ns[$i] - ([$row.components[].cpu_ns[$i]]|add/2))|fabs)<0.001))
+							' public.json > /dev/null
+						done
 						mkdir -p "$out"
 					'';
 

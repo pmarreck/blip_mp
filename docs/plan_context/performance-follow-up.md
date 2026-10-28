@@ -815,6 +815,48 @@ time; the production build and all-system evaluation passed. An initial
 boundary assertion incorrectly used `getU64` for positive `2^63`, although the
 current getter decodes through `i64`. It now checks the exact canonical bytes.
 
+### Paired public division probe
+
+Run `./bm --verified-division --config profiling-division-public.json` to compare
+ordinary `Mp.divMod` with explicit `Mp.divModBurnikelZiegler`. The configured
+divisor magnitude widths are 8,192, 12,288, 16,384 and 16,385 bytes. Separate
+cases use dividend widths of divisor-plus-one, twice the divisor, and four
+times the divisor. The odd width exercises B-Z's Knuth fallback. Each width
+has 32 inputs crossing all four sign combinations with all eight normalization
+shifts. Small 64/65-byte widths are available for CLI and correctness controls.
+
+GMP supplies magnitude quotient/remainder references before timing; truncated
+sign rules produce each expected canonical BLIP value. Both methods receive
+the same native inputs, reuse outputs and warm their thread-local scratch.
+Every call compares both complete canonical results inside timing. Six
+alternating ABBA/BAAB half-pool samples visit each input once per method.
+Primary engine values average the two methods. This experiment does not time
+GMP or measure cold allocation. The historical four-method competitor probe
+keeps its existing inputs, method definition and workload.
+
+The parser, corpus and partial-construction controls failed against their
+placeholders. The corpus test asserts the complete sign/normalization set,
+checks all three geometries and both even/odd widths, and makes both methods
+reject deliberately corrupted quotient references. The CLI check failed before
+the new route was connected. Existing injected timing controls are shared with
+the inverse and kernel-division probes. Each geometry has separate one- and
+twelve-CPU affinity cohorts, five processes and 120-second process deadlines.
+SIMD remains deferred while this experiment tests algorithm selection.
+
+Expanding allocation-failure coverage to all 32 signed cases exposed an existing
+`Mp.ensureHeapCapacity` bug. It freed the current buffer before requesting its
+replacement. A failed request left the object pointing to freed memory, causing
+a double free during fixture cleanup. A focused regression independently
+observed 98 bytes freed after an unsuccessful growth request. The replacement
+is now allocated before the old buffer is released. The regression requires
+the old encoded value to survive allocation failure and all storage to be freed
+exactly once afterward. This correction does not change algorithm dispatch.
+
+After the correction, the complete native suite passed in 84 seconds of mixed
+Nix preparation/check time. The production build and all-system evaluation also
+passed. Both the focused storage regression and the full signed-corpus
+allocation sweep are part of the complete suite.
+
 ### Exact-capacity remainder regression
 
 Reviewing the B-Z entry point exposed a separate single-byte-divisor bug. With
