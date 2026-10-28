@@ -10,7 +10,7 @@
   "cases": [
     {
       "name": "division_wide_quotient_4094_1core",
-      "definition": "division-wide-quotient-paired-v1-4094",
+      "definition": "division-wide-quotient-paired-v2-4094",
       "cores": 1,
       "processes": 5,
       "mode": "bm",
@@ -41,7 +41,7 @@
     },
     {
       "name": "division_wide_quotient_4094_12core",
-      "definition": "division-wide-quotient-paired-v1-4094",
+      "definition": "division-wide-quotient-paired-v2-4094",
       "cores": 12,
       "processes": 5,
       "mode": "bm",
@@ -72,7 +72,7 @@
     },
     {
       "name": "division_wide_quotient_4096_1core",
-      "definition": "division-wide-quotient-paired-v1-4096",
+      "definition": "division-wide-quotient-paired-v2-4096",
       "cores": 1,
       "processes": 5,
       "mode": "bm",
@@ -103,7 +103,7 @@
     },
     {
       "name": "division_wide_quotient_4096_12core",
-      "definition": "division-wide-quotient-paired-v1-4096",
+      "definition": "division-wide-quotient-paired-v2-4096",
       "cores": 12,
       "processes": 5,
       "mode": "bm",
@@ -134,7 +134,7 @@
     },
     {
       "name": "division_wide_quotient_4097_1core",
-      "definition": "division-wide-quotient-paired-v1-4097",
+      "definition": "division-wide-quotient-paired-v2-4097",
       "cores": 1,
       "processes": 5,
       "mode": "bm",
@@ -165,7 +165,7 @@
     },
     {
       "name": "division_wide_quotient_4097_12core",
-      "definition": "division-wide-quotient-paired-v1-4097",
+      "definition": "division-wide-quotient-paired-v2-4097",
       "cores": 12,
       "processes": 5,
       "mode": "bm",
@@ -196,7 +196,7 @@
     },
     {
       "name": "division_wide_quotient_4098_1core",
-      "definition": "division-wide-quotient-paired-v1-4098",
+      "definition": "division-wide-quotient-paired-v2-4098",
       "cores": 1,
       "processes": 5,
       "mode": "bm",
@@ -227,7 +227,7 @@
     },
     {
       "name": "division_wide_quotient_4098_12core",
-      "definition": "division-wide-quotient-paired-v1-4098",
+      "definition": "division-wide-quotient-paired-v2-4098",
       "cores": 12,
       "processes": 5,
       "mode": "bm",
@@ -258,7 +258,7 @@
     },
     {
       "name": "division_wide_quotient_8192_1core",
-      "definition": "division-wide-quotient-paired-v1-8192",
+      "definition": "division-wide-quotient-paired-v2-8192",
       "cores": 1,
       "processes": 5,
       "mode": "bm",
@@ -289,7 +289,7 @@
     },
     {
       "name": "division_wide_quotient_8192_12core",
-      "definition": "division-wide-quotient-paired-v1-8192",
+      "definition": "division-wide-quotient-paired-v2-8192",
       "cores": 12,
       "processes": 5,
       "mode": "bm",
@@ -320,7 +320,7 @@
     },
     {
       "name": "division_wide_quotient_8194_1core",
-      "definition": "division-wide-quotient-paired-v1-8194",
+      "definition": "division-wide-quotient-paired-v2-8194",
       "cores": 1,
       "processes": 5,
       "mode": "bm",
@@ -351,7 +351,7 @@
     },
     {
       "name": "division_wide_quotient_8194_12core",
-      "definition": "division-wide-quotient-paired-v1-8194",
+      "definition": "division-wide-quotient-paired-v2-8194",
       "cores": 12,
       "processes": 5,
       "mode": "bm",
@@ -382,7 +382,7 @@
     },
     {
       "name": "division_wide_quotient_16384_1core",
-      "definition": "division-wide-quotient-paired-v1-16384",
+      "definition": "division-wide-quotient-paired-v2-16384",
       "cores": 1,
       "processes": 5,
       "mode": "bm",
@@ -413,7 +413,7 @@
     },
     {
       "name": "division_wide_quotient_16384_12core",
-      "definition": "division-wide-quotient-paired-v1-16384",
+      "definition": "division-wide-quotient-paired-v2-16384",
       "cores": 12,
       "processes": 5,
       "mode": "bm",
@@ -444,7 +444,7 @@
     },
     {
       "name": "division_wide_quotient_16385_1core",
-      "definition": "division-wide-quotient-paired-v1-16385",
+      "definition": "division-wide-quotient-paired-v2-16385",
       "cores": 1,
       "processes": 5,
       "mode": "bm",
@@ -475,7 +475,7 @@
     },
     {
       "name": "division_wide_quotient_16385_12core",
-      "definition": "division-wide-quotient-paired-v1-16385",
+      "definition": "division-wide-quotient-paired-v2-16385",
       "cores": 12,
       "processes": 5,
       "mode": "bm",
@@ -506,7 +506,7 @@
     },
     {
       "name": "division_wide_quotient_16386_1core",
-      "definition": "division-wide-quotient-paired-v1-16386",
+      "definition": "division-wide-quotient-paired-v2-16386",
       "cores": 1,
       "processes": 5,
       "mode": "bm",
@@ -537,7 +537,7 @@
     },
     {
       "name": "division_wide_quotient_16386_12core",
-      "definition": "division-wide-quotient-paired-v1-16386",
+      "definition": "division-wide-quotient-paired-v2-16386",
       "cores": 12,
       "processes": 5,
       "mode": "bm",

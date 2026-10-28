@@ -665,6 +665,12 @@ pub const Mp = struct {
 		try tier3DivModOpBZWith(tier3.divModBurnikelZieglerQuotient1024,q,rem,a.payload(),b.payload());
 	}
 
+	/// Experimental odd-leaf/quotient guard with the standard signed contract.
+	pub fn divModBurnikelZieglerGuarded(q: *Mp, rem: *Mp, a: *const Mp, b: *const Mp) ArithError!void {
+		if (b.cached_sign == 0) return error.DivisionByZero;
+		try tier3DivModOpBZWith(tier3.divModBurnikelZieglerGuarded,q,rem,a.payload(),b.payload());
+	}
+
 	/// Experimental common-byte scaling with the standard signed contract.
 	pub fn divModBurnikelZieglerPadded(q: *Mp, rem: *Mp, a: *const Mp, b: *const Mp) ArithError!void {
 		if (b.cached_sign == 0) return error.DivisionByZero;
@@ -5434,7 +5440,7 @@ test "divMod: 8 sign combinations match GMP truncated semantics" {
 	for (cases) |c| {
 		try a_mp.setI64(c.a);
 		try b_mp.setI64(c.b);
-		inline for (.{Mp.divMod,Mp.divModBurnikelZiegler,Mp.divModBurnikelZieglerLeadingBlock,Mp.divModBurnikelZieglerShortQuotient,Mp.divModBurnikelZieglerShortCarry,Mp.divModBurnikelZieglerWideQuotient,Mp.divModBurnikelZieglerSelected,Mp.divModBurnikelZieglerQuotient1024,Mp.divModBurnikelZieglerPadded}) |divide| {
+		inline for (.{Mp.divMod,Mp.divModBurnikelZiegler,Mp.divModBurnikelZieglerLeadingBlock,Mp.divModBurnikelZieglerShortQuotient,Mp.divModBurnikelZieglerShortCarry,Mp.divModBurnikelZieglerWideQuotient,Mp.divModBurnikelZieglerSelected,Mp.divModBurnikelZieglerQuotient1024,Mp.divModBurnikelZieglerPadded,Mp.divModBurnikelZieglerGuarded}) |divide| {
 			try divide(&q_mp,&r_mp,&a_mp,&b_mp);
 			try testing.expectEqual(c.q, try q_mp.getI64());
 			try testing.expectEqual(c.rem, try r_mp.getI64());
@@ -5470,7 +5476,7 @@ test "divMod: division by zero returns error.DivisionByZero" {
 	defer r.deinit();
 	try a.setI64(42);
 	try b.setI64(0);
-	inline for (.{Mp.divMod,Mp.divModBurnikelZiegler,Mp.divModBurnikelZieglerLeadingBlock,Mp.divModBurnikelZieglerShortQuotient,Mp.divModBurnikelZieglerShortCarry,Mp.divModBurnikelZieglerWideQuotient,Mp.divModBurnikelZieglerSelected,Mp.divModBurnikelZieglerQuotient1024,Mp.divModBurnikelZieglerPadded}) |divide| {
+	inline for (.{Mp.divMod,Mp.divModBurnikelZiegler,Mp.divModBurnikelZieglerLeadingBlock,Mp.divModBurnikelZieglerShortQuotient,Mp.divModBurnikelZieglerShortCarry,Mp.divModBurnikelZieglerWideQuotient,Mp.divModBurnikelZieglerSelected,Mp.divModBurnikelZieglerQuotient1024,Mp.divModBurnikelZieglerPadded,Mp.divModBurnikelZieglerGuarded}) |divide| {
 		try testing.expectError(error.DivisionByZero,divide(&q,&r,&a,&b));
 	}
 	try testing.expectError(error.DivisionByZero, Mp.div(&q, &a, &b));
@@ -5496,7 +5502,7 @@ test "divMod: i64.min / -1 promotes to tier 3 and returns 2^63" {
 	try testing.expectEqual(@as(i64, 0), try r.getI64());
 	const expected = [_]u8{0x89,0,0,0,0,0,0,0,0x80,0};
 	try testing.expectEqualSlices(u8,&expected,q.bytes());
-	inline for (.{Mp.divModBurnikelZiegler,Mp.divModBurnikelZieglerLeadingBlock,Mp.divModBurnikelZieglerShortQuotient,Mp.divModBurnikelZieglerShortCarry,Mp.divModBurnikelZieglerWideQuotient,Mp.divModBurnikelZieglerSelected,Mp.divModBurnikelZieglerQuotient1024,Mp.divModBurnikelZieglerPadded}) |divide| {
+	inline for (.{Mp.divModBurnikelZiegler,Mp.divModBurnikelZieglerLeadingBlock,Mp.divModBurnikelZieglerShortQuotient,Mp.divModBurnikelZieglerShortCarry,Mp.divModBurnikelZieglerWideQuotient,Mp.divModBurnikelZieglerSelected,Mp.divModBurnikelZieglerQuotient1024,Mp.divModBurnikelZieglerPadded,Mp.divModBurnikelZieglerGuarded}) |divide| {
 		try divide(&q,&r,&a,&b);
 		try testing.expectEqualSlices(u8,&expected,q.bytes());
 		try testing.expectEqual(@as(i64,0),try r.getI64());

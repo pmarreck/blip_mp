@@ -1864,7 +1864,7 @@ Campaign `blip-mp-shape-20261028T214046Z` measured commit
 results, including one five-process timing retry at width 16,386 in the
 1-CPU cohort. All 32 cohorts are unbaselined; no baseline was approved.
 The [summary](../benchmarks/storage-aware/division-padding-shape-summary.json)
-retains the smaller-gap losses, paired samples and all process-mean ratios.
+retains the smaller-gap losses, paired sample ranges and all process-mean ratios.
 GMP supplies references outside timing, so these remain BLIP-to-BLIP results.
 
 The Linux x86_64 / Threadripper 3990X / Zig 0.16.0 ReleaseFast configuration
@@ -1873,6 +1873,69 @@ is unchanged. Source digest
 remained stable, and the probe SHA-256 was
 `590169437e62ef5c9c765fed404ef47af150423b29a82939355d956f5eeef2e7`.
 Exact-commit CI passed in 187 seconds.
+
+### Guarded padding qualification
+
+`divModBurnikelZieglerGuarded` is a separate experimental entry. It trims the
+dividend's significant length, requires a gap at least the divisor width, and
+extracts the odd part of that width with a trailing-zero count. An odd part
+of at least 6 KiB selects common-byte padding; all other inputs use the fixed
+quotient-1024 kernel. The length comparison uses subtraction to avoid overflow
+from doubling the divisor width. The normal divider remains unchanged.
+
+The guard first returned false and the entry called only the fixed kernel.
+An exhaustive set classifier through 65,536 divisor bytes, native-size overflow
+boundaries, and allocation-constrained dispatch checks failed against those
+placeholders. The expected width set is constructed from odd leaves and their
+powers-of-two multiples, independently of the implementation's bit operation.
+Two high zero dividend bytes in the dispatch fixture verify that physical
+capacity cannot change the decision. Signed checks cover kernel binding,
+every sign, output aliases and allocation failures at both sides of the guard.
+
+The `guarded-signed` probe compares `fixed_1024` with `guarded` through their
+standard signed wrappers. A deliberate test build bound both labels to the
+fixed kernel: complete arithmetic checks passed but the binding control failed.
+The CLI check separately failed on the missing route. The corrected method is
+`division-guarded-signed-paired-v1`, preserving the four-sign/eight-shift corpus,
+32 cases, six paired samples and full canonical BLIP result comparisons.
+`profiling-division-guarded-signed.json` declares five geometries at widths
+6,145, 8,194, 12,290 and 16,385 bytes in 1-CPU and 12-CPU cohorts. The excluded
+8,194-byte width is a control for the guard. GMP supplies references outside
+timing, so this does not replace the direct GMP comparison.
+
+### Tiny division clock follow-up
+
+The first complete guarded-padding suite failed on a non-advancing process CPU
+clock in the fixed-control method at 64 or 65 divisor bytes. A half-batch of
+16 fixtures with 16 repeats took 99,149 ns of monotonic wall time, but the two
+process CPU readings were identical. A separate bounded reproduction failed
+on process 293 of 500, with the same symptom across 127,164 ns of wall time.
+The arithmetic checks had passed. Both failures remain failures; no zero or
+wall-clock substitution is accepted.
+
+A startup trace found an unlimited CPU limit and no CPU timer setup. An
+independent C recurrence with volatile state saw no stalled reading in 10,000
+batches for each of the process and thread clocks, nor in 500 fresh processes
+per clock with 100 batches each. These finite checks do not identify the cause
+or establish that the native clock is universally reliable.
+
+The mitigation under qualification raises fixed repetitions from 16 to 256
+for divisor widths through 128 bytes. Larger widths retain one repetition.
+Signed and geometry probes therefore declare 8,192 calls per method/sample at
+small widths; the four-method competitor probe declares 16,384. All affected
+previously published method and configuration versions advance. The new guarded
+method remains v1. Historical result artifacts retain their original versions.
+Stopped/backward clocks still fail, with the four observed readings preserved
+where diagnostic support exists. The repetition-boundary test failed before
+the implementation changed; existing injected-clock checks cover error behavior.
+
+The updated probe passed all 500 bounded native reproductions. The full suite
+passed in 120 seconds of mixed Nix preparation/check time; the production build
+and all-system evaluation also passed. The unit/C-API build phase accounted for
+117 seconds including compilation and execution. Execution-only latency was not
+isolated, so this does not establish the five-second test budget. These results
+qualify the experiment and batching mitigation without diagnosing the clock
+failure or making a new performance claim.
 
 ### Exact-capacity remainder regression
 

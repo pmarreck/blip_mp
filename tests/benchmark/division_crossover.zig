@@ -38,11 +38,12 @@ test "division comparison selects the intended algorithm pairs" {
 const Timing = struct { cpu_ns: f64, wall_ns: f64 };
 const Sample = struct { cpu_ns: [2]f64, wall_ns: [2]f64 };
 
-pub fn nativeRepeats(width: usize) usize { return if (width <= 128) 16 else 1; }
+// Fixed work per fixture; never retry or accept a stopped clock inside timing.
+pub fn nativeRepeats(width: usize) usize { return if (width <= 128) 256 else 1; }
 
 test "native repetitions distinguish small fixtures and the 128-byte boundary" {
 	const sizes = [_]usize{8,9,16,31,32,63,64,65,127,128,129,256,512,1024,2048,4096,8192,12288,16384,16385};
-	const expected = [_]usize{16,16,16,16,16,16,16,16,16,16,1,1,1,1,1,1,1,1,1,1};
+	const expected = [_]usize{256,256,256,256,256,256,256,256,256,256,1,1,1,1,1,1,1,1,1,1};
 	var actual: [sizes.len]usize = undefined;
 	for (sizes,0..) |size,index| actual[index] = nativeRepeats(size);
 	try std.testing.expectEqualSlices(usize,&expected,&actual);

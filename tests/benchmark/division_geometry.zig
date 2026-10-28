@@ -307,7 +307,7 @@ fn runWith(comptime mode: Mode, init: std.process.Init, args: []const []const u8
 	}
 	const report = .{
 		.schema="performance-measurement/v1",.correct=true,.build_mode="ReleaseFast",
-		.compiler=@import("builtin").zig_version_string,.method=switch (mode) { .geometry => "division-geometry-paired-v2", .wide => "division-wide-quotient-paired-v1", .padding => "division-byte-padding-paired-v1", .shape => "division-padding-shape-paired-v1" },
+		.compiler=@import("builtin").zig_version_string,.method=switch (mode) { .geometry => "division-geometry-paired-v3", .wide => "division-wide-quotient-paired-v2", .padding => "division-byte-padding-paired-v2", .shape => "division-padding-shape-paired-v2" },
 		.divisor_bytes=options.width,.cpu_clock="CLOCK_PROCESS_CPUTIME_ID",.wall_clock="CLOCK_MONOTONIC",
 		.seed_usage="0xB2D151A5 + divisor_bytes*257 + index; eight normalization shifts; engine seed does not alter inputs",
 		.operation=switch (mode) {
@@ -315,7 +315,7 @@ fn runWith(comptime mode: Mode, init: std.process.Init, args: []const []const u8
 			.wide => "positive magnitude byte buffers; size is dividend bytes minus divisor bytes, not actual quotient width; fixed short-carry B-Z versus wider outer fallback",
 			.padding, .shape => "positive magnitude byte buffers; size is dividend bytes minus divisor bytes, not actual quotient width; fixed quotient-1024 B-Z versus common-byte scaling",
 		},
-		.normalization="six ABBA/BAAB half-pool samples; iterations gives verified calls per method/sample; 16 repeats at widths <=128, otherwise one; primary averages both methods; no subtraction",
+		.normalization="six ABBA/BAAB half-pool samples; iterations gives verified calls per method/sample; 256 repeats at widths <=128, otherwise one; primary averages both methods; no subtraction",
 		.verification="GMP references outside timing; full quotient and remainder magnitude comparison plus output canaries on every call",
 		.allocator_coverage="prepared inputs and warmed scratch; each byte kernel resets an arena retaining capacity and poisons outputs; arithmetic allocation included; cold allocation unmeasured",
 		.rows=rows[0..options.count],

@@ -10,7 +10,7 @@
   "cases": [
     {
       "name": "division_gap_crossover_4096_1core",
-      "definition": "division-wide-quotient-paired-v1-4096-gap-sweep",
+      "definition": "division-wide-quotient-paired-v2-4096-gap-sweep",
       "cores": 1,
       "processes": 5,
       "mode": "bm",
@@ -45,7 +45,7 @@
     },
     {
       "name": "division_gap_crossover_4096_12core",
-      "definition": "division-wide-quotient-paired-v1-4096-gap-sweep",
+      "definition": "division-wide-quotient-paired-v2-4096-gap-sweep",
       "cores": 12,
       "processes": 5,
       "mode": "bm",
@@ -80,7 +80,7 @@
     },
     {
       "name": "division_gap_crossover_4098_1core",
-      "definition": "division-wide-quotient-paired-v1-4098-gap-sweep",
+      "definition": "division-wide-quotient-paired-v2-4098-gap-sweep",
       "cores": 1,
       "processes": 5,
       "mode": "bm",
@@ -115,7 +115,7 @@
     },
     {
       "name": "division_gap_crossover_4098_12core",
-      "definition": "division-wide-quotient-paired-v1-4098-gap-sweep",
+      "definition": "division-wide-quotient-paired-v2-4098-gap-sweep",
       "cores": 12,
       "processes": 5,
       "mode": "bm",
@@ -150,7 +150,7 @@
     },
     {
       "name": "division_gap_crossover_8194_1core",
-      "definition": "division-wide-quotient-paired-v1-8194-gap-sweep",
+      "definition": "division-wide-quotient-paired-v2-8194-gap-sweep",
       "cores": 1,
       "processes": 5,
       "mode": "bm",
@@ -185,7 +185,7 @@
     },
     {
       "name": "division_gap_crossover_8194_12core",
-      "definition": "division-wide-quotient-paired-v1-8194-gap-sweep",
+      "definition": "division-wide-quotient-paired-v2-8194-gap-sweep",
       "cores": 12,
       "processes": 5,
       "mode": "bm",
@@ -220,7 +220,7 @@
     },
     {
       "name": "division_gap_crossover_16386_1core",
-      "definition": "division-wide-quotient-paired-v1-16386-gap-sweep",
+      "definition": "division-wide-quotient-paired-v2-16386-gap-sweep",
       "cores": 1,
       "processes": 5,
       "mode": "bm",
@@ -255,7 +255,7 @@
     },
     {
       "name": "division_gap_crossover_16386_12core",
-      "definition": "division-wide-quotient-paired-v1-16386-gap-sweep",
+      "definition": "division-wide-quotient-paired-v2-16386-gap-sweep",
       "cores": 12,
       "processes": 5,
       "mode": "bm",

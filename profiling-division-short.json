@@ -10,7 +10,7 @@
   "cases": [
     {
       "name": "division_short_short_quotient_1core",
-      "definition": "division-short-quotient-paired-v2-short_quotient",
+      "definition": "division-short-quotient-paired-v3-short_quotient",
       "cores": 1,
       "processes": 5,
       "mode": "bm",
@@ -39,7 +39,7 @@
     },
     {
       "name": "division_short_short_quotient_12core",
-      "definition": "division-short-quotient-paired-v2-short_quotient",
+      "definition": "division-short-quotient-paired-v3-short_quotient",
       "cores": 12,
       "processes": 5,
       "mode": "bm",
@@ -68,7 +68,7 @@
     },
     {
       "name": "division_short_one_chunk_limit_1core",
-      "definition": "division-short-quotient-paired-v2-one_chunk_limit",
+      "definition": "division-short-quotient-paired-v3-one_chunk_limit",
       "cores": 1,
       "processes": 5,
       "mode": "bm",
@@ -97,7 +97,7 @@
     },
     {
       "name": "division_short_one_chunk_limit_12core",
-      "definition": "division-short-quotient-paired-v2-one_chunk_limit",
+      "definition": "division-short-quotient-paired-v3-one_chunk_limit",
       "cores": 12,
       "processes": 5,
       "mode": "bm",
@@ -126,7 +126,7 @@
     },
     {
       "name": "division_short_two_chunk_start_1core",
-      "definition": "division-short-quotient-paired-v2-two_chunk_start",
+      "definition": "division-short-quotient-paired-v3-two_chunk_start",
       "cores": 1,
       "processes": 5,
       "mode": "bm",
@@ -155,7 +155,7 @@
     },
     {
       "name": "division_short_two_chunk_start_12core",
-      "definition": "division-short-quotient-paired-v2-two_chunk_start",
+      "definition": "division-short-quotient-paired-v3-two_chunk_start",
       "cores": 12,
       "processes": 5,
       "mode": "bm",
@@ -184,7 +184,7 @@
     },
     {
       "name": "division_short_balanced_1core",
-      "definition": "division-short-quotient-paired-v2-balanced",
+      "definition": "division-short-quotient-paired-v3-balanced",
       "cores": 1,
       "processes": 5,
       "mode": "bm",
@@ -213,7 +213,7 @@
     },
     {
       "name": "division_short_balanced_12core",
-      "definition": "division-short-quotient-paired-v2-balanced",
+      "definition": "division-short-quotient-paired-v3-balanced",
       "cores": 12,
       "processes": 5,
       "mode": "bm",
@@ -242,7 +242,7 @@
     },
     {
       "name": "division_short_long_dividend_1core",
-      "definition": "division-short-quotient-paired-v2-long_dividend",
+      "definition": "division-short-quotient-paired-v3-long_dividend",
       "cores": 1,
       "processes": 5,
       "mode": "bm",
@@ -271,7 +271,7 @@
     },
     {
       "name": "division_short_long_dividend_12core",
-      "definition": "division-short-quotient-paired-v2-long_dividend",
+      "definition": "division-short-quotient-paired-v3-long_dividend",
       "cores": 12,
       "processes": 5,
       "mode": "bm",

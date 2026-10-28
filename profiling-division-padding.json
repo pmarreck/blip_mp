@@ -10,7 +10,7 @@
   "cases": [
     {
       "name": "division_padding_4094_1core",
-      "definition": "division-byte-padding-paired-v1-4094-gap-sweep",
+      "definition": "division-byte-padding-paired-v2-4094-gap-sweep",
       "cores": 1,
       "processes": 5,
       "mode": "bm",
@@ -40,7 +40,7 @@
     },
     {
       "name": "division_padding_4094_12core",
-      "definition": "division-byte-padding-paired-v1-4094-gap-sweep",
+      "definition": "division-byte-padding-paired-v2-4094-gap-sweep",
       "cores": 12,
       "processes": 5,
       "mode": "bm",
@@ -70,7 +70,7 @@
     },
     {
       "name": "division_padding_4095_1core",
-      "definition": "division-byte-padding-paired-v1-4095-gap-sweep",
+      "definition": "division-byte-padding-paired-v2-4095-gap-sweep",
       "cores": 1,
       "processes": 5,
       "mode": "bm",
@@ -100,7 +100,7 @@
     },
     {
       "name": "division_padding_4095_12core",
-      "definition": "division-byte-padding-paired-v1-4095-gap-sweep",
+      "definition": "division-byte-padding-paired-v2-4095-gap-sweep",
       "cores": 12,
       "processes": 5,
       "mode": "bm",
@@ -130,7 +130,7 @@
     },
     {
       "name": "division_padding_4096_1core",
-      "definition": "division-byte-padding-paired-v1-4096-gap-sweep",
+      "definition": "division-byte-padding-paired-v2-4096-gap-sweep",
       "cores": 1,
       "processes": 5,
       "mode": "bm",
@@ -160,7 +160,7 @@
     },
     {
       "name": "division_padding_4096_12core",
-      "definition": "division-byte-padding-paired-v1-4096-gap-sweep",
+      "definition": "division-byte-padding-paired-v2-4096-gap-sweep",
       "cores": 12,
       "processes": 5,
       "mode": "bm",
@@ -190,7 +190,7 @@
     },
     {
       "name": "division_padding_4097_1core",
-      "definition": "division-byte-padding-paired-v1-4097-gap-sweep",
+      "definition": "division-byte-padding-paired-v2-4097-gap-sweep",
       "cores": 1,
       "processes": 5,
       "mode": "bm",
@@ -220,7 +220,7 @@
     },
     {
       "name": "division_padding_4097_12core",
-      "definition": "division-byte-padding-paired-v1-4097-gap-sweep",
+      "definition": "division-byte-padding-paired-v2-4097-gap-sweep",
       "cores": 12,
       "processes": 5,
       "mode": "bm",
@@ -250,7 +250,7 @@
     },
     {
       "name": "division_padding_4098_1core",
-      "definition": "division-byte-padding-paired-v1-4098-gap-sweep",
+      "definition": "division-byte-padding-paired-v2-4098-gap-sweep",
       "cores": 1,
       "processes": 5,
       "mode": "bm",
@@ -280,7 +280,7 @@
     },
     {
       "name": "division_padding_4098_12core",
-      "definition": "division-byte-padding-paired-v1-4098-gap-sweep",
+      "definition": "division-byte-padding-paired-v2-4098-gap-sweep",
       "cores": 12,
       "processes": 5,
       "mode": "bm",
@@ -310,7 +310,7 @@
     },
     {
       "name": "division_padding_8191_1core",
-      "definition": "division-byte-padding-paired-v1-8191-gap-sweep",
+      "definition": "division-byte-padding-paired-v2-8191-gap-sweep",
       "cores": 1,
       "processes": 5,
       "mode": "bm",
@@ -340,7 +340,7 @@
     },
     {
       "name": "division_padding_8191_12core",
-      "definition": "division-byte-padding-paired-v1-8191-gap-sweep",
+      "definition": "division-byte-padding-paired-v2-8191-gap-sweep",
       "cores": 12,
       "processes": 5,
       "mode": "bm",
@@ -370,7 +370,7 @@
     },
     {
       "name": "division_padding_8192_1core",
-      "definition": "division-byte-padding-paired-v1-8192-gap-sweep",
+      "definition": "division-byte-padding-paired-v2-8192-gap-sweep",
       "cores": 1,
       "processes": 5,
       "mode": "bm",
@@ -400,7 +400,7 @@
     },
     {
       "name": "division_padding_8192_12core",
-      "definition": "division-byte-padding-paired-v1-8192-gap-sweep",
+      "definition": "division-byte-padding-paired-v2-8192-gap-sweep",
       "cores": 12,
       "processes": 5,
       "mode": "bm",
@@ -430,7 +430,7 @@
     },
     {
       "name": "division_padding_8193_1core",
-      "definition": "division-byte-padding-paired-v1-8193-gap-sweep",
+      "definition": "division-byte-padding-paired-v2-8193-gap-sweep",
       "cores": 1,
       "processes": 5,
       "mode": "bm",
@@ -460,7 +460,7 @@
     },
     {
       "name": "division_padding_8193_12core",
-      "definition": "division-byte-padding-paired-v1-8193-gap-sweep",
+      "definition": "division-byte-padding-paired-v2-8193-gap-sweep",
       "cores": 12,
       "processes": 5,
       "mode": "bm",
@@ -490,7 +490,7 @@
     },
     {
       "name": "division_padding_8194_1core",
-      "definition": "division-byte-padding-paired-v1-8194-gap-sweep",
+      "definition": "division-byte-padding-paired-v2-8194-gap-sweep",
       "cores": 1,
       "processes": 5,
       "mode": "bm",
@@ -520,7 +520,7 @@
     },
     {
       "name": "division_padding_8194_12core",
-      "definition": "division-byte-padding-paired-v1-8194-gap-sweep",
+      "definition": "division-byte-padding-paired-v2-8194-gap-sweep",
       "cores": 12,
       "processes": 5,
       "mode": "bm",
@@ -550,7 +550,7 @@
     },
     {
       "name": "division_padding_16383_1core",
-      "definition": "division-byte-padding-paired-v1-16383-gap-sweep",
+      "definition": "division-byte-padding-paired-v2-16383-gap-sweep",
       "cores": 1,
       "processes": 5,
       "mode": "bm",
@@ -580,7 +580,7 @@
     },
     {
       "name": "division_padding_16383_12core",
-      "definition": "division-byte-padding-paired-v1-16383-gap-sweep",
+      "definition": "division-byte-padding-paired-v2-16383-gap-sweep",
       "cores": 12,
       "processes": 5,
       "mode": "bm",
@@ -610,7 +610,7 @@
     },
     {
       "name": "division_padding_16384_1core",
-      "definition": "division-byte-padding-paired-v1-16384-gap-sweep",
+      "definition": "division-byte-padding-paired-v2-16384-gap-sweep",
       "cores": 1,
       "processes": 5,
       "mode": "bm",
@@ -640,7 +640,7 @@
     },
     {
       "name": "division_padding_16384_12core",
-      "definition": "division-byte-padding-paired-v1-16384-gap-sweep",
+      "definition": "division-byte-padding-paired-v2-16384-gap-sweep",
       "cores": 12,
       "processes": 5,
       "mode": "bm",
@@ -670,7 +670,7 @@
     },
     {
       "name": "division_padding_16385_1core",
-      "definition": "division-byte-padding-paired-v1-16385-gap-sweep",
+      "definition": "division-byte-padding-paired-v2-16385-gap-sweep",
       "cores": 1,
       "processes": 5,
       "mode": "bm",
@@ -700,7 +700,7 @@
     },
     {
       "name": "division_padding_16385_12core",
-      "definition": "division-byte-padding-paired-v1-16385-gap-sweep",
+      "definition": "division-byte-padding-paired-v2-16385-gap-sweep",
       "cores": 12,
       "processes": 5,
       "mode": "bm",
@@ -730,7 +730,7 @@
     },
     {
       "name": "division_padding_16386_1core",
-      "definition": "division-byte-padding-paired-v1-16386-gap-sweep",
+      "definition": "division-byte-padding-paired-v2-16386-gap-sweep",
       "cores": 1,
       "processes": 5,
       "mode": "bm",
@@ -760,7 +760,7 @@
     },
     {
       "name": "division_padding_16386_12core",
-      "definition": "division-byte-padding-paired-v1-16386-gap-sweep",
+      "definition": "division-byte-padding-paired-v2-16386-gap-sweep",
       "cores": 12,
       "processes": 5,
       "mode": "bm",

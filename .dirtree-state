@@ -71,6 +71,7 @@ annotate=[
 	profiling-division-fallback.json = Paired byte versus chunk fallback measurements with recursive controls
 	profiling-division-gap-crossover.json = Paired quotient-gap crossover sweep at neighboring even divisor widths
 	profiling-division-geometry.json = Paired division crossover by dividend length gap at three aligned divisor widths
+	profiling-division-guarded-signed.json = Signed fixed-control versus guarded padding measurements
 	profiling-division-leading.json = Paired signed B-Z leading-block shortcut experiment across operand geometries
 	profiling-division-padding-shape.json = Byte-padding crossover by intermediate width and relative quotient gap
 	profiling-division-padding.json = Paired fixed-control and byte-padding division measurements

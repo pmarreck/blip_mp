@@ -355,10 +355,10 @@
 						test ! -s stderr
 						jq -e --arg comparison "$comparison" '
 							.schema == "performance-measurement/v1" and .correct == true and
-							.method == (if $comparison == "competitors" then "division-native-competitors-v1" else "division-selected-competitors-v1" end) and .build_mode == "ReleaseFast" and
+							.method == (if $comparison == "competitors" then "division-native-competitors-v2" else "division-selected-competitors-v2" end) and .build_mode == "ReleaseFast" and
 							(.gmp_version|length) > 0 and [.rows[].size] == [8,64] and
 							all(.rows[]; . as $row |
-								.fixture_count == 64 and .iterations == 1024 and .warmup_cases == 256 and
+								.fixture_count == 64 and .iterations == 16384 and .warmup_cases == 256 and
 								[.components[].method] == (if $comparison == "competitors" then ["public_blip","knuth","bz128","gmp"] else ["public_blip","knuth","selected_bz","gmp"] end) and
 								all(.samples[]; length == 8 and all(.[]; . > 0)) and
 								all(.components[]; (.cpu_ns|length) == 8 and (.wall_ns|length) == 8 and all(.cpu_ns[],.wall_ns[]; . > 0)) and
@@ -367,7 +367,7 @@
 									$row.samples.wall_ns[$i] == ([$row.components[].wall_ns[$i]]|add/4)))
 						' competitors.json > /dev/null
 						done
-						for comparison in public leading short short-public carry selected-public; do
+						for comparison in public leading short short-public carry selected-public guarded-signed; do
 						for geometry in short_quotient one_chunk_limit two_chunk_start balanced long_dividend; do
 							if ! ${self.packages.${system}.division-probe}/bin/blip-mp-division-probe "$comparison" "$geometry" 64,65 > public.json 2> stderr; then
 								echo "division probe failed: $comparison $geometry" >&2
@@ -376,11 +376,11 @@
 							fi
 							test ! -s stderr
 							jq -e --arg geometry "$geometry" --arg comparison "$comparison" '
-								.correct == true and .method == ({"public":"division-public-paired-v2","leading":"division-leading-block-paired-v2","short":"division-short-quotient-paired-v2","short-public":"division-short-public-paired-v2","carry":"division-short-carry-paired-v2","selected-public":"division-selected-public-paired-v1"}[$comparison]) and .geometry == $geometry and
+								.correct == true and .method == ({"public":"division-public-paired-v3","leading":"division-leading-block-paired-v3","short":"division-short-quotient-paired-v3","short-public":"division-short-public-paired-v3","carry":"division-short-carry-paired-v3","selected-public":"division-selected-public-paired-v2","guarded-signed":"division-guarded-signed-paired-v1"}[$comparison]) and .geometry == $geometry and
 								[.rows[].size] == [64,65] and all(.rows[]; . as $row |
 									.dividend_bytes == (if $geometry == "short_quotient" then .size+1 elif $geometry == "one_chunk_limit" then .size+7 elif $geometry == "two_chunk_start" then .size+8 elif $geometry == "balanced" then .size*2 else .size*4 end) and
-									.fixture_count == 32 and .iterations == 512 and .warmup_cases == 64 and
-									[.components[].method] == ({"public":["current","burnikel_ziegler"],"leading":["burnikel_ziegler","leading_block"],"short":["leading_block","short_quotient"],"short-public":["current","short_quotient"],"carry":["short_quotient","short_carry"],"selected-public":["current","selected"]}[$comparison]) and
+									.fixture_count == 32 and .iterations == 8192 and .warmup_cases == 64 and
+									[.components[].method] == ({"public":["current","burnikel_ziegler"],"leading":["burnikel_ziegler","leading_block"],"short":["leading_block","short_quotient"],"short-public":["current","short_quotient"],"carry":["short_quotient","short_carry"],"selected-public":["current","selected"],"guarded-signed":["fixed_1024","guarded"]}[$comparison]) and
 									all(.components[]; (.cpu_ns|length)==6 and (.wall_ns|length)==6 and all(.cpu_ns[],.wall_ns[]; .>0)) and
 									all(range(6); . as $i | (($row.samples.cpu_ns[$i] - ([$row.components[].cpu_ns[$i]]|add/2))|fabs)<0.001))
 							' public.json > /dev/null
@@ -389,9 +389,9 @@
 						${self.packages.${system}.division-probe}/bin/blip-mp-division-probe geometry 64 1,7,8,16,32,64 > geometry.json 2> stderr
 						test ! -s stderr
 						jq -e '
-							.correct == true and .method == "division-geometry-paired-v2" and .divisor_bytes == 64 and
+							.correct == true and .method == "division-geometry-paired-v3" and .divisor_bytes == 64 and
 							[.rows[].size] == [1,7,8,16,32,64] and all(.rows[]; . as $row |
-								.dividend_bytes == 64+.size and .fixture_count == 32 and .iterations == 512 and .warmup_cases == 64 and
+								.dividend_bytes == 64+.size and .fixture_count == 32 and .iterations == 8192 and .warmup_cases == 64 and
 								[.components[].method] == ["knuth","selected_bz"] and
 								all(.components[]; (.cpu_ns|length)==6 and (.wall_ns|length)==6 and all(.cpu_ns[],.wall_ns[]; .>0)) and
 								all(range(6); . as $i | (($row.samples.cpu_ns[$i] - ([$row.components[].cpu_ns[$i]]|add/2))|fabs)<0.001))
@@ -402,9 +402,9 @@
 							test ! -s stderr
 							jq -e --argjson width "$width" --arg gaps "$gaps" '
 								.schema == "performance-measurement/v1" and .correct == true and .build_mode == "ReleaseFast" and
-								.method == "division-wide-quotient-paired-v1" and .divisor_bytes == $width and
+								.method == "division-wide-quotient-paired-v2" and .divisor_bytes == $width and
 								[.rows[].size] == ($gaps|split(",")|map(tonumber)) and all(.rows[]; . as $row |
-									.dividend_bytes == $width+.size and .fixture_count == 32 and .iterations == (if $width <=128 then 512 else 32 end) and .warmup_cases == 64 and
+									.dividend_bytes == $width+.size and .fixture_count == 32 and .iterations == (if $width <=128 then 8192 else 32 end) and .warmup_cases == 64 and
 									[.components[].method] == ["short_carry","wide_quotient"] and
 									all(.components[]; (.cpu_ns|length)==6 and (.wall_ns|length)==6 and all(.cpu_ns[],.wall_ns[]; .>0)) and
 									all(range(6); . as $i | (($row.samples.cpu_ns[$i] - ([$row.components[].cpu_ns[$i]]|add/2))|fabs)<0.001 and (($row.samples.wall_ns[$i] - ([$row.components[].wall_ns[$i]]|add/2))|fabs)<0.001))
@@ -421,9 +421,9 @@
 							fi
 							test ! -s stderr
 							jq -e --argjson width "$width" --arg gaps "$gaps" '
-								.correct == true and .method == "division-byte-padding-paired-v1" and .divisor_bytes == $width and
+								.correct == true and .method == "division-byte-padding-paired-v2" and .divisor_bytes == $width and
 								[.rows[].size] == ($gaps|split(",")|map(tonumber)) and all(.rows[]; . as $row |
-									.dividend_bytes == $width+.size and .fixture_count == 32 and .iterations == (if $width <=128 then 512 else 32 end) and .warmup_cases == 64 and
+									.dividend_bytes == $width+.size and .fixture_count == 32 and .iterations == (if $width <=128 then 8192 else 32 end) and .warmup_cases == 64 and
 									[.components[].method] == ["quotient_1024","padded"] and
 									all(.components[]; (.cpu_ns|length)==6 and (.wall_ns|length)==6 and all(.cpu_ns[],.wall_ns[]; .>0)) and
 									all(range(6); . as $i | (($row.samples.cpu_ns[$i] - ([$row.components[].cpu_ns[$i]]|add/2))|fabs)<0.001 and (($row.samples.wall_ns[$i] - ([$row.components[].wall_ns[$i]]|add/2))|fabs)<0.001))
@@ -438,9 +438,9 @@
 							fi
 							test ! -s stderr
 							jq -e --argjson width "$width" --arg gaps "$gaps" '
-								.correct == true and .method == "division-padding-shape-paired-v1" and .divisor_bytes == $width and
+								.correct == true and .method == "division-padding-shape-paired-v2" and .divisor_bytes == $width and
 								[.rows[].size] == ($gaps|split(",")|map(tonumber)) and all(.rows[]; . as $row |
-									.dividend_bytes == $width+.size and .fixture_count == 32 and .iterations == (if $width <=128 then 512 else 32 end) and .warmup_cases == 64 and
+									.dividend_bytes == $width+.size and .fixture_count == 32 and .iterations == (if $width <=128 then 8192 else 32 end) and .warmup_cases == 64 and
 									[.components[].method] == ["quotient_1024","padded"] and
 									all(.components[]; (.cpu_ns|length)==6 and (.wall_ns|length)==6 and all(.cpu_ns[],.wall_ns[]; .>0)) and
 									all(range(6); . as $i | (($row.samples.cpu_ns[$i] - ([$row.components[].cpu_ns[$i]]|add/2))|fabs)<0.001 and (($row.samples.wall_ns[$i] - ([$row.components[].wall_ns[$i]]|add/2))|fabs)<0.001))

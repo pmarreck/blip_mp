@@ -10,7 +10,7 @@
   "cases": [
     {
       "name": "division_selected_competitors_1core",
-      "definition": "division-selected-competitors-v1",
+      "definition": "division-selected-competitors-v2",
       "cores": 1,
       "processes": 5,
       "mode": "bm",
@@ -46,7 +46,7 @@
     },
     {
       "name": "division_selected_competitors_12core",
-      "definition": "division-selected-competitors-v1",
+      "definition": "division-selected-competitors-v2",
       "cores": 12,
       "processes": 5,
       "mode": "bm",

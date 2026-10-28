@@ -10,7 +10,7 @@
   "cases": [
     {
       "name": "division_geometry_4096_1core",
-      "definition": "division-geometry-paired-v2-4096",
+      "definition": "division-geometry-paired-v3-4096",
       "cores": 1,
       "processes": 5,
       "mode": "bm",
@@ -47,7 +47,7 @@
     },
     {
       "name": "division_geometry_4096_12core",
-      "definition": "division-geometry-paired-v2-4096",
+      "definition": "division-geometry-paired-v3-4096",
       "cores": 12,
       "processes": 5,
       "mode": "bm",
@@ -84,7 +84,7 @@
     },
     {
       "name": "division_geometry_8192_1core",
-      "definition": "division-geometry-paired-v2-8192",
+      "definition": "division-geometry-paired-v3-8192",
       "cores": 1,
       "processes": 5,
       "mode": "bm",
@@ -122,7 +122,7 @@
     },
     {
       "name": "division_geometry_8192_12core",
-      "definition": "division-geometry-paired-v2-8192",
+      "definition": "division-geometry-paired-v3-8192",
       "cores": 12,
       "processes": 5,
       "mode": "bm",
@@ -160,7 +160,7 @@
     },
     {
       "name": "division_geometry_16384_1core",
-      "definition": "division-geometry-paired-v2-16384",
+      "definition": "division-geometry-paired-v3-16384",
       "cores": 1,
       "processes": 5,
       "mode": "bm",
@@ -199,7 +199,7 @@
     },
     {
       "name": "division_geometry_16384_12core",
-      "definition": "division-geometry-paired-v2-16384",
+      "definition": "division-geometry-paired-v3-16384",
       "cores": 12,
       "processes": 5,
       "mode": "bm",

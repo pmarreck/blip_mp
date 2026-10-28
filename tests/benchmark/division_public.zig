@@ -5,19 +5,61 @@ const Mp = blip.Mp;
 const Case = @import("division_competitors.zig").Case;
 const timing = @import("division_crossover.zig");
 const widths = [_]usize{64,65,8192,12288,16384,16385};
+const guarded_widths = [_]usize{64,65,6145,8194,12290,16385};
 const Geometry = enum { short_quotient, one_chunk_limit, two_chunk_start, balanced, long_dividend };
-const Method = enum { current, burnikel_ziegler, leading_block, short_quotient, short_carry, selected };
+const Method = enum { current, burnikel_ziegler, leading_block, short_quotient, short_carry, selected, fixed_1024, guarded };
 const methods = [2]Method{.current,.burnikel_ziegler};
-const Comparison = enum { public, leading, short, short_public, carry, selected_public };
+const Comparison = enum { public, leading, short, short_public, carry, selected_public, guarded_signed };
 const Options = struct { geometry: Geometry, sizes: [widths.len]usize, count: usize };
 
+fn parseGuarded(args: []const []const u8) !Options { return parseWidths(&guarded_widths,args); }
+
+test "guarded signed parser classifies the complete geometry and width domain" {
+	const allowed = [_]usize{64,65,6145,8194,12290,16385};
+	for (std.enums.values(Geometry)) |geometry| for (0..16400) |width| {
+		var buffer: [24]u8 = undefined;
+		const arg = try std.fmt.bufPrint(&buffer,"{d}",.{width});
+		const accepted = if (parseGuarded(&.{@tagName(geometry),arg})) |options| blk: {
+			try std.testing.expectEqual(geometry,options.geometry);
+			try std.testing.expectEqual(@as(usize,1),options.count);
+			try std.testing.expectEqual(width,options.sizes[0]); break :blk true;
+		} else |err| blk: { try std.testing.expectEqual(error.InvalidArguments,err); break :blk false; };
+		try std.testing.expectEqual(std.mem.indexOfScalar(usize,&allowed,width)!=null,accepted);
+	};
+	const options = try parseGuarded(&.{"balanced","64,65,6145,8194,12290,16385"});
+	try std.testing.expectEqualSlices(usize,&allowed,options.sizes[0..options.count]);
+	for ([_][]const u8{"","64,","64,64","65,64","-1","x","18446744073709551616"}) |arg| try std.testing.expectError(error.InvalidArguments,parseGuarded(&.{"balanced",arg}));
+	try std.testing.expectError(error.InvalidArguments,parseGuarded(&.{"unknown","64"}));
+	try std.testing.expectError(error.InvalidArguments,parseGuarded(&.{}));
+	try std.testing.expectError(error.InvalidArguments,parseGuarded(&.{"balanced"}));
+	try std.testing.expectError(error.InvalidArguments,parseGuarded(&.{"balanced","64","65"}));
+}
+
+test "guarded signed probe binds the padding candidate and fixed control distinctly" {
+	var allocated: [2]usize = undefined;
+	for ([_]Method{.fixed_1024,.guarded},0..) |method,mi| {
+		var counted = std.testing.FailingAllocator.init(std.testing.allocator,.{});
+		var pool = try Pool.init(counted.allocator(),.balanced,6145,1);
+		const before = counted.allocated_bytes;
+		pool.run(method,0) catch |err| { pool.deinit(); return err; };
+		allocated[mi] = counted.allocated_bytes-before;
+		pool.deinit();
+		try std.testing.expectEqual(counted.allocated_bytes,counted.freed_bytes);
+	}
+	try std.testing.expect(allocated[1] > allocated[0]);
+}
+
 fn parse(args: []const []const u8) !Options {
+	return parseWidths(&widths,args);
+}
+
+fn parseWidths(allowed: []const usize, args: []const []const u8) !Options {
 	if (args.len != 2) return error.InvalidArguments;
 	var options: Options = .{ .geometry = std.meta.stringToEnum(Geometry,args[0]) orelse return error.InvalidArguments, .sizes = undefined, .count = 0 };
 	var parts = std.mem.splitScalar(u8,args[1],',');
 	while (parts.next()) |part| {
 		const width = std.fmt.parseInt(usize,part,10) catch return error.InvalidArguments;
-		if (std.mem.indexOfScalar(usize,&widths,width) == null or options.count == widths.len) return error.InvalidArguments;
+		if (std.mem.indexOfScalar(usize,allowed,width) == null or options.count == options.sizes.len) return error.InvalidArguments;
 		if (options.count > 0 and width <= options.sizes[options.count-1]) return error.InvalidArguments;
 		options.sizes[options.count] = width; options.count += 1;
 	}
@@ -31,7 +73,7 @@ fn dividendBytes(geometry: Geometry, width: usize) usize {
 const Pool = struct {
 	arena: std.heap.ArenaAllocator, cases: []Case, q: Mp, r: Mp,
 	fn init(parent: std.mem.Allocator, geometry: Geometry, width: usize, count: usize) !Pool {
-		if (std.mem.indexOfScalar(usize,&widths,width) == null or count == 0 or count > 32) return error.InvalidArguments;
+		if ((std.mem.indexOfScalar(usize,&widths,width) == null and std.mem.indexOfScalar(usize,&guarded_widths,width) == null) or count == 0 or count > 32) return error.InvalidArguments;
 		var arena = std.heap.ArenaAllocator.init(parent); errdefer arena.deinit();
 		const cases = try arena.allocator().alloc(Case,count);
 		var initialized: usize = 0;
@@ -57,6 +99,8 @@ const Pool = struct {
 	pub fn run(self: *@This(), method: Method, index: usize) !void {
 		const case = &self.cases[index];
 		switch (method) {
+			.fixed_1024 => try Mp.divModBurnikelZieglerQuotient1024(&self.q,&self.r,&case.a,&case.b),
+			.guarded => try Mp.divModBurnikelZieglerGuarded(&self.q,&self.r,&case.a,&case.b),
 			.current => try Mp.divMod(&self.q,&self.r,&case.a,&case.b),
 			.burnikel_ziegler => try Mp.divModBurnikelZiegler(&self.q,&self.r,&case.a,&case.b),
 			.leading_block => try Mp.divModBurnikelZieglerLeadingBlock(&self.q,&self.r,&case.a,&case.b),
@@ -166,14 +210,19 @@ pub fn runSelected(init: std.process.Init, args: []const []const u8) !void {
 	return runPair(.selected_public,init,args);
 }
 
+pub fn runGuarded(init: std.process.Init, args: []const []const u8) !void {
+	return runPair(.guarded_signed,init,args);
+}
+
 fn runPair(comptime comparison: Comparison, init: std.process.Init, args: []const []const u8) !void {
 	const pair: [2]Method = switch (comparison) {
 		.public => methods, .leading => .{.burnikel_ziegler,.leading_block},
 		.short => .{.leading_block,.short_quotient}, .short_public => .{.current,.short_quotient},
 		.carry => .{.short_quotient,.short_carry},
 		.selected_public => .{.current,.selected},
+		.guarded_signed => .{.fixed_1024,.guarded},
 	};
-	const options = try parse(args);
+	const options = if (comparison==.guarded_signed) try parseGuarded(args) else try parse(args);
 	const Component = struct { method: []const u8, cpu_ns: [6]f64, wall_ns: [6]f64 };
 	const Row = struct {
 		size: usize, dividend_bytes: usize, fixture_count: usize = 32, iterations: usize = 32, warmup_cases: usize = 64,
@@ -203,10 +252,11 @@ fn runPair(comptime comparison: Comparison, init: std.process.Init, args: []cons
 		.schema = "performance-measurement/v1", .correct = true, .build_mode = "ReleaseFast",
 		.compiler = @import("builtin").zig_version_string,
 		.method = switch (comparison) {
-			.public => "division-public-paired-v2", .leading => "division-leading-block-paired-v2",
-			.short => "division-short-quotient-paired-v2", .short_public => "division-short-public-paired-v2",
-			.carry => "division-short-carry-paired-v2",
-			.selected_public => "division-selected-public-paired-v1",
+			.public => "division-public-paired-v3", .leading => "division-leading-block-paired-v3",
+			.short => "division-short-quotient-paired-v3", .short_public => "division-short-public-paired-v3",
+			.carry => "division-short-carry-paired-v3",
+			.selected_public => "division-selected-public-paired-v2",
+			.guarded_signed => "division-guarded-signed-paired-v1",
 		}, .geometry = @tagName(options.geometry),
 		.cpu_clock = "CLOCK_PROCESS_CPUTIME_ID", .wall_clock = "CLOCK_MONOTONIC",
 		.seed_usage = "0xB2D151A5 + divisor_bytes*257 + index; four sign combinations crossed with eight normalization shifts; engine seed does not alter inputs",
@@ -217,8 +267,9 @@ fn runPair(comptime comparison: Comparison, init: std.process.Init, args: []cons
 			.short_public => "current public signed division versus short-quotient B-Z; magnitude byte widths; identical canonical BLIP input/output comparison adapters",
 			.carry => "fixed short-quotient B-Z versus carried-remainder leaf selection; magnitude byte widths; identical canonical BLIP input/output comparison adapters",
 			.selected_public => "current public signed division versus selected B-Z kernel; magnitude byte widths; identical canonical BLIP input/output comparison adapters",
+			.guarded_signed => "fixed quotient-1024 signed B-Z versus guarded byte padding; magnitude byte widths; identical canonical BLIP input/output comparison adapters",
 		},
-		.normalization = "six ABBA/BAAB half-pool samples; iterations gives verified calls per method/sample; 16 repeats at widths <=128, otherwise one; primary averages both methods; no subtraction",
+		.normalization = "six ABBA/BAAB half-pool samples; iterations gives verified calls per method/sample; 256 repeats at widths <=128, otherwise one; primary averages both methods; no subtraction",
 		.verification = "GMP quotient/remainder magnitudes with truncated sign rules outside timing; full canonical-byte comparison on every call",
 		.allocator_coverage = "prepared inputs, reused outputs and warmed thread-local scratch; arithmetic allocation included; cold allocation unmeasured",
 		.rows = rows[0..options.count],

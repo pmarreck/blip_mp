@@ -1,0 +1,302 @@
+{
+  "schema": "performance-project/v1",
+  "project": "blip_mp",
+  "history_url": "file:///var/lib/performance-profiling",
+  "identity": {
+    "runtime": "Zig-0.16.0/GMP-6.3.0",
+    "build_mode": "ReleaseFast",
+    "concurrency": 1
+  },
+  "cases": [
+    {
+      "name": "division_guarded_signed_short_quotient_1core",
+      "definition": "division-guarded-signed-paired-v1-short_quotient",
+      "cores": 1,
+      "processes": 5,
+      "mode": "bm",
+      "metric": "cpu_ns",
+      "comparison": "absolute",
+      "command": [
+        "blip-mp-division-probe",
+        "guarded-signed",
+        "short_quotient",
+        "{sizes}"
+      ],
+      "sizes": [
+        6145,
+        8194,
+        12290,
+        16385
+      ],
+      "bounds": [
+        0.1,
+        1000000000
+      ],
+      "policy": {
+        "max_cv": 0.1
+      },
+      "timeout_ms": 120000
+    },
+    {
+      "name": "division_guarded_signed_short_quotient_12core",
+      "definition": "division-guarded-signed-paired-v1-short_quotient",
+      "cores": 12,
+      "processes": 5,
+      "mode": "bm",
+      "metric": "cpu_ns",
+      "comparison": "absolute",
+      "command": [
+        "blip-mp-division-probe",
+        "guarded-signed",
+        "short_quotient",
+        "{sizes}"
+      ],
+      "sizes": [
+        6145,
+        8194,
+        12290,
+        16385
+      ],
+      "bounds": [
+        0.1,
+        1000000000
+      ],
+      "policy": {
+        "max_cv": 0.1
+      },
+      "timeout_ms": 120000
+    },
+    {
+      "name": "division_guarded_signed_one_chunk_limit_1core",
+      "definition": "division-guarded-signed-paired-v1-one_chunk_limit",
+      "cores": 1,
+      "processes": 5,
+      "mode": "bm",
+      "metric": "cpu_ns",
+      "comparison": "absolute",
+      "command": [
+        "blip-mp-division-probe",
+        "guarded-signed",
+        "one_chunk_limit",
+        "{sizes}"
+      ],
+      "sizes": [
+        6145,
+        8194,
+        12290,
+        16385
+      ],
+      "bounds": [
+        0.1,
+        1000000000
+      ],
+      "policy": {
+        "max_cv": 0.1
+      },
+      "timeout_ms": 120000
+    },
+    {
+      "name": "division_guarded_signed_one_chunk_limit_12core",
+      "definition": "division-guarded-signed-paired-v1-one_chunk_limit",
+      "cores": 12,
+      "processes": 5,
+      "mode": "bm",
+      "metric": "cpu_ns",
+      "comparison": "absolute",
+      "command": [
+        "blip-mp-division-probe",
+        "guarded-signed",
+        "one_chunk_limit",
+        "{sizes}"
+      ],
+      "sizes": [
+        6145,
+        8194,
+        12290,
+        16385
+      ],
+      "bounds": [
+        0.1,
+        1000000000
+      ],
+      "policy": {
+        "max_cv": 0.1
+      },
+      "timeout_ms": 120000
+    },
+    {
+      "name": "division_guarded_signed_two_chunk_start_1core",
+      "definition": "division-guarded-signed-paired-v1-two_chunk_start",
+      "cores": 1,
+      "processes": 5,
+      "mode": "bm",
+      "metric": "cpu_ns",
+      "comparison": "absolute",
+      "command": [
+        "blip-mp-division-probe",
+        "guarded-signed",
+        "two_chunk_start",
+        "{sizes}"
+      ],
+      "sizes": [
+        6145,
+        8194,
+        12290,
+        16385
+      ],
+      "bounds": [
+        0.1,
+        1000000000
+      ],
+      "policy": {
+        "max_cv": 0.1
+      },
+      "timeout_ms": 120000
+    },
+    {
+      "name": "division_guarded_signed_two_chunk_start_12core",
+      "definition": "division-guarded-signed-paired-v1-two_chunk_start",
+      "cores": 12,
+      "processes": 5,
+      "mode": "bm",
+      "metric": "cpu_ns",
+      "comparison": "absolute",
+      "command": [
+        "blip-mp-division-probe",
+        "guarded-signed",
+        "two_chunk_start",
+        "{sizes}"
+      ],
+      "sizes": [
+        6145,
+        8194,
+        12290,
+        16385
+      ],
+      "bounds": [
+        0.1,
+        1000000000
+      ],
+      "policy": {
+        "max_cv": 0.1
+      },
+      "timeout_ms": 120000
+    },
+    {
+      "name": "division_guarded_signed_balanced_1core",
+      "definition": "division-guarded-signed-paired-v1-balanced",
+      "cores": 1,
+      "processes": 5,
+      "mode": "bm",
+      "metric": "cpu_ns",
+      "comparison": "absolute",
+      "command": [
+        "blip-mp-division-probe",
+        "guarded-signed",
+        "balanced",
+        "{sizes}"
+      ],
+      "sizes": [
+        6145,
+        8194,
+        12290,
+        16385
+      ],
+      "bounds": [
+        0.1,
+        1000000000
+      ],
+      "policy": {
+        "max_cv": 0.1
+      },
+      "timeout_ms": 120000
+    },
+    {
+      "name": "division_guarded_signed_balanced_12core",
+      "definition": "division-guarded-signed-paired-v1-balanced",
+      "cores": 12,
+      "processes": 5,
+      "mode": "bm",
+      "metric": "cpu_ns",
+      "comparison": "absolute",
+      "command": [
+        "blip-mp-division-probe",
+        "guarded-signed",
+        "balanced",
+        "{sizes}"
+      ],
+      "sizes": [
+        6145,
+        8194,
+        12290,
+        16385
+      ],
+      "bounds": [
+        0.1,
+        1000000000
+      ],
+      "policy": {
+        "max_cv": 0.1
+      },
+      "timeout_ms": 120000
+    },
+    {
+      "name": "division_guarded_signed_long_dividend_1core",
+      "definition": "division-guarded-signed-paired-v1-long_dividend",
+      "cores": 1,
+      "processes": 5,
+      "mode": "bm",
+      "metric": "cpu_ns",
+      "comparison": "absolute",
+      "command": [
+        "blip-mp-division-probe",
+        "guarded-signed",
+        "long_dividend",
+        "{sizes}"
+      ],
+      "sizes": [
+        6145,
+        8194,
+        12290,
+        16385
+      ],
+      "bounds": [
+        0.1,
+        1000000000
+      ],
+      "policy": {
+        "max_cv": 0.1
+      },
+      "timeout_ms": 120000
+    },
+    {
+      "name": "division_guarded_signed_long_dividend_12core",
+      "definition": "division-guarded-signed-paired-v1-long_dividend",
+      "cores": 12,
+      "processes": 5,
+      "mode": "bm",
+      "metric": "cpu_ns",
+      "comparison": "absolute",
+      "command": [
+        "blip-mp-division-probe",
+        "guarded-signed",
+        "long_dividend",
+        "{sizes}"
+      ],
+      "sizes": [
+        6145,
+        8194,
+        12290,
+        16385
+      ],
+      "bounds": [
+        0.1,
+        1000000000
+      ],
+      "policy": {
+        "max_cv": 0.1
+      },
+      "timeout_ms": 120000
+    }
+  ]
+}

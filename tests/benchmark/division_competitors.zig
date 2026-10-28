@@ -11,6 +11,53 @@ const Timing = struct { cpu_ns: f64, wall_ns: f64 };
 const Sample = struct { cpu_ns: [4]f64, wall_ns: [4]f64 };
 const Options = struct { sizes: [widths.len]usize, count: usize };
 
+test "padding guard classifies odd-leaf multiples and dividend length boundaries" {
+	const limit = 65536;
+	const eligible = try std.testing.allocator.alloc(bool,limit+1); defer std.testing.allocator.free(eligible);
+	@memset(eligible,false);
+	// Build the expected set from odd leaves and their powers-of-two
+	// multiples, independently of extracting the odd part from each width.
+	var odd: usize = 6145;
+	while (odd <= limit) : (odd += 2) {
+		var multiple = odd;
+		while (multiple <= limit) : (multiple *= 2) eligible[multiple] = true;
+	}
+	for (0..limit+1) |width| for ([_]usize{width -| 1,width,2*width -| 1,2*width,4*width}) |dividend_len| {
+		try std.testing.expectEqual(eligible[width] and dividend_len >= 2*width,blip.tier3.burnikelZieglerShouldPad(dividend_len,width));
+	};
+	const largest = std.math.maxInt(usize);
+	try std.testing.expect(blip.tier3.burnikelZieglerShouldPad(largest,largest/2));
+	try std.testing.expect(!blip.tier3.burnikelZieglerShouldPad(largest,largest/2+2));
+	try std.testing.expect(!blip.tier3.burnikelZieglerShouldPad(largest,0));
+}
+
+test "guarded division enters padding only beyond the relative length boundary" {
+	inline for (.{6143,6145,8191,8193,12289,16385}) |width| {
+		const expected = if (width < 6144) [_][3]bool{.{true,true,true}} else [_][3]bool{.{true,false,false}};
+		try checkOuterFallback(blip.tier3.divModBurnikelZieglerGuarded,&.{width},&.{width-1,width,3*width},&expected);
+	}
+}
+
+test "guarded signed wrapper follows the intended kernel at odd-leaf and gap boundaries" {
+	inline for (.{6143,6145,8194,12290}) |width| inline for (.{false,true}) |balanced| {
+		const gap = if (balanced) width else width-1;
+		const expected = if ((width==6145 or width==12290) and gap==width) Mp.divModBurnikelZieglerPadded else Mp.divModBurnikelZieglerQuotient1024;
+		var allocated: [2]usize = undefined;
+		inline for (.{expected,Mp.divModBurnikelZieglerGuarded},0..) |divide,mi| {
+			var counted = std.testing.FailingAllocator.init(std.testing.allocator,.{});
+			var fixture = try Fixture.initSized(counted.allocator(),width,1,width+gap);
+			const before = counted.allocated_bytes;
+			divide(&fixture.q,&fixture.r,&fixture.cases[0].a,&fixture.cases[0].b) catch |err| { fixture.deinit(); return err; };
+			try std.testing.expectEqualSlices(u8,fixture.cases[0].mq.bytes(),fixture.q.bytes());
+			try std.testing.expectEqualSlices(u8,fixture.cases[0].mr.bytes(),fixture.r.bytes());
+			allocated[mi] = counted.allocated_bytes-before;
+			fixture.deinit();
+			try std.testing.expectEqual(counted.allocated_bytes,counted.freed_bytes);
+		}
+		try std.testing.expectEqual(allocated[0],allocated[1]);
+	};
+}
+
 test "B-Z padded block widths bound odd leaves and reject size overflow" {
 	const inputs = [_]usize{64,127,128,129,255,256,4094,4095,4096,4097,4098,8191,8192,8193,8194,16383,16384,16385,16386};
 	const expected = [_]usize{64,127,128,130,256,256,4096,4096,4096,4160,4160,8192,8192,8320,8320,16384,16384,16640,16640};
@@ -596,10 +643,10 @@ fn runWith(comptime selected: bool, init: std.process.Init, args: []const []cons
 	const report = .{
 		.schema = "performance-measurement/v1", .correct = true, .build_mode = "ReleaseFast",
 		.compiler = @import("builtin").zig_version_string, .gmp_version = std.mem.span(gmp.__gmp_version),
-		.method = if (selected) "division-selected-competitors-v1" else "division-native-competitors-v1",
+		.method = if (selected) "division-selected-competitors-v2" else "division-native-competitors-v2",
 		.cpu_clock = "CLOCK_PROCESS_CPUTIME_ID", .wall_clock = "CLOCK_MONOTONIC",
 		.seed_usage = "0xB2D151A5 + divisor_bytes*257 + case_index; eight normalization shifts; engine seed does not alter inputs",
-		.normalization = "rotating ABCDDCBA half-pool batches; eight samples; primary averages four methods per operation; no subtraction",
+		.normalization = "rotating ABCDDCBA half-pool batches; eight samples; 256 repeats at widths <=128, otherwise one; primary averages four methods per operation; no subtraction",
 		.operation = "positive 2:1 magnitude byte widths; size is divisor bytes; inputs preconverted outside timing; every result fully checked",
 		.verification = "public BLIP compares canonical bytes; GMP uses mpz_cmp; byte kernels compare magnitudes and canaries; comparison costs included",
 		.allocator_coverage = "public BLIP and GMP reuse native results after warmup; byte kernels reset an arena retaining capacity and poison outputs; cold allocation unmeasured",
@@ -667,12 +714,13 @@ test "explicit B-Z allocation failures release memory including optional cache r
 			}
 		}
 	};
-	inline for (.{Mp.divModBurnikelZiegler,Mp.divModBurnikelZieglerLeadingBlock,Mp.divModBurnikelZieglerShortQuotient,Mp.divModBurnikelZieglerShortCarry,Mp.divModBurnikelZieglerWideQuotient,Mp.divModBurnikelZieglerSelected,Mp.divModBurnikelZieglerQuotient1024,Mp.divModBurnikelZieglerPadded}) |divide| for ([_]usize{16,256}) |width| for ([_]usize{width+1,2*width}) |dividend_len| {
+	inline for (.{Mp.divModBurnikelZiegler,Mp.divModBurnikelZieglerLeadingBlock,Mp.divModBurnikelZieglerShortQuotient,Mp.divModBurnikelZieglerShortCarry,Mp.divModBurnikelZieglerWideQuotient,Mp.divModBurnikelZieglerSelected,Mp.divModBurnikelZieglerQuotient1024,Mp.divModBurnikelZieglerPadded,Mp.divModBurnikelZieglerGuarded}) |divide| for ([_]usize{16,256}) |width| for ([_]usize{width+1,2*width}) |dividend_len| {
 		try Check.verify(divide,width,dividend_len);
 	};
 	for ([_]usize{8,2048,2049}) |gap| try Check.verify(Mp.divModBurnikelZieglerWideQuotient,4096,4096+gap);
 	for ([_]usize{4096,4098}) |width| for ([_]usize{1024,1025}) |gap| try Check.verify(Mp.divModBurnikelZieglerSelected,width,width+gap);
 	for ([_]usize{4097,4098}) |width| for ([_]usize{1024,1025,width}) |gap| try Check.verify(Mp.divModBurnikelZieglerPadded,width,width+gap);
+	for ([_]usize{6145,12290}) |width| for ([_]usize{width-1,width}) |gap| try Check.verify(Mp.divModBurnikelZieglerGuarded,width,width+gap);
 }
 
 test "wide quotient boundary preserves every sign and input alias" {
@@ -685,6 +733,10 @@ test "selected quotient boundary preserves every sign and input alias" {
 
 test "padded boundary preserves every sign and input alias" {
 	for ([_]usize{4097,4098,16385}) |width| try checkSignedOuterBoundary(Mp.divModBurnikelZieglerPadded,width,&.{1024,1025,width});
+}
+
+test "guarded boundary preserves every sign and input alias" {
+	for ([_]usize{6145,8194,12290}) |width| try checkSignedOuterBoundary(Mp.divModBurnikelZieglerGuarded,width,&.{width-1,width,width+1});
 }
 
 fn checkSignedOuterBoundary(comptime divide: anytype, width: usize, gaps: []const usize) !void {
@@ -724,7 +776,7 @@ test "explicit public B-Z division preserves signed results and input aliases" {
 			}
 			if (negative_b) try case.b.sub(&zero,&case.b);
 			if (negative_a != negative_b) try case.mq.sub(&zero,&case.mq);
-			inline for (.{Mp.divModBurnikelZiegler,Mp.divModBurnikelZieglerLeadingBlock,Mp.divModBurnikelZieglerShortQuotient,Mp.divModBurnikelZieglerShortCarry,Mp.divModBurnikelZieglerWideQuotient,Mp.divModBurnikelZieglerSelected,Mp.divModBurnikelZieglerQuotient1024,Mp.divModBurnikelZieglerPadded}) |divide| for (0..3) |alias_mode| {
+			inline for (.{Mp.divModBurnikelZiegler,Mp.divModBurnikelZieglerLeadingBlock,Mp.divModBurnikelZieglerShortQuotient,Mp.divModBurnikelZieglerShortCarry,Mp.divModBurnikelZieglerWideQuotient,Mp.divModBurnikelZieglerSelected,Mp.divModBurnikelZieglerQuotient1024,Mp.divModBurnikelZieglerPadded,Mp.divModBurnikelZieglerGuarded}) |divide| for (0..3) |alias_mode| {
 				var a = Mp.init(std.testing.allocator); defer a.deinit();
 				var b = Mp.init(std.testing.allocator); defer b.deinit();
 				try a.setBytes(case.a.bytes()); try b.setBytes(case.b.bytes());

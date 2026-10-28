@@ -10,7 +10,7 @@
   "cases": [
     {
       "name": "division_pad_shape_6143_1core",
-      "definition": "division-padding-shape-paired-v1-6143-relative-gaps",
+      "definition": "division-padding-shape-paired-v2-6143-relative-gaps",
       "cores": 1,
       "processes": 5,
       "mode": "bm",
@@ -39,7 +39,7 @@
     },
     {
       "name": "division_pad_shape_6143_12core",
-      "definition": "division-padding-shape-paired-v1-6143-relative-gaps",
+      "definition": "division-padding-shape-paired-v2-6143-relative-gaps",
       "cores": 12,
       "processes": 5,
       "mode": "bm",
@@ -68,7 +68,7 @@
     },
     {
       "name": "division_pad_shape_6144_1core",
-      "definition": "division-padding-shape-paired-v1-6144-relative-gaps",
+      "definition": "division-padding-shape-paired-v2-6144-relative-gaps",
       "cores": 1,
       "processes": 5,
       "mode": "bm",
@@ -97,7 +97,7 @@
     },
     {
       "name": "division_pad_shape_6144_12core",
-      "definition": "division-padding-shape-paired-v1-6144-relative-gaps",
+      "definition": "division-padding-shape-paired-v2-6144-relative-gaps",
       "cores": 12,
       "processes": 5,
       "mode": "bm",
@@ -126,7 +126,7 @@
     },
     {
       "name": "division_pad_shape_6145_1core",
-      "definition": "division-padding-shape-paired-v1-6145-relative-gaps",
+      "definition": "division-padding-shape-paired-v2-6145-relative-gaps",
       "cores": 1,
       "processes": 5,
       "mode": "bm",
@@ -155,7 +155,7 @@
     },
     {
       "name": "division_pad_shape_6145_12core",
-      "definition": "division-padding-shape-paired-v1-6145-relative-gaps",
+      "definition": "division-padding-shape-paired-v2-6145-relative-gaps",
       "cores": 12,
       "processes": 5,
       "mode": "bm",
@@ -184,7 +184,7 @@
     },
     {
       "name": "division_pad_shape_6146_1core",
-      "definition": "division-padding-shape-paired-v1-6146-relative-gaps",
+      "definition": "division-padding-shape-paired-v2-6146-relative-gaps",
       "cores": 1,
       "processes": 5,
       "mode": "bm",
@@ -213,7 +213,7 @@
     },
     {
       "name": "division_pad_shape_6146_12core",
-      "definition": "division-padding-shape-paired-v1-6146-relative-gaps",
+      "definition": "division-padding-shape-paired-v2-6146-relative-gaps",
       "cores": 12,
       "processes": 5,
       "mode": "bm",
@@ -242,7 +242,7 @@
     },
     {
       "name": "division_pad_shape_8191_1core",
-      "definition": "division-padding-shape-paired-v1-8191-relative-gaps",
+      "definition": "division-padding-shape-paired-v2-8191-relative-gaps",
       "cores": 1,
       "processes": 5,
       "mode": "bm",
@@ -271,7 +271,7 @@
     },
     {
       "name": "division_pad_shape_8191_12core",
-      "definition": "division-padding-shape-paired-v1-8191-relative-gaps",
+      "definition": "division-padding-shape-paired-v2-8191-relative-gaps",
       "cores": 12,
       "processes": 5,
       "mode": "bm",
@@ -300,7 +300,7 @@
     },
     {
       "name": "division_pad_shape_8192_1core",
-      "definition": "division-padding-shape-paired-v1-8192-relative-gaps",
+      "definition": "division-padding-shape-paired-v2-8192-relative-gaps",
       "cores": 1,
       "processes": 5,
       "mode": "bm",
@@ -329,7 +329,7 @@
     },
     {
       "name": "division_pad_shape_8192_12core",
-      "definition": "division-padding-shape-paired-v1-8192-relative-gaps",
+      "definition": "division-padding-shape-paired-v2-8192-relative-gaps",
       "cores": 12,
       "processes": 5,
       "mode": "bm",
@@ -358,7 +358,7 @@
     },
     {
       "name": "division_pad_shape_8193_1core",
-      "definition": "division-padding-shape-paired-v1-8193-relative-gaps",
+      "definition": "division-padding-shape-paired-v2-8193-relative-gaps",
       "cores": 1,
       "processes": 5,
       "mode": "bm",
@@ -387,7 +387,7 @@
     },
     {
       "name": "division_pad_shape_8193_12core",
-      "definition": "division-padding-shape-paired-v1-8193-relative-gaps",
+      "definition": "division-padding-shape-paired-v2-8193-relative-gaps",
       "cores": 12,
       "processes": 5,
       "mode": "bm",
@@ -416,7 +416,7 @@
     },
     {
       "name": "division_pad_shape_8194_1core",
-      "definition": "division-padding-shape-paired-v1-8194-relative-gaps",
+      "definition": "division-padding-shape-paired-v2-8194-relative-gaps",
       "cores": 1,
       "processes": 5,
       "mode": "bm",
@@ -445,7 +445,7 @@
     },
     {
       "name": "division_pad_shape_8194_12core",
-      "definition": "division-padding-shape-paired-v1-8194-relative-gaps",
+      "definition": "division-padding-shape-paired-v2-8194-relative-gaps",
       "cores": 12,
       "processes": 5,
       "mode": "bm",
@@ -474,7 +474,7 @@
     },
     {
       "name": "division_pad_shape_12287_1core",
-      "definition": "division-padding-shape-paired-v1-12287-relative-gaps",
+      "definition": "division-padding-shape-paired-v2-12287-relative-gaps",
       "cores": 1,
       "processes": 5,
       "mode": "bm",
@@ -503,7 +503,7 @@
     },
     {
       "name": "division_pad_shape_12287_12core",
-      "definition": "division-padding-shape-paired-v1-12287-relative-gaps",
+      "definition": "division-padding-shape-paired-v2-12287-relative-gaps",
       "cores": 12,
       "processes": 5,
       "mode": "bm",
@@ -532,7 +532,7 @@
     },
     {
       "name": "division_pad_shape_12288_1core",
-      "definition": "division-padding-shape-paired-v1-12288-relative-gaps",
+      "definition": "division-padding-shape-paired-v2-12288-relative-gaps",
       "cores": 1,
       "processes": 5,
       "mode": "bm",
@@ -561,7 +561,7 @@
     },
     {
       "name": "division_pad_shape_12288_12core",
-      "definition": "division-padding-shape-paired-v1-12288-relative-gaps",
+      "definition": "division-padding-shape-paired-v2-12288-relative-gaps",
       "cores": 12,
       "processes": 5,
       "mode": "bm",
@@ -590,7 +590,7 @@
     },
     {
       "name": "division_pad_shape_12289_1core",
-      "definition": "division-padding-shape-paired-v1-12289-relative-gaps",
+      "definition": "division-padding-shape-paired-v2-12289-relative-gaps",
       "cores": 1,
       "processes": 5,
       "mode": "bm",
@@ -619,7 +619,7 @@
     },
     {
       "name": "division_pad_shape_12289_12core",
-      "definition": "division-padding-shape-paired-v1-12289-relative-gaps",
+      "definition": "division-padding-shape-paired-v2-12289-relative-gaps",
       "cores": 12,
       "processes": 5,
       "mode": "bm",
@@ -648,7 +648,7 @@
     },
     {
       "name": "division_pad_shape_12290_1core",
-      "definition": "division-padding-shape-paired-v1-12290-relative-gaps",
+      "definition": "division-padding-shape-paired-v2-12290-relative-gaps",
       "cores": 1,
       "processes": 5,
       "mode": "bm",
@@ -677,7 +677,7 @@
     },
     {
       "name": "division_pad_shape_12290_12core",
-      "definition": "division-padding-shape-paired-v1-12290-relative-gaps",
+      "definition": "division-padding-shape-paired-v2-12290-relative-gaps",
       "cores": 12,
       "processes": 5,
       "mode": "bm",
@@ -706,7 +706,7 @@
     },
     {
       "name": "division_pad_shape_16383_1core",
-      "definition": "division-padding-shape-paired-v1-16383-relative-gaps",
+      "definition": "division-padding-shape-paired-v2-16383-relative-gaps",
       "cores": 1,
       "processes": 5,
       "mode": "bm",
@@ -735,7 +735,7 @@
     },
     {
       "name": "division_pad_shape_16383_12core",
-      "definition": "division-padding-shape-paired-v1-16383-relative-gaps",
+      "definition": "division-padding-shape-paired-v2-16383-relative-gaps",
       "cores": 12,
       "processes": 5,
       "mode": "bm",
@@ -764,7 +764,7 @@
     },
     {
       "name": "division_pad_shape_16384_1core",
-      "definition": "division-padding-shape-paired-v1-16384-relative-gaps",
+      "definition": "division-padding-shape-paired-v2-16384-relative-gaps",
       "cores": 1,
       "processes": 5,
       "mode": "bm",
@@ -793,7 +793,7 @@
     },
     {
       "name": "division_pad_shape_16384_12core",
-      "definition": "division-padding-shape-paired-v1-16384-relative-gaps",
+      "definition": "division-padding-shape-paired-v2-16384-relative-gaps",
       "cores": 12,
       "processes": 5,
       "mode": "bm",
@@ -822,7 +822,7 @@
     },
     {
       "name": "division_pad_shape_16385_1core",
-      "definition": "division-padding-shape-paired-v1-16385-relative-gaps",
+      "definition": "division-padding-shape-paired-v2-16385-relative-gaps",
       "cores": 1,
       "processes": 5,
       "mode": "bm",
@@ -851,7 +851,7 @@
     },
     {
       "name": "division_pad_shape_16385_12core",
-      "definition": "division-padding-shape-paired-v1-16385-relative-gaps",
+      "definition": "division-padding-shape-paired-v2-16385-relative-gaps",
       "cores": 12,
       "processes": 5,
       "mode": "bm",
@@ -880,7 +880,7 @@
     },
     {
       "name": "division_pad_shape_16386_1core",
-      "definition": "division-padding-shape-paired-v1-16386-relative-gaps",
+      "definition": "division-padding-shape-paired-v2-16386-relative-gaps",
       "cores": 1,
       "processes": 5,
       "mode": "bm",
@@ -909,7 +909,7 @@
     },
     {
       "name": "division_pad_shape_16386_12core",
-      "definition": "division-padding-shape-paired-v1-16386-relative-gaps",
+      "definition": "division-padding-shape-paired-v2-16386-relative-gaps",
       "cores": 12,
       "processes": 5,
       "mode": "bm",

@@ -2268,6 +2268,27 @@ const BZ_WIDE_QUOTIENT_MIN_DIVISOR: usize = 4096;
 const BZ_WIDE_QUOTIENT_MAX_GAP: usize = 2048;
 const BZ_SELECTED_QUOTIENT_MAX_GAP: usize = 1024;
 
+const BZ_PADDING_MIN_ODD_LEAF: usize = 6 * 1024;
+
+/// Experimental guard from the measured odd-leaf and relative-gap sweep.
+pub fn burnikelZieglerShouldPad(u_len: usize, v_len: usize) bool {
+	// Subtraction avoids overflow in a doubled-divisor length comparison.
+	if (v_len < BZ_PADDING_MIN_ODD_LEAF or u_len < v_len or u_len-v_len < v_len) return false;
+	const odd_leaf = v_len >> @intCast(@ctz(v_len));
+	return odd_leaf >= BZ_PADDING_MIN_ODD_LEAF;
+}
+
+/// Experimental guarded padding entry; the default divider stays fixed.
+pub fn divModBurnikelZieglerGuarded(u: []const u8, u_len_in: usize, v: []const u8, v_len: usize, q: []u8, r: []u8, allocator: std.mem.Allocator) std.mem.Allocator.Error!struct { q_len: usize, r_len: usize } {
+	const u_len = trimLen(u[0..u_len_in]);
+	if (burnikelZieglerShouldPad(u_len,v_len)) {
+		const got = try divModBurnikelZieglerPadded(u,u_len,v,v_len,q,r,allocator);
+		return .{.q_len=got.q_len,.r_len=got.r_len};
+	}
+	const got = try divModBurnikelZieglerQuotient1024(u,u_len,v,v_len,q,r,allocator);
+	return .{.q_len=got.q_len,.r_len=got.r_len};
+}
+
 /// Recursive block width after common byte scaling of both magnitudes.
 pub fn burnikelZieglerPaddedWidth(v_len: usize) error{Overflow}!usize {
 	// Smallest power-of-two multiple whose recursive leaf is below the
