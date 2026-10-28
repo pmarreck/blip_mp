@@ -1704,6 +1704,45 @@ scaling/denormalization with independent oracles, and measure the added copying
 before selection. It will keep byte storage and the existing default dispatch
 during qualification.
 
+### Byte-padding candidate qualification
+
+The experimental `divModBurnikelZieglerPadded` entry scales both magnitudes by
+the same power of 256, runs the fixed selected kernel, and removes the scaling
+from the remainder. All storage remains byte buffers. The quotient and its
+required output capacity are unchanged. The helper rounds the divisor width to
+the smallest recursive multiple whose leaf falls below the 128-byte cutoff.
+It avoids scaling below 4,096 divisor bytes, at dividend-length gaps through
+1,024 bytes, and when the width already has a suitable recursive shape.
+
+This first implementation uses separate scaled input and remainder buffers so
+the cost of allocation and copying remains visible. Fusing those copies into
+normalization is a later measured option. SIMD changes are deferred while this
+experiment addresses premature recursion termination at odd widths. The normal
+divider and its public dispatch threshold remain unchanged.
+
+Failing-first tests cover the rounding helper, overflow, exact output capacity,
+high zero input padding, eight normalization shifts, and independently
+constructed zero, unit and maximal remainders. Full GMP references cover nearby
+divisor widths and quotient-length boundaries. Signed tests exercise four sign
+combinations, output aliases and allocation failures. The paired adapter has
+domain-classification and corrupted-reference controls; its CLI check first
+failed because the new route did not exist.
+
+`profiling-division-padding.json` defines a bounded paired experiment at 13
+divisor widths around 4,096, 8,192 and 16,384 bytes, with gaps 7, 8, 1,024,
+1,025 and the divisor width. Each 1-CPU and 12-CPU cohort uses five fresh
+processes, 32 prepared cases, six ABBA/BAAB samples and complete GMP quotient
+and remainder references. Components `quotient_1024` and `padded` identify the
+fixed control and candidate. GMP supplies expected results outside timing;
+this experiment does not measure GMP speed. No padding performance claim or
+default selection has been made.
+
+The complete suite passed in 90 seconds of mixed Nix preparation and checking;
+the production build and all-system flake evaluation passed. Compilation and
+execution were not separately instrumented, so this does not establish the
+five-second execution budget. The focused probe check took 35 seconds for its
+combined build phase and execution.
+
 ### Exact-capacity remainder regression
 
 Reviewing the B-Z entry point exposed a separate single-byte-divisor bug. With

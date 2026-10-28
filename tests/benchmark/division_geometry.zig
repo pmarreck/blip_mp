@@ -4,6 +4,9 @@ const competitors = @import("division_competitors.zig");
 const Fixture = competitors.Fixture;
 const methods = [2]competitors.Method{.knuth,.selected_bz};
 const wide_methods = [2]competitors.Method{.short_carry,.wide_quotient};
+const padding_methods = [2]competitors.Method{.quotient_1024,.padded};
+const padding_widths = [_]usize{64,4094,4095,4096,4097,4098,8191,8192,8193,8194,16383,16384,16385,16386};
+const padding_extras = [_]usize{7,8,1023,1024,1025,2048,4096};
 const widths = [_]usize{64,4096,8192,16384};
 const extras = [_]usize{1,7,8,16,32,64,128,256,512,1024,2048,4096,8192,16384};
 const wide_widths = [_]usize{64,4094,4096,4097,4098,8192,8194,16384,16385,16386};
@@ -11,6 +14,54 @@ const wide_extras = [_]usize{1,7,8,16,32,64,128,256,512,1024,2047,2048,2049,4096
 const Options = struct { width: usize, sizes: [wide_extras.len+1]usize, count: usize };
 
 fn parseWide(args: []const []const u8) !Options { return parseWith(true,args); }
+
+fn parsePadding(args: []const []const u8) !Options { return parseDomain(&padding_widths,&padding_extras,true,args); }
+
+test "byte padding geometry classifies the complete allowed domain" {
+	const allowed_widths = [_]usize{64,4094,4095,4096,4097,4098,8191,8192,8193,8194,16383,16384,16385,16386};
+	const allowed_gaps = [_]usize{7,8,1023,1024,1025,2048,4096};
+	for (0..16388) |width| {
+		var buffer: [24]u8 = undefined;
+		const text = try std.fmt.bufPrint(&buffer,"{d}",.{width});
+		const accepted = if (parsePadding(&.{text,"7"})) |_| true else |err| blk: {
+			try std.testing.expectEqual(error.InvalidArguments,err); break :blk false;
+		};
+		try std.testing.expectEqual(std.mem.indexOfScalar(usize,&allowed_widths,width) != null,accepted);
+	}
+	for (allowed_widths) |width| {
+		var width_buffer: [24]u8 = undefined;
+		const width_text = try std.fmt.bufPrint(&width_buffer,"{d}",.{width});
+		for (0..16388) |gap| {
+			var buffer: [24]u8 = undefined;
+			const text = try std.fmt.bufPrint(&buffer,"{d}",.{gap});
+			const accepted = if (parsePadding(&.{width_text,text})) |options| blk: {
+				try std.testing.expectEqual(width,options.width);
+				try std.testing.expectEqual(@as(usize,1),options.count);
+				try std.testing.expectEqual(gap,options.sizes[0]); break :blk true;
+			} else |err| blk: {
+				try std.testing.expectEqual(error.InvalidArguments,err); break :blk false;
+			};
+			try std.testing.expectEqual(gap <= width and (gap == width or std.mem.indexOfScalar(usize,&allowed_gaps,gap) != null),accepted);
+		}
+	}
+	const options = try parsePadding(&.{"4097","7,8,1023,1024,1025,2048,4096,4097"});
+	try std.testing.expectEqualSlices(usize,&.{7,8,1023,1024,1025,2048,4096,4097},options.sizes[0..options.count]);
+	for ([_][]const u8{"","7,","7,7","8,7","-1","x","18446744073709551616","7,8192"}) |arg| try std.testing.expectError(error.InvalidArguments,parsePadding(&.{"4097",arg}));
+	try std.testing.expectError(error.InvalidArguments,parsePadding(&.{}));
+	try std.testing.expectError(error.InvalidArguments,parsePadding(&.{"4097"}));
+	try std.testing.expectError(error.InvalidArguments,parsePadding(&.{"4097","7","8"}));
+}
+
+test "byte padding pair checks complete references and rejects corruption" {
+	for ([_]usize{4095,4097,4098,8193,16383,16385}) |width| {
+		var fixture = try Fixture.initSized(std.testing.allocator,width,8,width+1025); defer fixture.deinit();
+		for (0..8) |index| {
+			for ([_]competitors.Method{.quotient_1024,.padded}) |method| try fixture.run(method,index);
+			try fixture.corruptQuotient(index);
+			for ([_]competitors.Method{.quotient_1024,.padded}) |method| try std.testing.expectError(error.IncorrectWork,fixture.run(method,index));
+		}
+	}
+}
 
 test "wide quotient geometry classifies boundary and neighboring width sets" {
 	var actual_widths: [16388]bool = @splat(false);
@@ -69,6 +120,10 @@ fn parse(args: []const []const u8) !Options {
 fn parseWith(comptime wide: bool, args: []const []const u8) !Options {
 	const allowed_widths: []const usize = if (wide) &wide_widths else &widths;
 	const allowed_extras: []const usize = if (wide) &wide_extras else &extras;
+	return parseDomain(allowed_widths,allowed_extras,wide,args);
+}
+
+fn parseDomain(allowed_widths: []const usize, allowed_extras: []const usize, allow_equal_width: bool, args: []const []const u8) !Options {
 	if (args.len != 2) return error.InvalidArguments;
 	const width = std.fmt.parseInt(usize,args[0],10) catch return error.InvalidArguments;
 	if (std.mem.indexOfScalar(usize,allowed_widths,width) == null) return error.InvalidArguments;
@@ -76,7 +131,7 @@ fn parseWith(comptime wide: bool, args: []const []const u8) !Options {
 	var parts = std.mem.splitScalar(u8,args[1],',');
 	while (parts.next()) |part| {
 		const extra = std.fmt.parseInt(usize,part,10) catch return error.InvalidArguments;
-		if (extra > width or (std.mem.indexOfScalar(usize,allowed_extras,extra) == null and (!wide or extra != width)) or options.count == options.sizes.len) return error.InvalidArguments;
+		if (extra > width or (std.mem.indexOfScalar(usize,allowed_extras,extra) == null and (!allow_equal_width or extra != width)) or options.count == options.sizes.len) return error.InvalidArguments;
 		if (options.count > 0 and extra <= options.sizes[options.count-1]) return error.InvalidArguments;
 		options.sizes[options.count] = extra; options.count += 1;
 	}
@@ -149,16 +204,21 @@ test "division geometry fixtures and both kernels release partial allocations" {
 }
 
 pub fn run(init: std.process.Init, args: []const []const u8) !void {
-	return runWith(false,init,args);
+	return runWith(.geometry,init,args);
 }
 
 pub fn runWide(init: std.process.Init, args: []const []const u8) !void {
-	return runWith(true,init,args);
+	return runWith(.wide,init,args);
 }
 
-fn runWith(comptime wide: bool, init: std.process.Init, args: []const []const u8) !void {
-	const options = if (wide) try parseWide(args) else try parse(args);
-	const pair = if (wide) wide_methods else methods;
+pub fn runPadding(init: std.process.Init, args: []const []const u8) !void {
+	return runWith(.padding,init,args);
+}
+
+const Mode = enum { geometry, wide, padding };
+fn runWith(comptime mode: Mode, init: std.process.Init, args: []const []const u8) !void {
+	const options = switch (mode) { .geometry => try parse(args), .wide => try parseWide(args), .padding => try parsePadding(args) };
+	const pair = switch (mode) { .geometry => methods, .wide => wide_methods, .padding => padding_methods };
 	const Component = struct { method: []const u8, cpu_ns: [6]f64, wall_ns: [6]f64 };
 	const Row = struct {
 		size: usize, dividend_bytes: usize, fixture_count: usize = 32, iterations: usize = 32, warmup_cases: usize = 64,
@@ -184,10 +244,14 @@ fn runWith(comptime wide: bool, init: std.process.Init, args: []const []const u8
 	}
 	const report = .{
 		.schema="performance-measurement/v1",.correct=true,.build_mode="ReleaseFast",
-		.compiler=@import("builtin").zig_version_string,.method=if (wide) "division-wide-quotient-paired-v1" else "division-geometry-paired-v2",
+		.compiler=@import("builtin").zig_version_string,.method=switch (mode) { .geometry => "division-geometry-paired-v2", .wide => "division-wide-quotient-paired-v1", .padding => "division-byte-padding-paired-v1" },
 		.divisor_bytes=options.width,.cpu_clock="CLOCK_PROCESS_CPUTIME_ID",.wall_clock="CLOCK_MONOTONIC",
 		.seed_usage="0xB2D151A5 + divisor_bytes*257 + index; eight normalization shifts; engine seed does not alter inputs",
-		.operation=if (wide) "positive magnitude byte buffers; size is dividend bytes minus divisor bytes, not actual quotient width; fixed short-carry B-Z versus wider outer fallback" else "positive magnitude byte buffers; size is dividend bytes minus divisor bytes, not actual quotient width; paired Knuth and selected B-Z",
+		.operation=switch (mode) {
+			.geometry => "positive magnitude byte buffers; size is dividend bytes minus divisor bytes, not actual quotient width; paired Knuth and selected B-Z",
+			.wide => "positive magnitude byte buffers; size is dividend bytes minus divisor bytes, not actual quotient width; fixed short-carry B-Z versus wider outer fallback",
+			.padding => "positive magnitude byte buffers; size is dividend bytes minus divisor bytes, not actual quotient width; fixed quotient-1024 B-Z versus common-byte scaling",
+		},
 		.normalization="six ABBA/BAAB half-pool samples; iterations gives verified calls per method/sample; 16 repeats at widths <=128, otherwise one; primary averages both methods; no subtraction",
 		.verification="GMP references outside timing; full quotient and remainder magnitude comparison plus output canaries on every call",
 		.allocator_coverage="prepared inputs and warmed scratch; each byte kernel resets an arena retaining capacity and poisons outputs; arithmetic allocation included; cold allocation unmeasured",

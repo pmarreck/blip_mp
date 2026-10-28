@@ -4,12 +4,48 @@ const blip = @import("blip_mp");
 const Mp = blip.Mp;
 const gmp = @import("gmp.zig");
 const widths = [_]usize{ 8,16,32,64,128,256,512,1024,2048,4096,8192,16384 };
-pub const Method = enum { public_blip, knuth, bz128, gmp, selected_bz, short_carry, wide_quotient };
+pub const Method = enum { public_blip, knuth, bz128, gmp, selected_bz, short_carry, wide_quotient, quotient_1024, padded };
 const original_methods = [4]Method{.public_blip,.knuth,.bz128,.gmp};
 const selected_methods = [4]Method{.public_blip,.knuth,.selected_bz,.gmp};
 const Timing = struct { cpu_ns: f64, wall_ns: f64 };
 const Sample = struct { cpu_ns: [4]f64, wall_ns: [4]f64 };
 const Options = struct { sizes: [widths.len]usize, count: usize };
+
+test "B-Z padded block widths bound odd leaves and reject size overflow" {
+	const inputs = [_]usize{64,127,128,129,255,256,4094,4095,4096,4097,4098,8191,8192,8193,8194,16383,16384,16385,16386};
+	const expected = [_]usize{64,127,128,130,256,256,4096,4096,4096,4160,4160,8192,8192,8320,8320,16384,16384,16640,16640};
+	for (inputs,expected) |width,want| try std.testing.expectEqual(want,try blip.tier3.burnikelZieglerPaddedWidth(width));
+	for (1..65537) |width| {
+		const padded = try blip.tier3.burnikelZieglerPaddedWidth(width);
+		try std.testing.expect(padded >= width);
+		try std.testing.expect(padded-width <= width/64);
+		var leaf = padded;
+		while (leaf >= 128 and leaf%2 == 0) leaf /= 2;
+		try std.testing.expect(leaf < 128);
+	}
+	try std.testing.expectError(error.Overflow,blip.tier3.burnikelZieglerPaddedWidth(std.math.maxInt(usize)));
+}
+
+test "padded B-Z preserves quotient and unscales complete remainders at neighboring widths" {
+	for ([_]usize{4094,4095,4096,4097,4098,8193,8194}) |width| for ([_]usize{0,7,8,1024,1025,width,3*width}) |gap| for (0..8) |index| {
+		var arena = std.heap.ArenaAllocator.init(std.testing.allocator); defer arena.deinit();
+		const allocator = arena.allocator();
+		var case = try Case.initSized(allocator,std.testing.allocator,width,index,width+gap); defer case.deinit();
+		// Exact capacities plus canaries; two high zero bytes must not alter
+		// the canonical quotient-length decision before common scaling.
+		const u = try allocator.alloc(u8,case.dividend.len+2);
+		@memcpy(u[0..case.dividend.len],case.dividend); @memset(u[case.dividend.len..],0);
+		const q = try allocator.alloc(u8,gap+3); @memset(q,0xa5);
+		const r = try allocator.alloc(u8,width+2); @memset(r,0xa5);
+		const got = try blip.tier3.divModBurnikelZieglerPadded(u,u.len,case.divisor,width,q[1..gap+2],r[1..width+1],std.testing.allocator);
+		try std.testing.expectEqualSlices(u8,case.expected_q,q[1..1+got.q_len]);
+		try std.testing.expectEqualSlices(u8,case.expected_r,r[1..1+got.r_len]);
+		try std.testing.expectEqual(@as(u8,0xa5),q[0]);
+		try std.testing.expectEqual(@as(u8,0xa5),q[gap+2]);
+		try std.testing.expectEqual(@as(u8,0xa5),r[0]);
+		try std.testing.expectEqual(@as(u8,0xa5),r[width+1]);
+	};
+}
 
 test "selected B-Z divides a normalized one-block value without recursive allocations" {
 	// A normalized n-byte divisor is at least half the n-byte range. The
@@ -40,6 +76,60 @@ test "selected B-Z divides a normalized one-block value without recursive alloca
 			try std.testing.expectEqual(limited.allocated_bytes,limited.freed_bytes);
 		}
 	}
+}
+
+test "padded division unscales zero, unit and maximal remainders exactly" {
+	for ([_]usize{4097,16385}) |width| for ([_]usize{1025,width}) |gap| for (0..8) |shift| for (0..3) |remainder_kind| {
+		var arena = std.heap.ArenaAllocator.init(std.testing.allocator); defer arena.deinit();
+		const a = arena.allocator();
+		const top: u8 = @as(u8,1) << @as(u3,@intCast(shift));
+		const v = try a.alloc(u8,width); @memset(v,0); v[0]=3; v[width-1]=top;
+		// q=beta^gap; r is 0, 1 or v-1. The nonzero byte positions do not
+		// overlap, so constructing u=q*v+r needs no arithmetic under test.
+		const u = try a.alloc(u8,width+gap+2); @memset(u,0); @memcpy(u[gap..gap+width],v);
+		if (remainder_kind == 1) u[0]=1;
+		if (remainder_kind == 2) { u[0]=2; u[width-1]=top; }
+		const q = try a.alloc(u8,gap+3); @memset(q,0xa5);
+		const r = try a.alloc(u8,width+2); @memset(r,0xa5);
+		const got = try blip.tier3.divModBurnikelZieglerPadded(u,u.len,v,width,q[1..gap+2],r[1..width+1],std.testing.allocator);
+		try std.testing.expectEqual(gap+1,got.q_len);
+		for (q[1..gap+1]) |byte| try std.testing.expectEqual(@as(u8,0),byte);
+		try std.testing.expectEqual(@as(u8,1),q[gap+1]);
+		const expected_len: usize = switch (remainder_kind) { 0=>0,1=>1,else=>width };
+		try std.testing.expectEqual(expected_len,got.r_len);
+		if (remainder_kind == 1) try std.testing.expectEqual(@as(u8,1),r[1]);
+		if (remainder_kind == 2) {
+			try std.testing.expectEqual(@as(u8,2),r[1]);
+			for (r[2..width]) |byte| try std.testing.expectEqual(@as(u8,0),byte);
+			try std.testing.expectEqual(top,r[width]);
+		}
+		try std.testing.expectEqual(@as(u8,0xa5),q[0]);
+		try std.testing.expectEqual(@as(u8,0xa5),q[gap+2]);
+		try std.testing.expectEqual(@as(u8,0xa5),r[0]);
+		try std.testing.expectEqual(@as(u8,0xa5),r[width+1]);
+	};
+}
+
+test "padded divider keeps trivial cases ahead of scaling allocation" {
+	const width = 4097;
+	var arena = std.heap.ArenaAllocator.init(std.testing.allocator); defer arena.deinit();
+	const a = arena.allocator();
+	const v = try a.alloc(u8,width); @memset(v,0); v[0]=3; v[width-1]=1;
+	const r = try a.alloc(u8,width+2); @memset(r,0xa5);
+	var q = [_]u8{0xa5,0xa5,0xa5};
+	for ([_]usize{0,width-1,width}) |u_len| {
+		var denied = std.testing.FailingAllocator.init(std.testing.allocator,.{.fail_index=0});
+		const got = try blip.tier3.divModBurnikelZieglerPadded(v,u_len,v,width,q[1..2],r[1..width+1],denied.allocator());
+		try std.testing.expectEqual(@as(usize,0),denied.allocated_bytes);
+		try std.testing.expectEqual(@as(usize,@intFromBool(u_len==width)),got.q_len);
+		try std.testing.expectEqual(@as(usize,@intFromBool(u_len==width-1)),got.r_len);
+		if (got.q_len==1) try std.testing.expectEqual(@as(u8,1),q[1]);
+		if (got.r_len==1) try std.testing.expectEqual(@as(u8,3),r[1]);
+	}
+	try std.testing.expectEqual(@as(u8,0xa5),q[0]);
+	try std.testing.expectEqual(@as(u8,0xa5),q[2]);
+	try std.testing.expectEqual(@as(u8,0xa5),r[0]);
+	try std.testing.expectEqual(@as(u8,0xa5),r[width+1]);
 }
 
 fn parse(args: []const []const u8) !Options {
@@ -143,6 +233,19 @@ test "selected quotient fallback classifies the measured 1024-byte gap boundary"
 		.{true,true,true,true,true,false,false},
 	};
 	try checkOuterFallback(blip.tier3.divModBurnikelZiegler,&test_widths,&gaps,&expected);
+}
+
+test "padded quotient dispatch classifies floor, gap and alignment controls" {
+	const test_widths = [_]usize{4094,4095,4096,4097,4098};
+	const gaps = [_]usize{0,7,8,1023,1024,1025,2048};
+	const expected = [_][7]bool{
+		.{true,true,false,false,false,false,false},
+		.{true,true,true,true,true,true,true},
+		.{true,true,true,true,true,false,false},
+		.{true,true,true,true,true,false,false},
+		.{true,true,true,true,true,false,false},
+	};
+	try checkOuterFallback(blip.tier3.divModBurnikelZieglerPadded,&test_widths,&gaps,&expected);
 }
 
 fn checkOuterFallback(comptime divide: anytype, comptime test_widths: []const usize, comptime gaps: []const usize, expected: []const [gaps.len]bool) !void {
@@ -307,7 +410,7 @@ pub const Fixture = struct {
 		return initSized(parent,width,count,2*width);
 	}
 	pub fn initSized(parent: std.mem.Allocator, width: usize, count: usize, dividend_len: usize) !Fixture {
-		const neighbors = [_]usize{4094,4097,4098,8194,16385,16386};
+		const neighbors = [_]usize{4094,4095,4097,4098,8191,8193,8194,16383,16385,16386};
 		if ((std.mem.indexOfScalar(usize,&widths,width) == null and std.mem.indexOfScalar(usize,&neighbors,width) == null) or count == 0 or count > 64) return error.InvalidArguments;
 		var arena = std.heap.ArenaAllocator.init(parent);
 		errdefer arena.deinit();
@@ -337,7 +440,7 @@ pub const Fixture = struct {
 				gmp.__gmpz_tdiv_qr(&self.gq,&self.gr,&case.ga,&case.gb);
 				if (gmp.__gmpz_cmp(&self.gq,&case.gq) != 0 or gmp.__gmpz_cmp(&self.gr,&case.gr) != 0) return error.IncorrectWork;
 			},
-			.knuth, .bz128, .selected_bz, .short_carry, .wide_quotient => {
+			.knuth, .bz128, .selected_bz, .short_carry, .wide_quotient, .quotient_1024, .padded => {
 				if (!self.scratch.reset(.retain_capacity)) return error.OutOfMemory;
 				@memset(self.quotient,0xa5); @memset(self.remainder,0xa5);
 				const q = self.quotient[1..self.quotient.len-1]; const r = self.remainder[1..self.remainder.len-1];
@@ -352,6 +455,12 @@ pub const Fixture = struct {
 					break :blk .{got.q_len,got.r_len};
 				} else if (method == .wide_quotient) blk: {
 					const got = try blip.tier3.divModBurnikelZieglerWideQuotient(case.dividend,case.dividend.len,case.divisor,case.divisor.len,q,r,self.scratch.allocator());
+					break :blk .{got.q_len,got.r_len};
+				} else if (method == .quotient_1024) blk: {
+					const got = try blip.tier3.divModBurnikelZieglerQuotient1024(case.dividend,case.dividend.len,case.divisor,case.divisor.len,q,r,self.scratch.allocator());
+					break :blk .{got.q_len,got.r_len};
+				} else if (method == .padded) blk: {
+					const got = try blip.tier3.divModBurnikelZieglerPadded(case.dividend,case.dividend.len,case.divisor,case.divisor.len,q,r,self.scratch.allocator());
 					break :blk .{got.q_len,got.r_len};
 				} else blk: {
 					const got = try blip.tier3.divModBurnikelZieglerCutoff128(case.dividend,case.dividend.len,case.divisor,case.divisor.len,q,r,self.scratch.allocator());
@@ -556,11 +665,12 @@ test "explicit B-Z allocation failures release memory including optional cache r
 			}
 		}
 	};
-	inline for (.{Mp.divModBurnikelZiegler,Mp.divModBurnikelZieglerLeadingBlock,Mp.divModBurnikelZieglerShortQuotient,Mp.divModBurnikelZieglerShortCarry,Mp.divModBurnikelZieglerWideQuotient,Mp.divModBurnikelZieglerSelected}) |divide| for ([_]usize{16,256}) |width| for ([_]usize{width+1,2*width}) |dividend_len| {
+	inline for (.{Mp.divModBurnikelZiegler,Mp.divModBurnikelZieglerLeadingBlock,Mp.divModBurnikelZieglerShortQuotient,Mp.divModBurnikelZieglerShortCarry,Mp.divModBurnikelZieglerWideQuotient,Mp.divModBurnikelZieglerSelected,Mp.divModBurnikelZieglerQuotient1024,Mp.divModBurnikelZieglerPadded}) |divide| for ([_]usize{16,256}) |width| for ([_]usize{width+1,2*width}) |dividend_len| {
 		try Check.verify(divide,width,dividend_len);
 	};
 	for ([_]usize{8,2048,2049}) |gap| try Check.verify(Mp.divModBurnikelZieglerWideQuotient,4096,4096+gap);
 	for ([_]usize{4096,4098}) |width| for ([_]usize{1024,1025}) |gap| try Check.verify(Mp.divModBurnikelZieglerSelected,width,width+gap);
+	for ([_]usize{4097,4098}) |width| for ([_]usize{1024,1025,width}) |gap| try Check.verify(Mp.divModBurnikelZieglerPadded,width,width+gap);
 }
 
 test "wide quotient boundary preserves every sign and input alias" {
@@ -569,6 +679,10 @@ test "wide quotient boundary preserves every sign and input alias" {
 
 test "selected quotient boundary preserves every sign and input alias" {
 	for ([_]usize{4096,4098}) |width| try checkSignedOuterBoundary(Mp.divModBurnikelZieglerSelected,width,&.{1023,1024,1025});
+}
+
+test "padded boundary preserves every sign and input alias" {
+	for ([_]usize{4097,4098,16385}) |width| try checkSignedOuterBoundary(Mp.divModBurnikelZieglerPadded,width,&.{1024,1025,width});
 }
 
 fn checkSignedOuterBoundary(comptime divide: anytype, width: usize, gaps: []const usize) !void {
@@ -608,7 +722,7 @@ test "explicit public B-Z division preserves signed results and input aliases" {
 			}
 			if (negative_b) try case.b.sub(&zero,&case.b);
 			if (negative_a != negative_b) try case.mq.sub(&zero,&case.mq);
-			inline for (.{Mp.divModBurnikelZiegler,Mp.divModBurnikelZieglerLeadingBlock,Mp.divModBurnikelZieglerShortQuotient,Mp.divModBurnikelZieglerShortCarry,Mp.divModBurnikelZieglerWideQuotient,Mp.divModBurnikelZieglerSelected}) |divide| for (0..3) |alias_mode| {
+			inline for (.{Mp.divModBurnikelZiegler,Mp.divModBurnikelZieglerLeadingBlock,Mp.divModBurnikelZieglerShortQuotient,Mp.divModBurnikelZieglerShortCarry,Mp.divModBurnikelZieglerWideQuotient,Mp.divModBurnikelZieglerSelected,Mp.divModBurnikelZieglerQuotient1024,Mp.divModBurnikelZieglerPadded}) |divide| for (0..3) |alias_mode| {
 				var a = Mp.init(std.testing.allocator); defer a.deinit();
 				var b = Mp.init(std.testing.allocator); defer b.deinit();
 				try a.setBytes(case.a.bytes()); try b.setBytes(case.b.bytes());

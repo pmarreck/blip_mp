@@ -2268,6 +2268,47 @@ const BZ_WIDE_QUOTIENT_MIN_DIVISOR: usize = 4096;
 const BZ_WIDE_QUOTIENT_MAX_GAP: usize = 2048;
 const BZ_SELECTED_QUOTIENT_MAX_GAP: usize = 1024;
 
+/// Recursive block width after common byte scaling of both magnitudes.
+pub fn burnikelZieglerPaddedWidth(v_len: usize) error{Overflow}!usize {
+	// Smallest power-of-two multiple whose recursive leaf is below the
+	// cutoff. Round only to that multiple, not to a power-of-two width.
+	var multiple: usize = 1;
+	var ratio = v_len / BZ_RECURSE_THRESHOLD;
+	while (ratio != 0) : (ratio >>= 1) multiple *= 2;
+	const rounded = try std.math.add(usize,v_len,multiple-1);
+	return rounded & ~(multiple-1);
+}
+
+/// Experimental common-byte scaling before the selected B-Z kernel.
+pub fn divModBurnikelZieglerPadded(u: []const u8, u_len_in: usize, v: []const u8, v_len: usize, q: []u8, r: []u8, allocator: std.mem.Allocator) std.mem.Allocator.Error!struct { q_len: usize, r_len: usize } {
+	const u_len = trimLen(u[0..u_len_in]);
+	if (v_len < BZ_WIDE_QUOTIENT_MIN_DIVISOR or u_len <= v_len or u_len-v_len <= BZ_SELECTED_QUOTIENT_MAX_GAP) {
+		const got = try divModBurnikelZieglerQuotient1024(u,u_len,v,v_len,q,r,allocator);
+		return .{.q_len=got.q_len,.r_len=got.r_len};
+	}
+	const width = burnikelZieglerPaddedWidth(v_len) catch return error.OutOfMemory;
+	const padding = width-v_len;
+	if (padding == 0) {
+		const got = try divModBurnikelZieglerQuotient1024(u,u_len,v,v_len,q,r,allocator);
+		return .{.q_len=got.q_len,.r_len=got.r_len};
+	}
+	const scaled_len = std.math.add(usize,u_len,padding) catch return error.OutOfMemory;
+	const scaled_u = try allocator.alloc(u8,scaled_len); defer allocator.free(scaled_u);
+	@memset(scaled_u[0..padding],0); @memcpy(scaled_u[padding..],u[0..u_len]);
+	const scaled_v = try allocator.alloc(u8,width); defer allocator.free(scaled_v);
+	@memset(scaled_v[0..padding],0); @memcpy(scaled_v[padding..],v[0..v_len]);
+	const scaled_r = try allocator.alloc(u8,width); defer allocator.free(scaled_r);
+	// Common scaling preserves q and the exact quotient capacity. The
+	// returned remainder is r*beta^padding and must have zero low bytes.
+	const got = try divModBurnikelZieglerQuotient1024(scaled_u,scaled_len,scaled_v,width,q,scaled_r,allocator);
+	if (got.r_len == 0) return .{.q_len=got.q_len,.r_len=0};
+	std.debug.assert(got.r_len > padding);
+	for (scaled_r[0..padding]) |byte| std.debug.assert(byte == 0);
+	const r_len = got.r_len-padding;
+	@memcpy(r[0..r_len],scaled_r[padding..got.r_len]);
+	return .{.q_len=got.q_len,.r_len=r_len};
+}
+
 const BzOptions = struct {
 	chunk_fallback: bool = true,
 	recurse_threshold: usize = 128,
@@ -2345,6 +2386,12 @@ pub fn divModBurnikelZiegler(
 	r_out: []u8,
 	allocator: std.mem.Allocator,
 ) std.mem.Allocator.Error!struct { q_len: usize, r_len: usize } {
+	const got = try divModBurnikelZieglerQuotient1024(u,u_len_in,v,v_len,q_out,r_out,allocator);
+	return .{.q_len=got.q_len,.r_len=got.r_len};
+}
+
+/// Fixed selected kernel before common-byte padding, retained as a control.
+pub fn divModBurnikelZieglerQuotient1024(u: []const u8, u_len_in: usize, v: []const u8, v_len: usize, q_out: []u8, r_out: []u8, allocator: std.mem.Allocator) std.mem.Allocator.Error!struct { q_len: usize, r_len: usize } {
 	const got = try divModBurnikelZieglerImpl(.{.recurse_threshold=BZ_RECURSE_THRESHOLD,.leading_block=true,.short_quotient=true,.short_carry=true,.wide_quotient_gap=BZ_SELECTED_QUOTIENT_MAX_GAP}, u, u_len_in, v, v_len, q_out, r_out, allocator);
 	return .{ .q_len = got.q_len, .r_len = got.r_len };
 }

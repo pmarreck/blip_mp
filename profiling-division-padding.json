@@ -1,0 +1,792 @@
+{
+  "schema": "performance-project/v1",
+  "project": "blip_mp",
+  "history_url": "file:///var/lib/performance-profiling",
+  "identity": {
+    "runtime": "Zig-0.16.0/GMP-6.3.0",
+    "build_mode": "ReleaseFast",
+    "concurrency": 1
+  },
+  "cases": [
+    {
+      "name": "division_padding_4094_1core",
+      "definition": "division-byte-padding-paired-v1-4094-gap-sweep",
+      "cores": 1,
+      "processes": 5,
+      "mode": "bm",
+      "metric": "cpu_ns",
+      "comparison": "absolute",
+      "command": [
+        "blip-mp-division-probe",
+        "byte-padding",
+        "4094",
+        "{sizes}"
+      ],
+      "sizes": [
+        7,
+        8,
+        1024,
+        1025,
+        4094
+      ],
+      "bounds": [
+        0.1,
+        1000000000
+      ],
+      "policy": {
+        "max_cv": 0.1
+      },
+      "timeout_ms": 120000
+    },
+    {
+      "name": "division_padding_4094_12core",
+      "definition": "division-byte-padding-paired-v1-4094-gap-sweep",
+      "cores": 12,
+      "processes": 5,
+      "mode": "bm",
+      "metric": "cpu_ns",
+      "comparison": "absolute",
+      "command": [
+        "blip-mp-division-probe",
+        "byte-padding",
+        "4094",
+        "{sizes}"
+      ],
+      "sizes": [
+        7,
+        8,
+        1024,
+        1025,
+        4094
+      ],
+      "bounds": [
+        0.1,
+        1000000000
+      ],
+      "policy": {
+        "max_cv": 0.1
+      },
+      "timeout_ms": 120000
+    },
+    {
+      "name": "division_padding_4095_1core",
+      "definition": "division-byte-padding-paired-v1-4095-gap-sweep",
+      "cores": 1,
+      "processes": 5,
+      "mode": "bm",
+      "metric": "cpu_ns",
+      "comparison": "absolute",
+      "command": [
+        "blip-mp-division-probe",
+        "byte-padding",
+        "4095",
+        "{sizes}"
+      ],
+      "sizes": [
+        7,
+        8,
+        1024,
+        1025,
+        4095
+      ],
+      "bounds": [
+        0.1,
+        1000000000
+      ],
+      "policy": {
+        "max_cv": 0.1
+      },
+      "timeout_ms": 120000
+    },
+    {
+      "name": "division_padding_4095_12core",
+      "definition": "division-byte-padding-paired-v1-4095-gap-sweep",
+      "cores": 12,
+      "processes": 5,
+      "mode": "bm",
+      "metric": "cpu_ns",
+      "comparison": "absolute",
+      "command": [
+        "blip-mp-division-probe",
+        "byte-padding",
+        "4095",
+        "{sizes}"
+      ],
+      "sizes": [
+        7,
+        8,
+        1024,
+        1025,
+        4095
+      ],
+      "bounds": [
+        0.1,
+        1000000000
+      ],
+      "policy": {
+        "max_cv": 0.1
+      },
+      "timeout_ms": 120000
+    },
+    {
+      "name": "division_padding_4096_1core",
+      "definition": "division-byte-padding-paired-v1-4096-gap-sweep",
+      "cores": 1,
+      "processes": 5,
+      "mode": "bm",
+      "metric": "cpu_ns",
+      "comparison": "absolute",
+      "command": [
+        "blip-mp-division-probe",
+        "byte-padding",
+        "4096",
+        "{sizes}"
+      ],
+      "sizes": [
+        7,
+        8,
+        1024,
+        1025,
+        4096
+      ],
+      "bounds": [
+        0.1,
+        1000000000
+      ],
+      "policy": {
+        "max_cv": 0.1
+      },
+      "timeout_ms": 120000
+    },
+    {
+      "name": "division_padding_4096_12core",
+      "definition": "division-byte-padding-paired-v1-4096-gap-sweep",
+      "cores": 12,
+      "processes": 5,
+      "mode": "bm",
+      "metric": "cpu_ns",
+      "comparison": "absolute",
+      "command": [
+        "blip-mp-division-probe",
+        "byte-padding",
+        "4096",
+        "{sizes}"
+      ],
+      "sizes": [
+        7,
+        8,
+        1024,
+        1025,
+        4096
+      ],
+      "bounds": [
+        0.1,
+        1000000000
+      ],
+      "policy": {
+        "max_cv": 0.1
+      },
+      "timeout_ms": 120000
+    },
+    {
+      "name": "division_padding_4097_1core",
+      "definition": "division-byte-padding-paired-v1-4097-gap-sweep",
+      "cores": 1,
+      "processes": 5,
+      "mode": "bm",
+      "metric": "cpu_ns",
+      "comparison": "absolute",
+      "command": [
+        "blip-mp-division-probe",
+        "byte-padding",
+        "4097",
+        "{sizes}"
+      ],
+      "sizes": [
+        7,
+        8,
+        1024,
+        1025,
+        4097
+      ],
+      "bounds": [
+        0.1,
+        1000000000
+      ],
+      "policy": {
+        "max_cv": 0.1
+      },
+      "timeout_ms": 120000
+    },
+    {
+      "name": "division_padding_4097_12core",
+      "definition": "division-byte-padding-paired-v1-4097-gap-sweep",
+      "cores": 12,
+      "processes": 5,
+      "mode": "bm",
+      "metric": "cpu_ns",
+      "comparison": "absolute",
+      "command": [
+        "blip-mp-division-probe",
+        "byte-padding",
+        "4097",
+        "{sizes}"
+      ],
+      "sizes": [
+        7,
+        8,
+        1024,
+        1025,
+        4097
+      ],
+      "bounds": [
+        0.1,
+        1000000000
+      ],
+      "policy": {
+        "max_cv": 0.1
+      },
+      "timeout_ms": 120000
+    },
+    {
+      "name": "division_padding_4098_1core",
+      "definition": "division-byte-padding-paired-v1-4098-gap-sweep",
+      "cores": 1,
+      "processes": 5,
+      "mode": "bm",
+      "metric": "cpu_ns",
+      "comparison": "absolute",
+      "command": [
+        "blip-mp-division-probe",
+        "byte-padding",
+        "4098",
+        "{sizes}"
+      ],
+      "sizes": [
+        7,
+        8,
+        1024,
+        1025,
+        4098
+      ],
+      "bounds": [
+        0.1,
+        1000000000
+      ],
+      "policy": {
+        "max_cv": 0.1
+      },
+      "timeout_ms": 120000
+    },
+    {
+      "name": "division_padding_4098_12core",
+      "definition": "division-byte-padding-paired-v1-4098-gap-sweep",
+      "cores": 12,
+      "processes": 5,
+      "mode": "bm",
+      "metric": "cpu_ns",
+      "comparison": "absolute",
+      "command": [
+        "blip-mp-division-probe",
+        "byte-padding",
+        "4098",
+        "{sizes}"
+      ],
+      "sizes": [
+        7,
+        8,
+        1024,
+        1025,
+        4098
+      ],
+      "bounds": [
+        0.1,
+        1000000000
+      ],
+      "policy": {
+        "max_cv": 0.1
+      },
+      "timeout_ms": 120000
+    },
+    {
+      "name": "division_padding_8191_1core",
+      "definition": "division-byte-padding-paired-v1-8191-gap-sweep",
+      "cores": 1,
+      "processes": 5,
+      "mode": "bm",
+      "metric": "cpu_ns",
+      "comparison": "absolute",
+      "command": [
+        "blip-mp-division-probe",
+        "byte-padding",
+        "8191",
+        "{sizes}"
+      ],
+      "sizes": [
+        7,
+        8,
+        1024,
+        1025,
+        8191
+      ],
+      "bounds": [
+        0.1,
+        1000000000
+      ],
+      "policy": {
+        "max_cv": 0.1
+      },
+      "timeout_ms": 120000
+    },
+    {
+      "name": "division_padding_8191_12core",
+      "definition": "division-byte-padding-paired-v1-8191-gap-sweep",
+      "cores": 12,
+      "processes": 5,
+      "mode": "bm",
+      "metric": "cpu_ns",
+      "comparison": "absolute",
+      "command": [
+        "blip-mp-division-probe",
+        "byte-padding",
+        "8191",
+        "{sizes}"
+      ],
+      "sizes": [
+        7,
+        8,
+        1024,
+        1025,
+        8191
+      ],
+      "bounds": [
+        0.1,
+        1000000000
+      ],
+      "policy": {
+        "max_cv": 0.1
+      },
+      "timeout_ms": 120000
+    },
+    {
+      "name": "division_padding_8192_1core",
+      "definition": "division-byte-padding-paired-v1-8192-gap-sweep",
+      "cores": 1,
+      "processes": 5,
+      "mode": "bm",
+      "metric": "cpu_ns",
+      "comparison": "absolute",
+      "command": [
+        "blip-mp-division-probe",
+        "byte-padding",
+        "8192",
+        "{sizes}"
+      ],
+      "sizes": [
+        7,
+        8,
+        1024,
+        1025,
+        8192
+      ],
+      "bounds": [
+        0.1,
+        1000000000
+      ],
+      "policy": {
+        "max_cv": 0.1
+      },
+      "timeout_ms": 120000
+    },
+    {
+      "name": "division_padding_8192_12core",
+      "definition": "division-byte-padding-paired-v1-8192-gap-sweep",
+      "cores": 12,
+      "processes": 5,
+      "mode": "bm",
+      "metric": "cpu_ns",
+      "comparison": "absolute",
+      "command": [
+        "blip-mp-division-probe",
+        "byte-padding",
+        "8192",
+        "{sizes}"
+      ],
+      "sizes": [
+        7,
+        8,
+        1024,
+        1025,
+        8192
+      ],
+      "bounds": [
+        0.1,
+        1000000000
+      ],
+      "policy": {
+        "max_cv": 0.1
+      },
+      "timeout_ms": 120000
+    },
+    {
+      "name": "division_padding_8193_1core",
+      "definition": "division-byte-padding-paired-v1-8193-gap-sweep",
+      "cores": 1,
+      "processes": 5,
+      "mode": "bm",
+      "metric": "cpu_ns",
+      "comparison": "absolute",
+      "command": [
+        "blip-mp-division-probe",
+        "byte-padding",
+        "8193",
+        "{sizes}"
+      ],
+      "sizes": [
+        7,
+        8,
+        1024,
+        1025,
+        8193
+      ],
+      "bounds": [
+        0.1,
+        1000000000
+      ],
+      "policy": {
+        "max_cv": 0.1
+      },
+      "timeout_ms": 120000
+    },
+    {
+      "name": "division_padding_8193_12core",
+      "definition": "division-byte-padding-paired-v1-8193-gap-sweep",
+      "cores": 12,
+      "processes": 5,
+      "mode": "bm",
+      "metric": "cpu_ns",
+      "comparison": "absolute",
+      "command": [
+        "blip-mp-division-probe",
+        "byte-padding",
+        "8193",
+        "{sizes}"
+      ],
+      "sizes": [
+        7,
+        8,
+        1024,
+        1025,
+        8193
+      ],
+      "bounds": [
+        0.1,
+        1000000000
+      ],
+      "policy": {
+        "max_cv": 0.1
+      },
+      "timeout_ms": 120000
+    },
+    {
+      "name": "division_padding_8194_1core",
+      "definition": "division-byte-padding-paired-v1-8194-gap-sweep",
+      "cores": 1,
+      "processes": 5,
+      "mode": "bm",
+      "metric": "cpu_ns",
+      "comparison": "absolute",
+      "command": [
+        "blip-mp-division-probe",
+        "byte-padding",
+        "8194",
+        "{sizes}"
+      ],
+      "sizes": [
+        7,
+        8,
+        1024,
+        1025,
+        8194
+      ],
+      "bounds": [
+        0.1,
+        1000000000
+      ],
+      "policy": {
+        "max_cv": 0.1
+      },
+      "timeout_ms": 120000
+    },
+    {
+      "name": "division_padding_8194_12core",
+      "definition": "division-byte-padding-paired-v1-8194-gap-sweep",
+      "cores": 12,
+      "processes": 5,
+      "mode": "bm",
+      "metric": "cpu_ns",
+      "comparison": "absolute",
+      "command": [
+        "blip-mp-division-probe",
+        "byte-padding",
+        "8194",
+        "{sizes}"
+      ],
+      "sizes": [
+        7,
+        8,
+        1024,
+        1025,
+        8194
+      ],
+      "bounds": [
+        0.1,
+        1000000000
+      ],
+      "policy": {
+        "max_cv": 0.1
+      },
+      "timeout_ms": 120000
+    },
+    {
+      "name": "division_padding_16383_1core",
+      "definition": "division-byte-padding-paired-v1-16383-gap-sweep",
+      "cores": 1,
+      "processes": 5,
+      "mode": "bm",
+      "metric": "cpu_ns",
+      "comparison": "absolute",
+      "command": [
+        "blip-mp-division-probe",
+        "byte-padding",
+        "16383",
+        "{sizes}"
+      ],
+      "sizes": [
+        7,
+        8,
+        1024,
+        1025,
+        16383
+      ],
+      "bounds": [
+        0.1,
+        1000000000
+      ],
+      "policy": {
+        "max_cv": 0.1
+      },
+      "timeout_ms": 120000
+    },
+    {
+      "name": "division_padding_16383_12core",
+      "definition": "division-byte-padding-paired-v1-16383-gap-sweep",
+      "cores": 12,
+      "processes": 5,
+      "mode": "bm",
+      "metric": "cpu_ns",
+      "comparison": "absolute",
+      "command": [
+        "blip-mp-division-probe",
+        "byte-padding",
+        "16383",
+        "{sizes}"
+      ],
+      "sizes": [
+        7,
+        8,
+        1024,
+        1025,
+        16383
+      ],
+      "bounds": [
+        0.1,
+        1000000000
+      ],
+      "policy": {
+        "max_cv": 0.1
+      },
+      "timeout_ms": 120000
+    },
+    {
+      "name": "division_padding_16384_1core",
+      "definition": "division-byte-padding-paired-v1-16384-gap-sweep",
+      "cores": 1,
+      "processes": 5,
+      "mode": "bm",
+      "metric": "cpu_ns",
+      "comparison": "absolute",
+      "command": [
+        "blip-mp-division-probe",
+        "byte-padding",
+        "16384",
+        "{sizes}"
+      ],
+      "sizes": [
+        7,
+        8,
+        1024,
+        1025,
+        16384
+      ],
+      "bounds": [
+        0.1,
+        1000000000
+      ],
+      "policy": {
+        "max_cv": 0.1
+      },
+      "timeout_ms": 120000
+    },
+    {
+      "name": "division_padding_16384_12core",
+      "definition": "division-byte-padding-paired-v1-16384-gap-sweep",
+      "cores": 12,
+      "processes": 5,
+      "mode": "bm",
+      "metric": "cpu_ns",
+      "comparison": "absolute",
+      "command": [
+        "blip-mp-division-probe",
+        "byte-padding",
+        "16384",
+        "{sizes}"
+      ],
+      "sizes": [
+        7,
+        8,
+        1024,
+        1025,
+        16384
+      ],
+      "bounds": [
+        0.1,
+        1000000000
+      ],
+      "policy": {
+        "max_cv": 0.1
+      },
+      "timeout_ms": 120000
+    },
+    {
+      "name": "division_padding_16385_1core",
+      "definition": "division-byte-padding-paired-v1-16385-gap-sweep",
+      "cores": 1,
+      "processes": 5,
+      "mode": "bm",
+      "metric": "cpu_ns",
+      "comparison": "absolute",
+      "command": [
+        "blip-mp-division-probe",
+        "byte-padding",
+        "16385",
+        "{sizes}"
+      ],
+      "sizes": [
+        7,
+        8,
+        1024,
+        1025,
+        16385
+      ],
+      "bounds": [
+        0.1,
+        1000000000
+      ],
+      "policy": {
+        "max_cv": 0.1
+      },
+      "timeout_ms": 120000
+    },
+    {
+      "name": "division_padding_16385_12core",
+      "definition": "division-byte-padding-paired-v1-16385-gap-sweep",
+      "cores": 12,
+      "processes": 5,
+      "mode": "bm",
+      "metric": "cpu_ns",
+      "comparison": "absolute",
+      "command": [
+        "blip-mp-division-probe",
+        "byte-padding",
+        "16385",
+        "{sizes}"
+      ],
+      "sizes": [
+        7,
+        8,
+        1024,
+        1025,
+        16385
+      ],
+      "bounds": [
+        0.1,
+        1000000000
+      ],
+      "policy": {
+        "max_cv": 0.1
+      },
+      "timeout_ms": 120000
+    },
+    {
+      "name": "division_padding_16386_1core",
+      "definition": "division-byte-padding-paired-v1-16386-gap-sweep",
+      "cores": 1,
+      "processes": 5,
+      "mode": "bm",
+      "metric": "cpu_ns",
+      "comparison": "absolute",
+      "command": [
+        "blip-mp-division-probe",
+        "byte-padding",
+        "16386",
+        "{sizes}"
+      ],
+      "sizes": [
+        7,
+        8,
+        1024,
+        1025,
+        16386
+      ],
+      "bounds": [
+        0.1,
+        1000000000
+      ],
+      "policy": {
+        "max_cv": 0.1
+      },
+      "timeout_ms": 120000
+    },
+    {
+      "name": "division_padding_16386_12core",
+      "definition": "division-byte-padding-paired-v1-16386-gap-sweep",
+      "cores": 12,
+      "processes": 5,
+      "mode": "bm",
+      "metric": "cpu_ns",
+      "comparison": "absolute",
+      "command": [
+        "blip-mp-division-probe",
+        "byte-padding",
+        "16386",
+        "{sizes}"
+      ],
+      "sizes": [
+        7,
+        8,
+        1024,
+        1025,
+        16386
+      ],
+      "bounds": [
+        0.1,
+        1000000000
+      ],
+      "policy": {
+        "max_cv": 0.1
+      },
+      "timeout_ms": 120000
+    }
+  ]
+}
