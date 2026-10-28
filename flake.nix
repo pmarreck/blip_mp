@@ -313,15 +313,24 @@
 						cmp expected argv
 						test ! -s stdout
 						test ! -s stderr
-						for kind in schoolbook blocked mp_warm mp_cold blocked_tail; do
-							${self.packages.${system}.multiplication-probe}/bin/blip-mp-multiplication-probe "$kind" two 64,128 2 > output.json 2> stderr
+						# Two tiny products can fall within one CPU-clock accounting quantum.
+						for kind in schoolbook blocked mp_warm mp_cold blocked_tail paired_tail; do
+							${self.packages.${system}.multiplication-probe}/bin/blip-mp-multiplication-probe "$kind" two 64,128 128 > output.json 2> stderr
 							test ! -s stderr
 							jq -e --arg kind "$kind" '
 								.schema == "performance-measurement/v1" and .correct == true and
 								.build_mode == "ReleaseFast" and .algorithm == $kind and .shape == "two" and
 								[.rows[].size] == [64,128] and [.rows[].longer_bytes] == [128,256] and
-								all(.rows[]; .iterations == 2 and (.samples.cpu_ns|length) == 5 and (.samples.wall_ns|length) == 5) and
-								all(.rows[].samples.cpu_ns[], .rows[].samples.wall_ns[]; . > 0)
+								all(.rows[]; .iterations == 128 and (.samples.cpu_ns|length) == 5 and (.samples.wall_ns|length) == 5) and
+								all(.rows[].samples.cpu_ns[], .rows[].samples.wall_ns[]; . > 0) and
+								(if $kind == "paired_tail" then
+									.method == "multiplication-paired-tail-v1" and
+									all(.rows[]; . as $row |
+										all(.pair[]; length == 5 and all(.[]; . > 0)) and
+										all(range(5); . as $i |
+											$row.samples.cpu_ns[$i] == (($row.pair.baseline_cpu_ns[$i] + $row.pair.candidate_cpu_ns[$i]) / 2) and
+											$row.samples.wall_ns[$i] == (($row.pair.baseline_wall_ns[$i] + $row.pair.candidate_wall_ns[$i]) / 2)))
+								else .method == "multiplication-gmp-verified-v1" and all(.rows[]; .pair == null) end)
 							' output.json > /dev/null
 						done
 						if ${self.packages.${system}.multiplication-probe}/bin/blip-mp-multiplication-probe blocked two 0 2 > output.json 2> stderr; then

@@ -1,0 +1,198 @@
+{
+  "schema": "performance-project/v1",
+  "project": "blip_mp",
+  "history_url": "file:///var/lib/performance-profiling",
+  "identity": {
+    "runtime": "Zig-0.16.0",
+    "build_mode": "ReleaseFast",
+    "concurrency": 1
+  },
+  "cases": [
+    {
+      "name": "paired_tail_above_1core",
+      "definition": "multiplication-paired-tail-v1",
+      "cores": 1,
+      "processes": 5,
+      "mode": "bm",
+      "metric": "cpu_ns",
+      "comparison": "absolute",
+      "command": [
+        "blip-mp-multiplication-probe",
+        "paired_tail",
+        "above",
+        "{sizes}",
+        "100"
+      ],
+      "sizes": [
+        1024,
+        1536,
+        2047,
+        2048,
+        2049,
+        4096
+      ],
+      "bounds": [
+        0.1,
+        1000000000
+      ],
+      "policy": {
+        "max_cv": 0.1
+      }
+    },
+    {
+      "name": "paired_tail_above_12core",
+      "definition": "multiplication-paired-tail-v1",
+      "cores": 12,
+      "processes": 5,
+      "mode": "bm",
+      "metric": "cpu_ns",
+      "comparison": "absolute",
+      "command": [
+        "blip-mp-multiplication-probe",
+        "paired_tail",
+        "above",
+        "{sizes}",
+        "100"
+      ],
+      "sizes": [
+        1024,
+        1536,
+        2047,
+        2048,
+        2049,
+        4096
+      ],
+      "bounds": [
+        0.1,
+        1000000000
+      ],
+      "policy": {
+        "max_cv": 0.1
+      }
+    },
+    {
+      "name": "paired_tail_tail8_1core",
+      "definition": "multiplication-paired-tail-v1",
+      "cores": 1,
+      "processes": 5,
+      "mode": "bm",
+      "metric": "cpu_ns",
+      "comparison": "absolute",
+      "command": [
+        "blip-mp-multiplication-probe",
+        "paired_tail",
+        "tail8",
+        "{sizes}",
+        "100"
+      ],
+      "sizes": [
+        1024,
+        1536,
+        2047,
+        2048,
+        2049,
+        4096
+      ],
+      "bounds": [
+        0.1,
+        1000000000
+      ],
+      "policy": {
+        "max_cv": 0.1
+      }
+    },
+    {
+      "name": "paired_tail_tail8_12core",
+      "definition": "multiplication-paired-tail-v1",
+      "cores": 12,
+      "processes": 5,
+      "mode": "bm",
+      "metric": "cpu_ns",
+      "comparison": "absolute",
+      "command": [
+        "blip-mp-multiplication-probe",
+        "paired_tail",
+        "tail8",
+        "{sizes}",
+        "100"
+      ],
+      "sizes": [
+        1024,
+        1536,
+        2047,
+        2048,
+        2049,
+        4096
+      ],
+      "bounds": [
+        0.1,
+        1000000000
+      ],
+      "policy": {
+        "max_cv": 0.1
+      }
+    },
+    {
+      "name": "paired_tail_tail9_1core",
+      "definition": "multiplication-paired-tail-v1",
+      "cores": 1,
+      "processes": 5,
+      "mode": "bm",
+      "metric": "cpu_ns",
+      "comparison": "absolute",
+      "command": [
+        "blip-mp-multiplication-probe",
+        "paired_tail",
+        "tail9",
+        "{sizes}",
+        "100"
+      ],
+      "sizes": [
+        1024,
+        1536,
+        2047,
+        2048,
+        2049,
+        4096
+      ],
+      "bounds": [
+        0.1,
+        1000000000
+      ],
+      "policy": {
+        "max_cv": 0.1
+      }
+    },
+    {
+      "name": "paired_tail_tail9_12core",
+      "definition": "multiplication-paired-tail-v1",
+      "cores": 12,
+      "processes": 5,
+      "mode": "bm",
+      "metric": "cpu_ns",
+      "comparison": "absolute",
+      "command": [
+        "blip-mp-multiplication-probe",
+        "paired_tail",
+        "tail9",
+        "{sizes}",
+        "100"
+      ],
+      "sizes": [
+        1024,
+        1536,
+        2047,
+        2048,
+        2049,
+        4096
+      ],
+      "bounds": [
+        0.1,
+        1000000000
+      ],
+      "policy": {
+        "max_cv": 0.1
+      }
+    }
+  ]
+}

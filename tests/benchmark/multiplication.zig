@@ -13,37 +13,49 @@ pub fn main(init: std.process.Init) !void {
 	const Row = struct {
 		size: usize, longer_bytes: usize, iterations: usize,
 		samples: struct { cpu_ns: [5]f64, wall_ns: [5]f64 },
+		pair: ?struct {
+			baseline_cpu_ns: [5]f64, candidate_cpu_ns: [5]f64,
+			baseline_wall_ns: [5]f64, candidate_wall_ns: [5]f64,
+		} = null,
 	};
 	var rows: [16]Row = undefined;
-	const now = @import("immediate_add.zig").now;
 	for (options.sizes[0..options.count], 0..) |size, index| {
 		var fixture = try Fixture.init(std.heap.c_allocator, options.shape, size);
 		defer fixture.deinit();
 		try fixture.run(options.kind);
 		var row: Row = .{ .size = size, .longer_bytes = fixture.a.len, .iterations = options.iterations, .samples = undefined };
-		for (&row.samples.cpu_ns, &row.samples.wall_ns) |*cpu, *wall| {
-			const wall_start = try now(.MONOTONIC);
-			const cpu_start = try now(.PROCESS_CPUTIME_ID);
-			for (0..options.iterations) |_| {
-				try fixture.run(options.kind);
-				std.mem.doNotOptimizeAway(&fixture);
+		if (options.kind == .paired_tail) row.pair = .{
+			.baseline_cpu_ns = undefined, .candidate_cpu_ns = undefined,
+			.baseline_wall_ns = undefined, .candidate_wall_ns = undefined,
+		};
+		for (&row.samples.cpu_ns, &row.samples.wall_ns, 0..) |*cpu, *wall, sample| {
+			if (options.kind == .paired_tail) {
+				const pair = try pairedSample(&fixture, timedBatch, options.iterations);
+				row.pair.?.baseline_cpu_ns[sample] = pair.baseline_cpu;
+				row.pair.?.candidate_cpu_ns[sample] = pair.candidate_cpu;
+				row.pair.?.baseline_wall_ns[sample] = pair.baseline_wall;
+				row.pair.?.candidate_wall_ns[sample] = pair.candidate_wall;
+				cpu.* = (pair.baseline_cpu + pair.candidate_cpu) / 2;
+				wall.* = (pair.baseline_wall + pair.candidate_wall) / 2;
+			} else {
+				const duration = try timedBatch(&fixture, options.kind, options.iterations);
+				const count: f64 = @floatFromInt(options.iterations);
+				cpu.* = @as(f64, @floatFromInt(duration.cpu)) / count;
+				wall.* = @as(f64, @floatFromInt(duration.wall)) / count;
 			}
-			const cpu_end = try now(.PROCESS_CPUTIME_ID);
-			const wall_end = try now(.MONOTONIC);
-			if (cpu_end <= cpu_start or wall_end <= wall_start) return error.ClockFailed;
-			const count: f64 = @floatFromInt(options.iterations);
-			cpu.* = @as(f64, @floatFromInt(cpu_end - cpu_start)) / count;
-			wall.* = @as(f64, @floatFromInt(wall_end - wall_start)) / count;
 		}
 		rows[index] = row;
 	}
 	const report = .{
 		.schema = "performance-measurement/v1", .correct = true, .build_mode = "ReleaseFast",
-		.compiler = @import("builtin").zig_version_string, .method = "multiplication-gmp-verified-v1",
+		.compiler = @import("builtin").zig_version_string,
+		.method = if (options.kind == .paired_tail) "multiplication-paired-tail-v1" else "multiplication-gmp-verified-v1",
 		.algorithm = @tagName(options.kind), .shape = @tagName(options.shape),
 		.seed_usage = "fixed 0x579_B11F; identical operands across algorithms; engine seed does not alter inputs",
 		.cpu_clock = "CLOCK_PROCESS_CPUTIME_ID", .wall_clock = "CLOCK_MONOTONIC",
-		.normalization = "nanoseconds per multiplication including full GMP-derived result comparison; no subtraction",
+		.normalization = if (options.kind == .paired_tail)
+			"ABBA batches; primary samples average both methods per product; pair fields preserve each component; full GMP-derived comparison included"
+			else "nanoseconds per multiplication including full GMP-derived result comparison; no subtraction",
 		.allocator_coverage = "c_allocator; setup outside timing; mp_cold releases result and library scratch each iteration, without flushing libc or hardware caches",
 		.warmup_iterations = 1, .rows = rows[0..options.count],
 	};
@@ -52,7 +64,7 @@ pub fn main(init: std.process.Init) !void {
 	try std.Io.File.stdout().writeStreamingAll(init.io, "\n");
 }
 
-pub const Kind = enum { schoolbook, blocked, mp_warm, mp_cold, blocked_tail };
+pub const Kind = enum { schoolbook, blocked, mp_warm, mp_cold, blocked_tail, paired_tail };
 pub const Shape = enum { below, two, above, four, eight, sixteen, tail8, tail9 };
 pub const Options = struct {
 	kind: Kind,
@@ -61,6 +73,75 @@ pub const Options = struct {
 	count: usize,
 	iterations: usize,
 };
+
+const PairSample = struct {
+	baseline_cpu: f64, candidate_cpu: f64,
+	baseline_wall: f64, candidate_wall: f64,
+};
+const Timing = struct { cpu: u64, wall: u64 };
+fn timedBatch(fixture: *Fixture, kind: Kind, iterations: usize) !Timing {
+	const now = @import("immediate_add.zig").now;
+	const wall_start = try now(.MONOTONIC);
+	const cpu_start = try now(.PROCESS_CPUTIME_ID);
+	for (0..iterations) |_| {
+		try fixture.run(kind);
+		std.mem.doNotOptimizeAway(fixture);
+	}
+	const cpu_end = try now(.PROCESS_CPUTIME_ID);
+	const wall_end = try now(.MONOTONIC);
+	if (cpu_end <= cpu_start or wall_end <= wall_start) return error.ClockFailed;
+	return .{ .cpu = cpu_end - cpu_start, .wall = wall_end - wall_start };
+}
+fn pairedSample(state: anytype, comptime batch: anytype, iterations: usize) !PairSample {
+	var result: PairSample = .{ .baseline_cpu = 0, .candidate_cpu = 0, .baseline_wall = 0, .candidate_wall = 0 };
+	for ([_]Kind{ .blocked, .blocked_tail, .blocked_tail, .blocked }) |kind| {
+		const duration = try batch(state, kind, iterations);
+		if (kind == .blocked) {
+			result.baseline_cpu += @floatFromInt(duration.cpu);
+			result.baseline_wall += @floatFromInt(duration.wall);
+		} else {
+			result.candidate_cpu += @floatFromInt(duration.cpu);
+			result.candidate_wall += @floatFromInt(duration.wall);
+		}
+	}
+	const count: f64 = @floatFromInt(2 * iterations);
+	inline for (std.meta.fields(PairSample)) |field| @field(result, field.name) /= count;
+	return result;
+}
+
+test "paired multiplication balances order and normalizes both components" {
+	const Fake = struct {
+		position: usize = 0,
+		calls: [4]usize = @splat(0),
+		fn batch(self: *@This(), kind: Kind, count: usize) !Timing {
+			const slot = self.position;
+			self.position += 1;
+			self.calls[slot] = @intFromEnum(kind);
+			// A linear drift cancels when each method occupies symmetric positions.
+			const duration: u64 = (if (kind == .blocked) @as(u64, 100) else 80) + slot * 10;
+			return .{ .cpu = duration * count, .wall = (duration + 5) * count };
+		}
+	};
+	var fake: Fake = .{};
+	const result = try pairedSample(&fake, Fake.batch, 3);
+	try std.testing.expectEqual(@as(f64, 115), result.baseline_cpu);
+	try std.testing.expectEqual(@as(f64, 95), result.candidate_cpu);
+	try std.testing.expectEqual(@as(f64, 120), result.baseline_wall);
+	try std.testing.expectEqual(@as(f64, 100), result.candidate_wall);
+	try std.testing.expectEqual(@as(usize, 4), fake.position);
+	try std.testing.expectEqual(fake.calls[0], fake.calls[3]);
+	try std.testing.expectEqual(fake.calls[1], fake.calls[2]);
+	try std.testing.expect(fake.calls[0] != fake.calls[1]);
+}
+
+test "paired multiplication propagates an interrupted batch" {
+	const Failure = struct {
+		fn batch(_: void, _: Kind, _: usize) error{Injected}!Timing {
+			return error.Injected;
+		}
+	};
+	try std.testing.expectError(error.Injected, pairedSample({}, Failure.batch, 1));
+}
 pub fn parse(args: []const []const u8) !Options {
 	if (args.len != 4) return error.InvalidArguments;
 	var result: Options = .{
@@ -149,8 +230,12 @@ pub const Fixture = struct {
 		self.reference.deinit();
 		self.arena.deinit();
 	}
-	pub fn run(self: *Fixture, kind: Kind) !void {
+	pub fn run(self: *Fixture, kind: Kind) anyerror!void {
 		switch (kind) {
+			.paired_tail => {
+				try self.run(.blocked);
+				try self.run(.blocked_tail);
+			},
 			.schoolbook, .blocked, .blocked_tail => {
 				switch (kind) {
 					.schoolbook => blip.tier3.mulMagnitudes(self.a, self.b, self.out),

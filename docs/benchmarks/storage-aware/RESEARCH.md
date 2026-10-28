@@ -245,3 +245,37 @@ separate 1/12-CPU affinity cohorts. No baseline is approved by running it.
 The complete native suite and production build passed in 125 seconds combined,
 with 124 seconds of mixed Nix preparation/check time. All-system evaluation
 passed. The candidate remains separate from production selection until measured.
+
+The first campaign, `blip-mp-short-tail-20261028T042949Z-`, completed 80
+processes at 04:30:03–04:30:38 UTC, including four automatic retries. Every
+product verified; nine cases were unbaselined and three inconclusive. Its source
+digest was `5b1cfa97e37d1ef8ceeab07e4746863dc7b2b8a4d7846f992769618d6ca92239`.
+The [selected-process summary](short-tail-summary.jsonl) preserves all 72 rows.
+Raw observations and retries remain in external performance history.
+
+The usable one-byte comparison with 12 CPUs allowed favored the candidate by
+13–21%; eight-byte comparisons favored it by 17–23% on one CPU and 12–18%
+with 12 CPUs allowed. However, the nine-byte fallback, whose arithmetic is
+unchanged, produced inconclusive cases and apparent differences as large as
+15%. These separate-process observations do not justify production selection.
+
+`profiling-paired-tail.json` therefore measures baseline/candidate/candidate/
+baseline batches within each process. Each reported component is nanoseconds
+per verified product across two batches; the primary engine metric averages
+both components. A deterministic injected-duration test checks order, sample
+normalization and cancellation of linear drift. Another test checks error
+propagation. Pairing reduces between-process confounding but does not remove
+nonlinear interference, code-layout effects or method-dependent cache effects.
+The engine's variation gate applies to the primary average; component ratios
+must also be inspected before drawing a performance conclusion.
+
+CI for `555c086` exposed `ClockFailed` in the CLI smoke check's two-product
+batches. Rebuilding that exact failed derivation reproduced the error. The CLI
+check now executes 128 products per batch to give these tiny inputs a longer
+measurement interval; benchmark campaign batches remain unchanged. Clock errors
+still fail explicitly. The CLI check also validates both paired component arrays
+and their relationship to the primary samples.
+
+The paired adapter's full native suite and production build passed in 89 seconds,
+including 87 seconds of mixed Nix preparation/check time. All-system evaluation
+passed; execution coverage remains Linux x86_64.
