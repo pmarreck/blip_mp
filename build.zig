@@ -103,6 +103,12 @@ pub fn build(b: *std.Build) void {
 	// Always install bp with the default `zig build` so it lands in zig-out/bin.
 	b.getInstallStep().dependOn(&install_bp.step);
 
+	const gmp_test_support = b.createModule(.{
+		.root_source_file = b.path("tests/benchmark/gmp.zig"),
+		.target = target, .optimize = optimize, .link_libc = true,
+	});
+	if (gmp_lib_path) |path| gmp_test_support.addLibraryPath(.{ .cwd_relative = path });
+	gmp_test_support.linkSystemLibrary("gmp", .{});
 	const unit_tests = b.addTest(.{
 		.root_module = b.createModule(.{
 			.root_source_file = b.path("src/blip_mp.zig"),
@@ -110,11 +116,16 @@ pub fn build(b: *std.Build) void {
 			.optimize = optimize,
 			// Native test support may use libc; the production core stays independent.
 			.link_libc = true,
+			.imports = &.{.{ .name = "gmp_test_support", .module = gmp_test_support }},
 		}),
 	});
 	const run_unit_tests = b.addRunArtifact(unit_tests);
 	const test_step = b.step("test", "Run unit tests");
 	test_step.dependOn(&run_unit_tests.step);
+	const oracle_tests = b.addTest(.{ .root_module = gmp_test_support });
+	const run_oracle_tests = b.addRunArtifact(oracle_tests);
+	b.step("gmp-oracle-test", "Check the independent GMP byte-product oracle").dependOn(&run_oracle_tests.step);
+	test_step.dependOn(&run_oracle_tests.step);
 
 	const add_probe_module = b.createModule(.{
 		.root_source_file = b.path("tests/benchmark/immediate_add.zig"),

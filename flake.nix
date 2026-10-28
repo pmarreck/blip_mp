@@ -243,6 +243,13 @@
 							zig build division-probe-test -Doptimize=ReleaseSafe -Dgmp-lib-path=${pkgs.gmp}/lib
 						'';
 					};
+					gmp-oracle = self.checks.${system}.probe.overrideAttrs {
+						pname = "${pname}-gmp-oracle-tests";
+						buildPhase = ''
+							${commonBuild}
+							zig build gmp-oracle-test -Doptimize=ReleaseSafe -Dgmp-lib-path=${pkgs.gmp}/lib
+						'';
+					};
 					division-probe-cli = pkgs.runCommand "${pname}-division-probe-cli" {
 						nativeBuildInputs = [ pkgs.jq ];
 					} ''

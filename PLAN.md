@@ -4,14 +4,14 @@ Purpose: [INTENT.md](INTENT.md). The [legacy roadmap](docs/plan_context/legacy-r
 
 ## Current bounded milestone
 
+- [x] Replace the CRT fuzz test's quadratic reference with an independently checked GMP byte oracle; retain all 100 seeded cases and ReleaseSafe checks, reducing that test from 9.996 to 0.989 seconds and core execution to 15.531 seconds (context: docs/plan_context/performance-follow-up.md; done 2026-10-27 23:33 EDT; this commit).
 - [x] Move the five division timing tests to optimized probes; retain all six fixtures, add GMP quotient/remainder checks and corruption controls, and pass the full native suite, build and all-system evaluation (context: docs/plan_context/performance-follow-up.md; done 2026-10-27 23:04 EDT; this commit).
 - [x] Attribute core unit latency and move inverse timing loops to GMP-verified optimized probes; preserve all fixture comparisons, add existence checks, and measure core execution at 40.995 seconds before and 24.352 after (context: docs/plan_context/performance-follow-up.md; done 2026-10-27 22:47 EDT; this commit).
 - [x] Investigate immediate-add variation with interleaved cycle/instruction measurements; ten processes verified, instruction counts stayed stable while cycles varied, and both cohorts remain unbaselined (context: docs/plan_context/performance-follow-up.md; done 2026-10-27 22:26 EDT; this commit).
-- [x] Route debug builds through Nix, advertise Zig 0.16 as the minimum, and test routing, failure propagation and debug/release banners; pass the complete native suite, build and all-system evaluation. (done 2026-10-27 22:00 EDT; this commit)
 
 ## Follow-up and existing backlog
 
-- [ ] Investigate the remaining 24-second core test execution with coverage-preserving changes, starting with CRT fuzz and inverse cross-check costs; do not weaken cases to meet the five-second budget (context: docs/plan_context/performance-follow-up.md).
+- [ ] Investigate bounded parallel execution of inverse cross-check cases to reduce the remaining 15.531-second core test execution; preserve every seeded pair, assertion and allocation check (context: docs/plan_context/performance-follow-up.md).
 - [ ] Distinguish shared-core contention, cache behavior and code placement as causes of add-cycle variation using bounded contemporaneous controls; preserve the unapproved observations (context: docs/plan_context/performance-follow-up.md).
 
 - [ ] Measure blocked-product crossover, cold allocation costs and wider ratios; continue fused Goldilocks, sparse/truncated FFT and Montgomery experiments in ranked order (context: docs/benchmarks/storage-aware/RESEARCH.md).

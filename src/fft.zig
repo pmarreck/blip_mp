@@ -1955,7 +1955,7 @@ test "mulMagnitudesCRT: matches schoolbook at 16384 bytes per operand (beyond si
 	try testing.expectEqualSlices(u8, ref[0..ref_len], got[0..got_len]);
 }
 
-test "mulMagnitudesCRT: 100-iter random fuzz at sizes 4096..16384 bytes" {
+test "mulMagnitudesCRT: 100 seeded products at 4096..16384 bytes match GMP" {
 	var prng = std.Random.DefaultPrng.init(0x0F0E0D0C0B0A0908);
 	const rand = prng.random();
 	var iter: usize = 0;
@@ -1977,7 +1977,7 @@ test "mulMagnitudesCRT: 100-iter random fuzz at sizes 4096..16384 bytes" {
 		a[sa - 1] |= 0x80;
 		b[sb - 1] |= 0x80;
 
-		const ref_len = schoolbookMul(a, b, ref);
+		const ref_len = try @import("gmp_test_support").product(a, b, ref);
 		const got_len = try mulMagnitudesCRT(testing.allocator, a, b, got);
 		try testing.expectEqual(ref_len, got_len);
 		try testing.expectEqualSlices(u8, ref[0..ref_len], got[0..got_len]);

@@ -336,3 +336,53 @@ The complete native suite, including the retained six division fixtures and
 seconds combined. The mixed Nix preparation/check phase took 102 seconds.
 All-system evaluation passed; execution was Linux x86_64 only. The remaining
 unit execution budget finding is unchanged by this small timing-loop migration.
+
+The first division campaign ran at 03:10:30–03:11:08 UTC on October 28, with
+host load 13.70 and commit `43c296f`. All 60 processes verified their results;
+all 12 cohorts were unbaselined without retries. No baseline was approved.
+The table reports selected-process mean CPU nanoseconds per verified division.
+
+| Fixture | 1 allowed CPU | 12 allowed CPUs |
+|---|---:|---:|
+| Byte-base Knuth, 2048/1024 bits | 24969.71 | 20456.53 |
+| Chunk-reading Knuth, 2048/1024 bits | 711.43 | 606.51 |
+| Chunk-reading Knuth, 4096/2048 bits | 1928.59 | 1951.09 |
+| Chunk-reading Knuth, 8192/4096 bits | 8853.57 | 6870.41 |
+| 2048-bit dividend / 101 | 782.24 | 742.48 |
+| 2048-bit dividend / 65537 | 141.55 | 110.83 |
+
+The kernels are single-threaded in both cohorts. Between-process variation
+remains visible; for example, one-CPU byte-base samples ranged from 20550.38
+to 27319.46 ns. The byte-base and chunk-reading fixtures use different random
+draw widths, so they are not identical-input comparisons. These results do not
+establish a parallel speedup or a win over GMP, whose timings were not measured.
+Records use prefix `blip-mp-division-20261028T2310EDT-` plus the configured
+case names. Their actual chronology is the UTC interval above. Source stayed
+`da51a8e8fcdd590ca4098aff7d04c14ec9baf54422abc2abe99269397ca8e7e8`.
+
+## CRT correctness-reference cost
+
+At commit `43c296f`, a fresh diagnostic run split the 100-case CRT fuzz test
+without changing its inputs or checks. Of its 9.996 seconds, schoolbook
+reference multiplication consumed 9.032 seconds and CRT multiplication consumed
+0.950 seconds. This localized most of that test's cost to its quadratic oracle.
+
+The same 100 seeded operand pairs now use GMP for their reference products.
+The FFT still runs in ReleaseSafe, with both result-length and full-byte
+comparisons unchanged. Small schoolbook comparisons and the separate 16384-byte
+schoolbook case remain. The GMP byte adapter has independent native-u128
+boundary checks and refuses undersized output buffers before export. GMP is a
+test-module dependency only; the production arithmetic implementation and its
+runtime dependencies are unchanged.
+
+With the same diagnostic instrumentation, the updated test took 0.989 seconds:
+0.021 seconds in GMP and 0.954 seconds in CRT multiplication. The 497 core tests
+totaled 15.531 seconds of per-test execution, excluding process/protocol overhead.
+These are shared-host observations; CRT arithmetic itself has not become faster.
+The five-second execution budget remains unmet.
+
+The uninstrumented complete native suite and production build passed in 97
+seconds combined, including 95 seconds of mixed Nix preparation/check time.
+All-system evaluation passed; execution was Linux x86_64 only. The next latency
+investigation is bounded parallel execution of the independent inverse corpus
+cases, preserving every seeded operand pair, comparison and allocation check.
