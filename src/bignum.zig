@@ -5716,244 +5716,216 @@ test "invMod: result satisfies (a * r) mod m == 1 for 200 random small pairs" {
 	try testing.expect(verified > 100);
 }
 
-test "invModStein matches invModLehmer: 500+ random pairs across bit-widths" {
-	// Stein's binary GCD with Bezout (M-stein) must agree bit-for-bit with the
-	// GMP-validated Lehmer impl. Same test shape as the Lehmer-vs-classical
-	// oracle test, with m forced odd (Stein's requires odd modulus for the
-	// (x+m)/2 trick that keeps the Bezout coefficient an integer).
-	defer tier3.releaseBzArena();
-	defer tier3.releaseMulScratch();
-	defer tier3.releaseDivScratch();
-	defer tier3.releaseVnScratch();
-	const SIZES = [_]usize{ 64, 128, 192, 256, 384, 512, 768, 1024, 2048 };
-	const ITERS_PER_SIZE: usize = 60;
-	var prng = std.Random.DefaultPrng.init(0xC0FF_57E1_F00D_BEEF);
-	const rand = prng.random();
+const InverseCorpus = struct {
+	const Algorithm = *const fn (*Mp, *const Mp, *const Mp) ArithError!bool;
+	const Stats = struct {
+		total: usize = 0,
+		compared: usize = 0,
+		fingerprint: u64 = 0,
+	};
+	sizes: []const usize,
+	iterations: usize,
+	seed: u64,
+	first: Algorithm,
+	second: Algorithm,
 
-	var a = Mp.init(testing.allocator);
-	defer a.deinit();
-	var m = Mp.init(testing.allocator);
-	defer m.deinit();
-	var r_stein = Mp.init(testing.allocator);
-	defer r_stein.deinit();
-	var r_lehmer = Mp.init(testing.allocator);
-	defer r_lehmer.deinit();
+	fn owns(case_index: usize, worker: usize, worker_count: usize) bool {
+		return case_index % worker_count == worker;
+	}
 
-	var raw_buf: [512]u8 = undefined;
-	var enc_buf: [600]u8 = undefined;
+	fn run(self: InverseCorpus, worker_count: usize) !Stats {
+		if (worker_count == 0 or worker_count > 8) return error.InvalidWorkerCount;
+		var workers: [8]Worker = undefined;
+		var threads: [8]std.Thread = undefined;
+		var started: usize = 0;
+		// Join even when a later spawn fails; workers borrow this stack frame.
+		errdefer for (threads[0..started]) |thread| thread.join();
+		for (workers[0..worker_count], 0..) |*worker, index| {
+			worker.* = .{ .corpus = self, .index = index, .count = worker_count };
+			threads[index] = try std.Thread.spawn(.{}, Worker.execute, .{worker});
+			started += 1;
+		}
+		for (threads[0..started]) |thread| thread.join();
+		started = 0;
+		var stats: Stats = .{};
+		for (workers[0..worker_count]) |worker| {
+			const result = try worker.result;
+			stats.total += result.total;
+			stats.compared += result.compared;
+			stats.fingerprint ^= result.fingerprint;
+		}
+		return stats;
+	}
 
-	var total: usize = 0;
-	var compared: usize = 0;
-	for (SIZES) |bits| {
-		const byte_len = (bits + 7) / 8;
-		var i: usize = 0;
-		while (i < ITERS_PER_SIZE) : (i += 1) {
-			rand.bytes(raw_buf[0..byte_len]);
-			raw_buf[byte_len - 1] &= 0x7F;
-			const hdr_a = try tier3.writeHeader(&enc_buf, byte_len);
-			@memcpy(enc_buf[hdr_a..][0..byte_len], raw_buf[0..byte_len]);
-			try a.setBytes(enc_buf[0 .. hdr_a + byte_len]);
+	const Worker = struct {
+		corpus: InverseCorpus,
+		index: usize,
+		count: usize,
+		result: anyerror!Stats = error.WorkerNotRun,
 
-			rand.bytes(raw_buf[0..byte_len]);
-			raw_buf[byte_len - 1] = (raw_buf[byte_len - 1] & 0x7F) | 0x40;
-			raw_buf[0] |= 1; // m must be odd for Stein's
-			const hdr_m = try tier3.writeHeader(&enc_buf, byte_len);
-			@memcpy(enc_buf[hdr_m..][0..byte_len], raw_buf[0..byte_len]);
-			try m.setBytes(enc_buf[0 .. hdr_m + byte_len]);
+		fn execute(self: *Worker) void {
+			// Match the standard test allocator's checks without sharing its lock.
+			var allocator: @TypeOf(testing.allocator_instance) = .init;
+			self.result = self.compare(allocator.allocator());
+			if (allocator.deinit() == .leak) self.result = error.MemoryLeak;
+		}
 
-			const ok_l = try Mp.invModLehmer(&r_lehmer, &a, &m);
-			const ok_s = try Mp.invModStein(&r_stein, &a, &m);
-			try testing.expectEqual(ok_l, ok_s);
-			if (ok_l) {
-				try testing.expect(Mp.cmp(&r_stein, &r_lehmer) == .eq);
-				compared += 1;
+		fn compare(self: *const Worker, allocator: std.mem.Allocator) !Stats {
+			defer tier3.releaseBzArena();
+			defer tier3.releaseMulScratch();
+			defer tier3.releaseDivScratch();
+			defer tier3.releaseVnScratch();
+			var a = Mp.init(allocator);
+			defer a.deinit();
+			var m = Mp.init(allocator);
+			defer m.deinit();
+			var first = Mp.init(allocator);
+			defer first.deinit();
+			var second = Mp.init(allocator);
+			defer second.deinit();
+			var prng = std.Random.DefaultPrng.init(self.corpus.seed);
+			const random = prng.random();
+			var raw_a: [512]u8 = undefined;
+			var raw_m: [512]u8 = undefined;
+			var encoded: [600]u8 = undefined;
+			var case_index: usize = 0;
+			var stats: Stats = .{};
+			for (self.corpus.sizes) |bits| {
+				const byte_len = (bits + 7) / 8;
+				for (0..self.corpus.iterations) |_| {
+					// Every worker consumes the original complete random stream.
+					// Sharding only skips arithmetic, never an operand's random draw.
+					random.bytes(raw_a[0..byte_len]);
+					random.bytes(raw_m[0..byte_len]);
+					const assigned = owns(case_index, self.index, self.count);
+					case_index += 1;
+					if (!assigned) continue;
+					raw_a[byte_len - 1] &= 0x7f;
+					raw_m[byte_len - 1] = (raw_m[byte_len - 1] & 0x7f) | 0x40;
+					raw_m[0] |= 1;
+					const header = try tier3.writeHeader(&encoded, byte_len);
+					@memcpy(encoded[header..][0..byte_len], raw_a[0..byte_len]);
+					try a.setBytes(encoded[0 .. header + byte_len]);
+					@memcpy(encoded[header..][0..byte_len], raw_m[0..byte_len]);
+					try m.setBytes(encoded[0 .. header + byte_len]);
+					const ok_first = try self.corpus.first(&first, &a, &m);
+					const ok_second = try self.corpus.second(&second, &a, &m);
+					if (ok_first != ok_second) return error.InverseExistenceMismatch;
+					if (ok_first) {
+						if (Mp.cmp(&first, &second) != .eq) return error.InverseValueMismatch;
+						stats.compared += 1;
+					}
+					var hash = std.hash.Wyhash.init(case_index);
+					hash.update(a.bytes());
+					hash.update(m.bytes());
+					stats.fingerprint ^= hash.final();
+					stats.total += 1;
+				}
 			}
-			total += 1;
+			return stats;
+		}
+	};
+};
+
+test "inverse corpus partitions every case exactly once for one through eight workers" {
+	for (1..9) |workers| {
+		for (0..1200) |index| {
+			var owners: usize = 0;
+			for (0..workers) |worker| {
+				owners += @intFromBool(InverseCorpus.owns(index, worker, workers));
+			}
+			try testing.expectEqual(@as(usize, 1), owners);
 		}
 	}
-	try testing.expect(total >= 500);
-	try testing.expect(compared >= 400);
+}
+
+test "inverse corpus parallel execution preserves serial coverage and rejects worker errors" {
+	const corpus: InverseCorpus = .{
+		.sizes = &.{ 64, 128, 256 }, .iterations = 17, .seed = 0xC0FFEE_F00D_BEEF,
+		.first = Mp.invModLehmer, .second = Mp.invModClassical,
+	};
+	const serial = try corpus.run(1);
+	try testing.expectEqual(@as(usize, 51), serial.total);
+	try testing.expect(serial.compared > 0);
+	for (2..9) |workers| try testing.expectEqualDeep(serial, try corpus.run(workers));
+	try testing.expectError(error.InvalidWorkerCount, corpus.run(0));
+	try testing.expectError(error.InvalidWorkerCount, corpus.run(9));
+	const Failure = struct {
+		fn inverse(_: *Mp, _: *const Mp, _: *const Mp) ArithError!bool {
+			return error.OutOfMemory;
+		}
+	};
+	var failing = corpus;
+	failing.second = Failure.inverse;
+	try testing.expectError(error.OutOfMemory, failing.run(8));
+}
+
+test "inverse corpus rejects incorrect inverse existence and values" {
+	const Corrupt = struct {
+		fn existence(r: *Mp, a: *const Mp, m: *const Mp) ArithError!bool {
+			return !try Mp.invModLehmer(r, a, m);
+		}
+		fn value(r: *Mp, a: *const Mp, m: *const Mp) ArithError!bool {
+			const ok = try Mp.invModLehmer(r, a, m);
+			if (ok) try r.setI64(0);
+			return ok;
+		}
+	};
+	var corpus: InverseCorpus = .{
+		.sizes = &.{64}, .iterations = 17, .seed = 0xC0FFEE_F00D_BEEF,
+		.first = Mp.invModLehmer, .second = Corrupt.existence,
+	};
+	try testing.expectError(error.InverseExistenceMismatch, corpus.run(8));
+	corpus.second = Corrupt.value;
+	try testing.expectError(error.InverseValueMismatch, corpus.run(8));
+}
+
+test "invModStein matches invModLehmer: 500+ random pairs across bit-widths" {
+	const corpus: InverseCorpus = .{
+		.sizes = &.{ 64, 128, 192, 256, 384, 512, 768, 1024, 2048 },
+		.iterations = 60, .seed = 0xC0FF_57E1_F00D_BEEF,
+		.first = Mp.invModLehmer, .second = Mp.invModStein,
+	};
+	// Counts and input fingerprint recorded from the original serial corpus.
+	try testing.expectEqualDeep(InverseCorpus.Stats{
+		.total = 540, .compared = 450, .fingerprint = 0x81f51a0ea3275c6b,
+	}, try corpus.run(8));
 }
 
 test "invModLehmer matches invModClassical: 1000 random pairs across bit-widths" {
-	// Strict TDD oracle: classical EEA is GMP-validated; Lehmer must agree
-	// bit-for-bit. Picks random a, m with m odd >= 3 to maximise gcd==1
-	// hits. When gcd != 1, both must report no-inverse.
-	// Sizes are multiples of 64 to avoid hitting a pre-existing tier3 buffer
-	// sizing edge case (r_pay_max = b_pay.len + 2 underestimates needed bytes
-	// when b_pay.len isn't a multiple of 8 — caught while writing this test
-	// but out of scope for this milestone).
-	const SIZES = [_]usize{ 64, 128, 192, 256, 320, 384, 448, 512, 768, 1024, 1536, 2048 };
-	const ITERS_PER_SIZE: usize = 100;
-	var prng = std.Random.DefaultPrng.init(0xC0FFEE_F00D_BEEF);
-	const rand = prng.random();
-
-	var a = Mp.init(testing.allocator);
-	defer a.deinit();
-	var m = Mp.init(testing.allocator);
-	defer m.deinit();
-	var r_lehmer = Mp.init(testing.allocator);
-	defer r_lehmer.deinit();
-	var r_classical = Mp.init(testing.allocator);
-	defer r_classical.deinit();
-
-	var raw_buf: [512]u8 = undefined;
-	var enc_buf: [600]u8 = undefined;
-
-	var total: usize = 0;
-	var compared: usize = 0;
-	for (SIZES) |bits| {
-		const byte_len = (bits + 7) / 8;
-		var i: usize = 0;
-		while (i < ITERS_PER_SIZE) : (i += 1) {
-			// a: random bytes, force positive (high bit clear).
-			rand.bytes(raw_buf[0..byte_len]);
-			raw_buf[byte_len - 1] &= 0x7F;
-			const hdr_a = try tier3.writeHeader(&enc_buf, byte_len);
-			@memcpy(enc_buf[hdr_a..][0..byte_len], raw_buf[0..byte_len]);
-			try a.setBytes(enc_buf[0 .. hdr_a + byte_len]);
-
-			// m: random bytes, positive, odd, and force second-highest bit set
-			// so m's bitLen is large enough to reliably exceed a's bitLen
-			// (improves coprime hit-rate).
-			rand.bytes(raw_buf[0..byte_len]);
-			raw_buf[byte_len - 1] = (raw_buf[byte_len - 1] & 0x7F) | 0x40;
-			raw_buf[0] |= 1; // odd
-			const hdr_m = try tier3.writeHeader(&enc_buf, byte_len);
-			@memcpy(enc_buf[hdr_m..][0..byte_len], raw_buf[0..byte_len]);
-			try m.setBytes(enc_buf[0 .. hdr_m + byte_len]);
-
-			const ok_l = try Mp.invModLehmer(&r_lehmer, &a, &m);
-			const ok_c = try Mp.invModClassical(&r_classical, &a, &m);
-			try testing.expectEqual(ok_c, ok_l);
-			if (ok_c) {
-				try testing.expect(Mp.cmp(&r_lehmer, &r_classical) == .eq);
-				compared += 1;
-			}
-			total += 1;
-		}
-	}
-	try testing.expect(total >= 1000);
-	try testing.expect(compared >= 800); // most should have inverses
+	const corpus: InverseCorpus = .{
+		.sizes = &.{ 64, 128, 192, 256, 320, 384, 448, 512, 768, 1024, 1536, 2048 },
+		.iterations = 100, .seed = 0xC0FFEE_F00D_BEEF,
+		.first = Mp.invModLehmer, .second = Mp.invModClassical,
+	};
+	// Counts and input fingerprint recorded from the original serial corpus.
+	try testing.expectEqualDeep(InverseCorpus.Stats{
+		.total = 1200, .compared = 994, .fingerprint = 0x9467db8a664af935,
+	}, try corpus.run(8));
 }
 
 test "invModHGCD matches invModLehmer: 1000+ random pairs across bit-widths" {
-	// M10 oracle: invModLehmer is GMP-validated (12029 cross-checks);
-	// invModHGCD must agree bit-for-bit. Same input distribution as the
-	// Lehmer-vs-classical test so we get coverage across the recursion
-	// threshold (HGCD only kicks in above the threshold; below, it
-	// degenerates to Lehmer).
-	defer tier3.releaseBzArena();
-	defer tier3.releaseMulScratch();
-	defer tier3.releaseDivScratch();
-	defer tier3.releaseVnScratch();
-	const SIZES = [_]usize{ 64, 128, 192, 256, 320, 384, 448, 512, 768, 1024, 1536, 2048, 3072, 4096 };
-	const ITERS_PER_SIZE: usize = 80;
-	var prng = std.Random.DefaultPrng.init(0xC0FFEE_F00D_BEE0);
-	const rand = prng.random();
-
-	var a = Mp.init(testing.allocator);
-	defer a.deinit();
-	var m = Mp.init(testing.allocator);
-	defer m.deinit();
-	var r_hgcd = Mp.init(testing.allocator);
-	defer r_hgcd.deinit();
-	var r_lehmer = Mp.init(testing.allocator);
-	defer r_lehmer.deinit();
-
-	var raw_buf: [1024]u8 = undefined;
-	var enc_buf: [1100]u8 = undefined;
-
-	var total: usize = 0;
-	var compared: usize = 0;
-	for (SIZES) |bits| {
-		const byte_len = (bits + 7) / 8;
-		var i: usize = 0;
-		while (i < ITERS_PER_SIZE) : (i += 1) {
-			rand.bytes(raw_buf[0..byte_len]);
-			raw_buf[byte_len - 1] &= 0x7F;
-			const hdr_a = try tier3.writeHeader(&enc_buf, byte_len);
-			@memcpy(enc_buf[hdr_a..][0..byte_len], raw_buf[0..byte_len]);
-			try a.setBytes(enc_buf[0 .. hdr_a + byte_len]);
-
-			rand.bytes(raw_buf[0..byte_len]);
-			raw_buf[byte_len - 1] = (raw_buf[byte_len - 1] & 0x7F) | 0x40;
-			raw_buf[0] |= 1;
-			const hdr_m = try tier3.writeHeader(&enc_buf, byte_len);
-			@memcpy(enc_buf[hdr_m..][0..byte_len], raw_buf[0..byte_len]);
-			try m.setBytes(enc_buf[0 .. hdr_m + byte_len]);
-
-			const ok_h = try Mp.invModHGCD(&r_hgcd, &a, &m);
-			const ok_l = try Mp.invModLehmer(&r_lehmer, &a, &m);
-			try testing.expectEqual(ok_l, ok_h);
-			if (ok_l) {
-				try testing.expect(Mp.cmp(&r_hgcd, &r_lehmer) == .eq);
-				compared += 1;
-			}
-			total += 1;
-		}
-	}
-	try testing.expect(total >= 1000);
-	try testing.expect(compared >= 800);
+	const corpus: InverseCorpus = .{
+		.sizes = &.{ 64, 128, 192, 256, 320, 384, 448, 512, 768, 1024, 1536, 2048, 3072, 4096 },
+		.iterations = 80, .seed = 0xC0FFEE_F00D_BEE0,
+		.first = Mp.invModHGCD, .second = Mp.invModLehmer,
+	};
+	// Counts and input fingerprint recorded from the original serial corpus.
+	try testing.expectEqualDeep(InverseCorpus.Stats{
+		.total = 1120, .compared = 921, .fingerprint = 0x20aa25b8afbe1ab1,
+	}, try corpus.run(8));
 }
 
 test "invModHGCDRecursive matches invModHGCD: random pairs across bit-widths" {
-	// M11.2 oracle: invModHGCD (M10 wider-window) is GMP-validated and
-	// agrees with invModLehmer; invModHGCDRecursive must agree bit-for-bit.
-	// Bit-widths span the recursive HGCD threshold (1024) so we exercise
-	// both the fallback path and the recursive path.
-	defer tier3.releaseBzArena();
-	defer tier3.releaseMulScratch();
-	defer tier3.releaseDivScratch();
-	defer tier3.releaseVnScratch();
-	const SIZES = [_]usize{ 256, 512, 768, 1024, 1536, 2048, 3072, 4096 };
-	const ITERS_PER_SIZE: usize = 130;
-	var prng = std.Random.DefaultPrng.init(0xDEAD_F00D_C0DE_F00D);
-	const rand = prng.random();
-
-	var a = Mp.init(testing.allocator);
-	defer a.deinit();
-	var m = Mp.init(testing.allocator);
-	defer m.deinit();
-	var r_rec = Mp.init(testing.allocator);
-	defer r_rec.deinit();
-	var r_hgcd = Mp.init(testing.allocator);
-	defer r_hgcd.deinit();
-
-	var raw_buf: [1024]u8 = undefined;
-	var enc_buf: [1100]u8 = undefined;
-
-	var total: usize = 0;
-	var compared: usize = 0;
-	for (SIZES) |bits| {
-		const byte_len = (bits + 7) / 8;
-		var i: usize = 0;
-		while (i < ITERS_PER_SIZE) : (i += 1) {
-			rand.bytes(raw_buf[0..byte_len]);
-			raw_buf[byte_len - 1] &= 0x7F;
-			const hdr_a = try tier3.writeHeader(&enc_buf, byte_len);
-			@memcpy(enc_buf[hdr_a..][0..byte_len], raw_buf[0..byte_len]);
-			try a.setBytes(enc_buf[0 .. hdr_a + byte_len]);
-
-			rand.bytes(raw_buf[0..byte_len]);
-			raw_buf[byte_len - 1] = (raw_buf[byte_len - 1] & 0x7F) | 0x40;
-			raw_buf[0] |= 1;
-			const hdr_m = try tier3.writeHeader(&enc_buf, byte_len);
-			@memcpy(enc_buf[hdr_m..][0..byte_len], raw_buf[0..byte_len]);
-			try m.setBytes(enc_buf[0 .. hdr_m + byte_len]);
-
-			const ok_r = try Mp.invModHGCDRecursive(&r_rec, &a, &m);
-			const ok_h = try Mp.invModHGCD(&r_hgcd, &a, &m);
-			try testing.expectEqual(ok_h, ok_r);
-			if (ok_h) {
-				try testing.expect(Mp.cmp(&r_rec, &r_hgcd) == .eq);
-				compared += 1;
-			}
-			total += 1;
-		}
-	}
-	try testing.expect(total >= 1000);
-	try testing.expect(compared >= 800);
+	const corpus: InverseCorpus = .{
+		.sizes = &.{ 256, 512, 768, 1024, 1536, 2048, 3072, 4096 },
+		.iterations = 130, .seed = 0xDEAD_F00D_C0DE_F00D,
+		.first = Mp.invModHGCDRecursive, .second = Mp.invModHGCD,
+	};
+	// Counts and input fingerprint recorded from the original serial corpus.
+	try testing.expectEqualDeep(InverseCorpus.Stats{
+		.total = 1040, .compared = 858, .fingerprint = 0xdbbe3c0944a5ed00,
+	}, try corpus.run(8));
 }
 
 test "invMod: large modulus — 256-bit random with verification" {

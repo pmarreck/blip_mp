@@ -386,3 +386,45 @@ seconds combined, including 95 seconds of mixed Nix preparation/check time.
 All-system evaluation passed; execution was Linux x86_64 only. The next latency
 investigation is bounded parallel execution of the independent inverse corpus
 cases, preserving every seeded operand pair, comparison and allocation check.
+
+## Bounded inverse-corpus concurrency
+
+The four inverse cross-check corpora now run with eight workers per test. Each
+worker consumes the original seeded random stream, then performs arithmetic
+only for its assigned case indices. Allocation checks use a private instance of
+the standard testing allocator's exact type. Each worker releases its thread-local
+scratch before checking for leaks. All workers join before results are read or
+an error returns, including cleanup after a partial thread-spawn failure.
+
+Before replacing the serial loops, a diagnostic build recorded their exact
+case counts, inverse counts and indexed input fingerprints. These are now fixed
+assertions in addition to every original existence and full-result comparison.
+
+| Comparison | Cases | Inverses | Input fingerprint |
+|---|---:|---:|---|
+| Stein / Lehmer | 540 | 450 | `81f51a0ea3275c6b` |
+| Lehmer / classical | 1200 | 994 | `9467db8a664af935` |
+| Wider HGCD / Lehmer | 1120 | 921 | `20aa25b8afbe1ab1` |
+| Recursive HGCD / wider HGCD | 1040 | 858 | `dbbe3c0944a5ed00` |
+
+The fingerprint is a regression check, not a proof of input identity. It XORs
+Wyhash values seeded by each case's one-based index over its two BLIP encodings.
+An exhaustive assignment test checks one owner per case for worker counts one
+through eight. A smaller corpus compares serial results against every supported
+parallel count. Additional controls reject worker errors, incorrect inverse
+existence and incorrect values. The initial empty implementation failed coverage
+and count assertions; disabling result checks made the corruption control fail.
+
+The final instrumented ReleaseSafe run measured the four corpora at 0.499,
+0.613, 0.284 and 0.379 seconds respectively. The 500 core tests totaled 6.251
+seconds of per-test wall time, down from 15.531 seconds before this change.
+This excludes process/protocol overhead and sums test spans, not worker CPU time.
+The one-second target and five-second complete-execution budget remain unmet.
+No arithmetic or SIMD implementation changed; the measured opportunity was
+independent correctness cases executing sequentially. Production performance
+claims require the separate optimized probes.
+
+The full native suite and production build passed in 95 seconds combined,
+including 94 seconds of mixed Nix preparation/check time. The diagnostic core
+compilation took 46 seconds. These shared-host observations establish a useful
+test-feedback reduction without declaring a new performance baseline.
