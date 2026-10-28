@@ -666,6 +666,60 @@ time. The optimized production/probe build and all-system evaluation also
 passed. The shared timing helper's cross-module visibility was corrected after
 the optimized CLI build exposed it; this did not change arithmetic.
 
+### Matched division results, October 28, 2026
+
+Campaign `blip-mp-division-competitors-20261028T165658Z` measured commit
+`9e198bb4cda9bf504e22c35001b4cc9b39a1b63a` on Linux x86_64, Threadripper
+3990X, Zig 0.16.0 ReleaseFast and ordinary GMP 6.3.0. All 15 processes,
+including the five-process variation retry, verified every quotient and
+remainder. The source digest stayed
+`2c6da22ca8b26a12c0ed105c30b93628fe4b32c5ca2d5813edd5c19f744985ad`.
+The single-CPU cohort was `UNBASELINED` after one attempt; the 12-CPU affinity
+cohort was `INCONCLUSIVE` after two attempts because variation exceeded policy.
+No baseline was approved. The algorithms are serial; the affinity cohorts do
+not establish parallel scaling.
+
+The table gives median within-sample CPU ratios across five selected processes
+and eight samples per process. Each cell is **1-CPU / 12-CPU affinity**.
+A ratio above 1 means the numerator takes more CPU time. Widths are divisor
+magnitude bytes; dividends have twice that width. The
+[summary](../benchmarks/storage-aware/division-competitors-summary.json)
+also preserves sample ranges and every process-mean ratio, including the
+diagnostic attempt. Full samples remain in external performance history under
+the campaign prefix and the `division_competitors_1core` and
+`division_competitors_12core` suffixes.
+
+| Divisor bytes | Public BLIP / GMP | B-Z / GMP | B-Z / Knuth |
+|---:|---:|---:|---:|
+| 8 | 1.80 / 1.83 | 7.00 / 7.19 | 4.05 / 4.09 |
+| 16 | 2.75 / 2.80 | 3.74 / 3.86 | 1.13 / 1.14 |
+| 32 | 2.31 / 2.34 | 3.03 / 3.08 | 1.06 / 1.06 |
+| 64 | 2.50 / 2.52 | 13.14 / 13.15 | 4.37 / 4.35 |
+| 128 | 2.65 / 2.65 | 20.42 / 20.40 | 6.35 / 6.34 |
+| 256 | 2.29 / 2.29 | 17.46 / 17.53 | 6.53 / 6.54 |
+| 512 | 2.54 / 2.52 | 14.65 / 14.59 | 5.27 / 5.26 |
+| 1,024 | 3.05 / 3.04 | 11.98 / 12.00 | 3.75 / 3.76 |
+| 2,048 | 3.86 / 3.88 | 9.87 / 9.91 | 2.50 / 2.49 |
+| 4,096 | 5.13 / 5.19 | 8.88 / 9.00 | 1.71 / 1.71 |
+| 8,192 | 7.00 / 7.11 | 8.11 / 8.21 | 1.15 / 1.15 |
+| 16,384 | 10.91 / 11.13 | 8.50 / 8.65 | 0.773 / 0.771 |
+
+GMP wins at every sampled width, for both public BLIP and the improved B-Z
+kernel. Every process-mean comparison, including diagnostics, agrees with that
+direction. The earlier 6–19× and 78–94% gains were against the old byte fallback
+and four-byte recursive cutoff, respectively. They do not imply wins over GMP.
+
+The improved B-Z kernel crosses Knuth between the sampled 8,192- and
+16,384-byte divisor widths for this 2:1 workload. At 16,384 bytes it saves
+about 23% of CPU time; every process-mean B-Z/Knuth ratio is 0.765–0.794.
+At 8,192 bytes every process mean still favors Knuth, with ratios 1.126–1.226.
+This bounds a candidate crossover for the measured geometry, not a universal
+dispatch threshold. Public division still uses the 99,999-byte B-Z threshold.
+Before lowering it, measure nearby and odd widths, other dividend/divisor
+ratios, and the complete public path with a controlled alternative dispatch.
+The existing verification overhead differs between the public and kernel
+adapters, as described above.
+
 ### Exact-capacity remainder regression
 
 Reviewing the B-Z entry point exposed a separate single-byte-divisor bug. With
