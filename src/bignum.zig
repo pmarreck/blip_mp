@@ -773,6 +773,11 @@ pub const Mp = struct {
 	///   - exp must be non-negative for now (negative needs modular inverse — M7-5).
 	///   - Result is reduced into [0, |mod|-1] (Euclidean), even if base is negative.
 	pub fn powm(r: *Mp, base: *const Mp, exp: *const Mp, m: *const Mp) ArithError!void {
+		return powmImpl(null, r, base, exp, m);
+	}
+
+	/// Explicit general-product Montgomery control for algorithm comparisons.
+	pub fn powmGeneral(r: *Mp, base: *const Mp, exp: *const Mp, m: *const Mp) ArithError!void {
 		return powmImpl(false, r, base, exp, m);
 	}
 
@@ -782,7 +787,7 @@ pub const Mp = struct {
 		return powmImpl(true, r, base, exp, m);
 	}
 
-	fn powmImpl(comptime symmetric: bool, r: *Mp, base: *const Mp, exp: *const Mp, m: *const Mp) ArithError!void {
+	fn powmImpl(comptime symmetric: ?bool, r: *Mp, base: *const Mp, exp: *const Mp, m: *const Mp) ArithError!void {
 		if (m.cached_sign == 0) return error.DivisionByZero;
 		if (exp.cached_sign < 0) return error.NegativeExponentNotSupported;
 		const allocator = r.allocator;
@@ -846,7 +851,11 @@ pub const Mp = struct {
 		while (m_mag_len > 0 and m_pay[m_mag_len - 1] == 0) m_mag_len -= 1;
 		const MONT_MIN_BYTES: usize = 8;
 		if (m_is_odd and m_mag_len >= MONT_MIN_BYTES) {
-			try powmMontgomery(symmetric, r, &base_red, exp, &m_abs, w);
+			if (symmetric orelse montUseSymmetric(m_mag_len)) {
+				try powmMontgomery(true, r, &base_red, exp, &m_abs, w);
+			} else {
+				try powmMontgomery(false, r, &base_red, exp, &m_abs, w);
+			}
 			return;
 		}
 
@@ -3301,17 +3310,28 @@ fn powmSlidingWindow(r: *Mp, base_red: *const Mp, exp: *const Mp, m: *const Mp, 
 	try r.setBytes(result.bytes());
 }
 
-/// powm helper: Montgomery sliding-window exponentiation (M7-4.3).
-///
-/// Replaces every `mul + mod` step in the sliding-window loop with a single
-/// `montMul`, which fuses multiply + Montgomery reduction into one O(k^2)
-/// pass over magnitude bytes with temporary u64 reads (no Knuth division). Setup cost (one R^2 mod m
-/// computation, then base/result conversion via two extra montMuls)
-/// amortises across the ~bits squarings + ~bits/w multiplications.
-///
-/// Inputs: base_red already reduced into [0, |m|-1]; m positive, ODD,
-/// magnitude length >= 8 bytes (caller decides — Mont's setup makes it
-/// uneconomic below ~64-bit moduli). w in [2, 8].
+fn montUseSymmetric(magnitude_bytes: usize) bool {
+	// Paired Zen 2 public-operation measurements support this bounded interval.
+	// Keep unmeasured larger widths and noisy smaller widths on the control.
+	return magnitude_bytes >= 64 and magnitude_bytes <= 384;
+}
+
+test "Montgomery square selection covers only the measured magnitude interval" {
+	var selected: usize = 0;
+	for (0..1025) |width| {
+		const expected = switch (width) { 64...384 => true, else => false };
+		try std.testing.expectEqual(expected, montUseSymmetric(width));
+		if (montUseSymmetric(width)) selected += 1;
+	}
+	try std.testing.expectEqual(@as(usize, 321), selected);
+	try std.testing.expect(!montUseSymmetric(std.math.maxInt(usize)));
+}
+
+/// Montgomery sliding-window exponentiation over magnitude byte buffers.
+/// Product formation and reduction use temporary native reads. Setup computes
+/// R^2 mod m and converts the base; each loop step avoids Knuth division.
+/// Inputs: reduced base, positive odd modulus of at least eight magnitude bytes,
+/// and window width in [2, 8]. The symmetric variant specializes squaring only.
 fn powmMontgomery(comptime symmetric: bool, r: *Mp, base_red: *const Mp, exp: *const Mp, m: *const Mp, w: u8) ArithError!void {
 	const allocator = r.allocator;
 	std.debug.assert(w >= 2 and w <= 8);

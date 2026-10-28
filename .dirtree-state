@@ -30,6 +30,7 @@ annotate=[
 	docs/benchmarks/storage-aware/crossover-summary.jsonl = Selected-process crossover and allocation observations with cohort verdicts
 	docs/benchmarks/storage-aware/paired-tail-summary.jsonl = Paired final-block timing components and process ratios
 	docs/benchmarks/storage-aware/powm-baseline-summary.json = Verified powm baseline process means and cohort verdicts
+	docs/benchmarks/storage-aware/powm-boundary-summary.json = Paired small-width Montgomery timings, process ratios and verdicts
 	docs/benchmarks/storage-aware/powm-paired-summary.json = Paired public exponentiation component timings and symmetric-to-general ratios
 	docs/benchmarks/storage-aware/powm-square-summary.json = Separate-process symmetric Montgomery squaring experiment and cohort verdicts
 	docs/benchmarks/storage-aware/short-tail-summary.jsonl = Selected unpaired short-tail measurements and verdicts

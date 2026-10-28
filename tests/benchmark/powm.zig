@@ -48,9 +48,9 @@ pub fn main(init: std.process.Init) !void {
 	for (options.sizes[0..options.count], 0..) |bits, index| {
 		var fixture = try Fixture.init(std.heap.c_allocator, bits, 256);
 		defer fixture.deinit();
-		for (0..fixture.cases.len) |i| try fixture.run(i);
 		var row: Row = .{ .size = bits, .samples = undefined };
 		if (options.paired) {
+			for (0..fixture.cases.len) |i| try fixture.runWith(.general, i);
 			for (0..fixture.cases.len) |i| try fixture.runWith(.symmetric, i);
 			row.warmup_cases = 512;
 			row.components = .{
@@ -67,6 +67,7 @@ pub fn main(init: std.process.Init) !void {
 				row.samples.wall_ns[round] = (timing.wall_ns[0] + timing.wall_ns[1]) / 2;
 			}
 		} else {
+			for (0..fixture.cases.len) |i| try fixture.run(i);
 			var clock: NativeClock = .{};
 			for (&row.samples.cpu_ns, &row.samples.wall_ns) |*cpu, *wall| {
 				const timing = try sample(&fixture, &clock, fixture.cases.len);
@@ -178,14 +179,19 @@ const Fixture = struct {
 		return .{ .allocator = allocator, .cases = cases, .output = Mp.init(allocator) };
 	}
 	fn run(self: *@This(), index: usize) !void {
-		return self.runWith(.general, index);
+		const case = &self.cases[index];
+		try Mp.powm(&self.output, &case.a, &case.exponent, &case.modulus);
+		try self.verify(case);
 	}
 	fn runWith(self: *@This(), method: Method, index: usize) !void {
 		const case = &self.cases[index];
 		switch (method) {
-			.general => try Mp.powm(&self.output, &case.a, &case.exponent, &case.modulus),
+			.general => try Mp.powmGeneral(&self.output, &case.a, &case.exponent, &case.modulus),
 			.symmetric => try Mp.powmSymmetric(&self.output, &case.a, &case.exponent, &case.modulus),
 		}
+		try self.verify(case);
+	}
+	fn verify(self: *@This(), case: *const Case) !void {
 		const actual = std.mem.trimEnd(u8, self.output.payload(), &.{0});
 		if (try self.output.sign() < 0 or !std.mem.eql(u8, actual, case.expected)) return error.IncorrectWork;
 	}
@@ -259,9 +265,11 @@ test "powm fixture verifies retained inputs and rejects a corrupted oracle" {
 		defer fixture.deinit();
 		for (0..2) |i| {
 			try fixture.run(i);
+			try fixture.runWith(.general, i);
 			try fixture.runWith(.symmetric, i);
 			fixture.corrupt(i);
 			try std.testing.expectError(error.IncorrectWork, fixture.run(i));
+			try std.testing.expectError(error.IncorrectWork, fixture.runWith(.general, i));
 			try std.testing.expectError(error.IncorrectWork, fixture.runWith(.symmetric, i));
 		}
 	}
@@ -273,6 +281,7 @@ test "powm fixture releases every partial allocation" {
 			var fixture = try Fixture.init(allocator, 512, 1);
 			defer fixture.deinit();
 			try fixture.run(0);
+			try fixture.runWith(.general, 0);
 			try fixture.runWith(.symmetric, 0);
 		}
 	};

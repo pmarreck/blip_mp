@@ -811,6 +811,47 @@ pub fn main() !u8 {
 		std.debug.print("  {s} op={s:<4} bits={d:>5} iters={d:>4} fails={d}\n", .{ status, "powm", bits, iters, failures });
 	}
 
+	// Exercise zero padding inside native chunks and every public output alias.
+	// Short odd/even exponents enter Montgomery while keeping this corpus bounded.
+	var mont_boundary_rng = std.Random.DefaultPrng.init(0x4d4f_4e54_424f_554e);
+	const mont_random = mont_boundary_rng.random();
+	const mont_widths = [_]usize{ 7, 8, 9, 15, 16, 17, 31, 32, 33, 63, 64, 65, 95, 96, 97, 127, 128, 129, 255, 256, 257, 383, 384, 385 };
+	for (mont_widths) |width| {
+		const encoded = try allocator.alloc(u8, width + 16);
+		defer allocator.free(encoded);
+		const header = try blip_mp.tier3.writeHeader(encoded, width);
+		const payload = encoded[header..][0..width];
+		for ([_]i64{257,258}) |exponent| for (0..4) |signs| for (0..4) |alias| for (0..3) |method| {
+			mont_random.bytes(payload); payload[width - 1] = 0x51;
+			try blip_a.setBytes(encoded[0 .. header + width]);
+			__gmpz_import(&gmp_a, width, -1, 1, 0, 0, payload.ptr);
+			mont_random.bytes(payload); payload[width - 1] = 0x61; payload[0] |= 1;
+			try blip_m.setBytes(encoded[0 .. header + width]);
+			__gmpz_import(&gmp_m, width, -1, 1, 0, 0, payload.ptr);
+			try blip_b.setI64(exponent); __gmpz_set_si(&gmp_b, @intCast(exponent));
+			if (signs & 1 != 0) {
+				try blip_mp.sign.neg(&blip_a, &blip_a); __gmpz_neg(&gmp_a, &gmp_a);
+			}
+			if (signs & 2 != 0) {
+				try blip_mp.sign.neg(&blip_m, &blip_m); __gmpz_neg(&gmp_m, &gmp_m);
+			}
+			try std.testing.expectEqual(width, blip_a.payload().len);
+			try std.testing.expectEqual(width, blip_m.payload().len);
+			__gmpz_powm(&gmp_r, &gmp_a, &gmp_b, &gmp_m);
+			const output = switch (alias) { 0 => &blip_r, 1 => &blip_a, 2 => &blip_b, else => &blip_m };
+			switch (method) {
+				0 => try Mp.powm(output, &blip_a, &blip_b, &blip_m),
+				1 => try Mp.powmSymmetric(output, &blip_a, &blip_b, &blip_m),
+				else => try Mp.powmGeneral(output, &blip_a, &blip_b, &blip_m),
+			}
+			var got = try normalizeBlip(output.bytes(), allocator); defer got.deinit();
+			var expected = try normalizeGmp(&gmp_r, allocator); defer expected.deinit();
+			if (!nfEqual(got, expected)) return error.MontgomeryPublicBoundaryMismatch;
+			total_checks += 1;
+		};
+	}
+	std.debug.print("  PASS Montgomery width/sign/alias boundaries: 2304 GMP comparisons\n", .{});
+
 	// ── invMod cross-check ─────────────────────────────────────────────────
 	// invMod takes (a, m); m must be > 0. We force m odd > 1 to maximise the
 	// chance gcd(a, m) == 1 (so the inverse exists and the result can be

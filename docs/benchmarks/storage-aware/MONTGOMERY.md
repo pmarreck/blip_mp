@@ -241,3 +241,49 @@ speedup, an approved historical gate, a gain for other exponent distributions,
 or a benefit on another architecture. Production dispatch awaits a measured
 cutoff, with partial-native-chunk modulus widths included in its correctness
 checks before selection.
+
+## Boundary result and production selection
+
+Campaign `blip-mp-powm-boundary-20261028T081452Z` measured commit
+`34b8e8b48a6a2e6802e32353e73ec1519e591c25`, with source hash
+`59e16b9f0078b80101c3f886169cfebe3ac84f49cba4317240903f79ac42e8cc`
+unchanged. All 15 processes, including the one-CPU retry, verified their
+results. Both cohorts ended `UNBASELINED`; no baseline epoch was approved.
+
+| Nominal bits | Paired symmetric/general CPU ratio, 1 CPU | Paired symmetric/general CPU ratio, 12 CPUs |
+|---:|---:|---:|
+| 64 | 1.021 | 1.022 |
+| 128 | 1.019 | 1.017 |
+| 256 | 1.007 | 1.006 |
+| 384 | 0.976 | 0.977 |
+| 512 | 0.952 | 0.951 |
+| 768 | 0.914 | 0.914 |
+| 1024 | 0.891 | 0.890 |
+| 1536 | 0.854 | 0.855 |
+
+These medians use 25 paired sample ratios from each cohort's final attempt.
+The [boundary summary](powm-boundary-summary.json) also retains process-mean
+ratios from every attempt. At 384 bits, one earlier process regressed by
+1.1%; at 512 bits and above every process mean favored symmetric squaring.
+Together with the earlier 2048/3072-bit measurements, this supports selecting
+symmetric squaring for modulus magnitudes of 64 through 384 bytes inclusive.
+Smaller and larger unmeasured widths retain general multiplication. Selection
+uses the magnitude length before native-chunk padding, after sign normalization.
+The gain between sampled widths is an interpolation, and performance on other
+architectures or exponent distributions remains unmeasured.
+
+`Mp.powm` applies this bounded selection. `Mp.powmGeneral` and
+`Mp.powmSymmetric` force the corresponding primitive for comparison; the paired
+probe uses those explicit controls, including warmup. The single-method probe
+continues to measure production `Mp.powm`. Existing exponent and odd-modulus
+dispatch requirements remain in force.
+
+The selection test classifies all widths from zero through 1024 bytes, plus
+the largest addressable width. Public GMP comparisons cover partial native
+chunks, the selection boundaries, all base/modulus sign combinations and
+output aliasing with each input. A separate RNG preserves the earlier corpus.
+The 2304 new public comparisons exercise production, forced general and forced
+symmetric paths. The complete native suite passed with 15,535 integration GMP
+comparisons in 94 seconds of mixed Nix preparation/check time. Production build
+and all-system evaluation passed. The classifier first failed against an
+always-false implementation, then passed with the bounded selection.

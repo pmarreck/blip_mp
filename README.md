@@ -78,7 +78,8 @@ correctness oracle; this probe does not time GMP itself.
 The [Montgomery experiment](docs/benchmarks/storage-aware/MONTGOMERY.md)
 records the baseline and a symmetric-squaring candidate. Paired measurements
 show about 3–18% lower public-operation CPU time at the sampled 512–3072-bit
-widths. A smaller-size sweep will qualify production dispatch; the cohorts
+widths. A smaller-size sweep supports production selection for 64–384-byte
+modulus magnitudes; other widths retain general multiplication. The cohorts
 remain unbaselined and this comparison does not time GMP.
 
 `./bm --verified-multiplication` compares schoolbook and blocked products on
