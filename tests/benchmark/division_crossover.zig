@@ -19,17 +19,18 @@ fn parse(args: []const []const u8) !Options {
 	return options;
 }
 
-const Method = enum { knuth, burnikel_ziegler, burnikel_ziegler_chunk_fallback };
-pub const Comparison = enum { kernels, fallbacks };
+const Method = enum { knuth, burnikel_ziegler, burnikel_ziegler_chunk_fallback, burnikel_ziegler_cutoff128 };
+pub const Comparison = enum { kernels, fallbacks, cutoffs };
 fn comparisonMethods(comparison: Comparison) [2]Method {
 	return switch (comparison) {
 		.kernels => .{ .knuth, .burnikel_ziegler },
 		.fallbacks => .{ .burnikel_ziegler, .burnikel_ziegler_chunk_fallback },
+		.cutoffs => .{ .burnikel_ziegler_chunk_fallback, .burnikel_ziegler_cutoff128 },
 	};
 }
 
 test "division comparison selects the intended algorithm pairs" {
-	const expected = [_][2]Method{ .{.knuth,.burnikel_ziegler}, .{.burnikel_ziegler,.burnikel_ziegler_chunk_fallback} };
+	const expected = [_][2]Method{ .{.knuth,.burnikel_ziegler}, .{.burnikel_ziegler,.burnikel_ziegler_chunk_fallback}, .{.burnikel_ziegler_chunk_fallback,.burnikel_ziegler_cutoff128} };
 	for (std.enums.values(Comparison), expected) |comparison, methods| {
 		try std.testing.expectEqualSlices(Method, &methods, &comparisonMethods(comparison));
 	}
@@ -69,7 +70,7 @@ test "paired division batches cover each input equally and cancel linear drift" 
 	const Fake = struct {
 		position: usize = 0,
 		calls: [4]Method = undefined,
-		visits: [3][8]usize = @splat(@splat(0)),
+		visits: [4][8]usize = @splat(@splat(0)),
 		fn batch(self: *@This(), method: Method, start: usize, count: usize, repeats: usize) !Timing {
 			const index: usize = @intFromEnum(method);
 			for (start .. start + count) |i| self.visits[index][i] += repeats;
@@ -83,16 +84,21 @@ test "paired division batches cover each input equally and cancel linear drift" 
 		.{.knuth,.burnikel_ziegler,.burnikel_ziegler,.knuth}, .{.burnikel_ziegler,.knuth,.knuth,.burnikel_ziegler},
 		.{.burnikel_ziegler,.burnikel_ziegler_chunk_fallback,.burnikel_ziegler_chunk_fallback,.burnikel_ziegler},
 		.{.burnikel_ziegler_chunk_fallback,.burnikel_ziegler,.burnikel_ziegler,.burnikel_ziegler_chunk_fallback},
+		.{.burnikel_ziegler_chunk_fallback,.burnikel_ziegler_cutoff128,.burnikel_ziegler_cutoff128,.burnikel_ziegler_chunk_fallback},
+		.{.burnikel_ziegler_cutoff128,.burnikel_ziegler_chunk_fallback,.burnikel_ziegler_chunk_fallback,.burnikel_ziegler_cutoff128},
 	};
+	const pairs = [_][2]Method{ .{.knuth,.burnikel_ziegler}, .{.burnikel_ziegler,.burnikel_ziegler_chunk_fallback}, .{.burnikel_ziegler_chunk_fallback,.burnikel_ziegler_cutoff128} };
+	const expected_cpu = [_][2]f64{ .{115,95}, .{95,75}, .{75,55} };
+	const expected_wall = [_][2]f64{ .{120,100}, .{100,80}, .{80,60} };
 	for (orders, 0..) |order, round| {
-		const methods: [2]Method = if (round < 2) .{.knuth,.burnikel_ziegler} else .{.burnikel_ziegler,.burnikel_ziegler_chunk_fallback};
+		const methods = pairs[round / 2];
 		var state: Fake = .{};
 		const sample = try pairedSample(&state, Fake.batch, methods, 8, 3, round);
-		try std.testing.expectEqualSlices(f64, if (round < 2) &.{115,95} else &.{95,75}, &sample.cpu_ns);
-		try std.testing.expectEqualSlices(f64, if (round < 2) &.{120,100} else &.{100,80}, &sample.wall_ns);
+		try std.testing.expectEqualSlices(f64, &expected_cpu[round / 2], &sample.cpu_ns);
+		try std.testing.expectEqualSlices(f64, &expected_wall[round / 2], &sample.wall_ns);
 		try std.testing.expectEqualSlices(Method, &order, &state.calls);
 		for (state.visits, 0..) |visits, method| {
-			const expected_visits: [8]usize = @splat(if ((round < 2 and method < 2) or (round >= 2 and method > 0)) 3 else 0);
+			const expected_visits: [8]usize = @splat(if (method == round / 2 or method == round / 2 + 1) 3 else 0);
 			try std.testing.expectEqualSlices(usize, &expected_visits, &visits);
 		}
 	}
@@ -187,7 +193,11 @@ pub fn run(init: std.process.Init, args: []const []const u8, comparison: Compari
 	const report = .{
 		.schema = "performance-measurement/v1", .correct = true, .build_mode = "ReleaseFast",
 		.compiler = @import("builtin").zig_version_string,
-		.method = if (comparison == .kernels) "division-paired-kernels-v1" else "division-paired-fallbacks-v1",
+		.method = switch (comparison) {
+			.kernels => "division-paired-kernels-v1",
+			.fallbacks => "division-paired-fallbacks-v1",
+			.cutoffs => "division-paired-cutoffs-v1",
+		},
 		.comparison = @tagName(comparison),
 		.cpu_clock = "CLOCK_PROCESS_CPUTIME_ID", .wall_clock = "CLOCK_MONOTONIC",
 		.seed_usage = "0xB2D151A5 + divisor_bytes*257 + case_index; all eight normalization shifts; engine seed does not alter inputs",
@@ -259,6 +269,10 @@ const Fixture = struct {
 				const got = try tier3.divModBurnikelZieglerChunkFallback(case.dividend, case.dividend.len, case.divisor, case.divisor.len, q, r, self.scratch.allocator());
 				break :blk .{ got.q_len, got.r_len };
 			},
+			.burnikel_ziegler_cutoff128 => blk: {
+				const got = try tier3.divModBurnikelZieglerCutoff128(case.dividend, case.dividend.len, case.divisor, case.divisor.len, q, r, self.scratch.allocator());
+				break :blk .{ got.q_len, got.r_len };
+			},
 		};
 		if (!std.mem.eql(u8, q[0..q_len], case.expected_q) or !std.mem.eql(u8, r[0..r_len], case.expected_r)) return error.IncorrectWork;
 		if (self.quotient[0] != 0xa5 or self.quotient[self.quotient.len - 1] != 0xa5 or self.remainder[0] != 0xa5 or self.remainder[self.remainder.len - 1] != 0xa5) return error.CanaryDamaged;
@@ -281,7 +295,7 @@ test "paired division fixtures release partial allocations" {
 	try std.testing.checkAllAllocationFailures(std.testing.allocator, FailureCase.run, .{});
 }
 
-test "paired division fixtures verify both methods and reject a corrupt GMP quotient" {
+test "paired division fixtures verify all methods and reject a corrupt GMP quotient" {
 	for (widths) |width| {
 		var fixture = try Fixture.init(std.testing.allocator, width, 8);
 		defer fixture.deinit();

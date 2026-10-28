@@ -1868,6 +1868,7 @@ pub fn divModKnuthU64Bytes(
 ///   - q_out.len >= n + 1 (carry slack)
 ///   - r_out.len >= n
 fn bzDiv2nByN(
+	comptime recurse_threshold: usize,
 	u: []const u8,
 	n: usize,
 	v: []const u8,
@@ -1901,7 +1902,7 @@ fn bzDiv2nByN(
 	defer allocator.free(sub1_q);
 	const sub1_r = try allocator.alloc(u8, n);
 	defer allocator.free(sub1_r);
-	const got1 = try bzDiv3n_2n(dividend1, n, v, sub1_q, sub1_r, allocator);
+	const got1 = try bzDiv3n_2n(recurse_threshold, dividend1, n, v, sub1_q, sub1_r, allocator);
 	// got1.q_len ≤ half (algorithm invariant); got1.r_len ≤ n.
 
 	// Second sub-divide: [u[0..half] || R1] (length 3n/2) by v.
@@ -1914,7 +1915,7 @@ fn bzDiv2nByN(
 	defer allocator.free(sub2_q);
 	const sub2_r = try allocator.alloc(u8, n);
 	defer allocator.free(sub2_r);
-	const got2 = try bzDiv3n_2n(dividend2, n, v, sub2_q, sub2_r, allocator);
+	const got2 = try bzDiv3n_2n(recurse_threshold, dividend2, n, v, sub2_q, sub2_r, allocator);
 
 	// Combine: Q = Q1·β^half + Q2 (LE: low half = Q2, high half = Q1).
 	@memset(q_out[0 .. n + 1], 0);
@@ -2124,6 +2125,7 @@ inline fn decrementMagInPlace(buf: []u8, len_ptr: *usize) void {
 ///   - q_out.len >= n/2 + 1
 ///   - r_out.len >= n
 fn bzDiv3n_2n(
+	comptime recurse_threshold: usize,
 	u: []const u8,
 	n: usize,
 	v: []const u8,
@@ -2140,7 +2142,7 @@ fn bzDiv3n_2n(
 	// byte-Knuth otherwise). Odd n must bottom out here because the recursive
 	// case calls bzDiv2nByN at half scale, which requires n be even (to
 	// split halves cleanly).
-	if (n < BZ_RECURSE_THRESHOLD or (n & 1) != 0) {
+	if (n < recurse_threshold or (n & 1) != 0) {
 		var u_len: usize = u.len;
 		while (u_len > 0 and u[u_len - 1] == 0) u_len -= 1;
 		if (u_len == 0) return .{ .q_len = 0, .r_len = 0 };
@@ -2174,7 +2176,7 @@ fn bzDiv3n_2n(
 	const cmp_A1_B1 = cmpUnsignedLE(A1, half, B1, half);
 	if (cmp_A1_B1 < 0) {
 		// Standard case: A1 < B1. Recurse at half scale.
-		const got = try bzDiv2nByN(A1A2, half, B1, q_out, r_work, allocator);
+		const got = try bzDiv2nByN(recurse_threshold, A1A2, half, B1, q_out, r_work, allocator);
 		q_len = got.q_len;
 		r_len = got.r_len;
 	} else {
@@ -2263,9 +2265,15 @@ fn bzDiv3n_2n(
 /// 64 (= 512-bit divisor) is a conservative starting point.
 const BZ_TOPLEVEL_THRESHOLD: usize = 64;
 
+/// Experimental 128-byte recursive cutoff, with chunk-reading fallback.
+pub fn divModBurnikelZieglerCutoff128(u: []const u8, u_len: usize, v: []const u8, v_len: usize, q: []u8, r: []u8, allocator: std.mem.Allocator) std.mem.Allocator.Error!struct { q_len: usize, r_len: usize } {
+	const got = try divModBurnikelZieglerImpl(true, 128, u, u_len, v, v_len, q, r, allocator);
+	return .{ .q_len = got.q_len, .r_len = got.r_len };
+}
+
 /// Experimental top-level fallback selection; recursion is unchanged.
 pub fn divModBurnikelZieglerChunkFallback(u: []const u8, u_len: usize, v: []const u8, v_len: usize, q: []u8, r: []u8, allocator: std.mem.Allocator) std.mem.Allocator.Error!struct { q_len: usize, r_len: usize } {
-	const got = try divModBurnikelZieglerImpl(true, u, u_len, v, v_len, q, r, allocator);
+	const got = try divModBurnikelZieglerImpl(true, BZ_RECURSE_THRESHOLD, u, u_len, v, v_len, q, r, allocator);
 	return .{ .q_len = got.q_len, .r_len = got.r_len };
 }
 
@@ -2291,12 +2299,13 @@ pub fn divModBurnikelZiegler(
 	r_out: []u8,
 	allocator: std.mem.Allocator,
 ) std.mem.Allocator.Error!struct { q_len: usize, r_len: usize } {
-	const got = try divModBurnikelZieglerImpl(false, u, u_len_in, v, v_len, q_out, r_out, allocator);
+	const got = try divModBurnikelZieglerImpl(false, BZ_RECURSE_THRESHOLD, u, u_len_in, v, v_len, q_out, r_out, allocator);
 	return .{ .q_len = got.q_len, .r_len = got.r_len };
 }
 
 fn divModBurnikelZieglerImpl(
 	comptime chunk_fallback: bool,
+	comptime recurse_threshold: usize,
 	u: []const u8, u_len_in: usize, v: []const u8, v_len: usize,
 	q_out: []u8, r_out: []u8, allocator: std.mem.Allocator,
 ) std.mem.Allocator.Error!struct { q_len: usize, r_len: usize } {
@@ -2424,7 +2433,7 @@ fn divModBurnikelZieglerImpl(
 		@memcpy(sub_dividend[0..n_block], u_padded[i * n_block .. (i + 1) * n_block]);
 		@memcpy(sub_dividend[n_block .. 2 * n_block], r_carry);
 
-		const got = try bzDiv2nByN(sub_dividend, n_block, v_norm[0..v_len], sub_q, sub_r, allocator);
+		const got = try bzDiv2nByN(recurse_threshold, sub_dividend, n_block, v_norm[0..v_len], sub_q, sub_r, allocator);
 
 		// Write Q block into q_total at this block's quotient position.
 		@memcpy(q_total[i * n_block .. i * n_block + got.q_len], sub_q[0..got.q_len]);
@@ -6025,7 +6034,7 @@ test "bzDiv2nByN: regression — previously-failing seed at n=16 (slice-bounds U
 	defer allocator.free(q_bz);
 	const r_bz = try allocator.alloc(u8, n);
 	defer allocator.free(r_bz);
-	const got_bz = try bzDiv2nByN(&u, n, &v, q_bz, r_bz, allocator);
+	const got_bz = try bzDiv2nByN(BZ_RECURSE_THRESHOLD, &u, n, &v, q_bz, r_bz, allocator);
 
 	try testing.expectEqualSlices(u8, q_ref[0..got_ref.q_len], q_bz[0..got_bz.q_len]);
 	try testing.expectEqualSlices(u8, r_ref[0..got_ref.r_len], r_bz[0..got_bz.r_len]);
@@ -6092,7 +6101,7 @@ test "bzDiv2nByN: cross-check vs divModKnuth at n=2,4,8,16,32 bytes" {
 			defer allocator.free(q_bz);
 			const r_bz = try allocator.alloc(u8, n);
 			defer allocator.free(r_bz);
-			const got_bz = try bzDiv2nByN(u, n, v, q_bz, r_bz, allocator);
+			const got_bz = try bzDiv2nByN(BZ_RECURSE_THRESHOLD, u, n, v, q_bz, r_bz, allocator);
 
 			try testing.expectEqual(got_ref.q_len, got_bz.q_len);
 			try testing.expectEqualSlices(u8, q_ref[0..got_ref.q_len], q_bz[0..got_bz.q_len]);

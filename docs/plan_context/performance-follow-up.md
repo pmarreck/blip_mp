@@ -479,6 +479,31 @@ The complete native suite passed in 96 seconds of mixed Nix preparation/check
 time. The production/probe build and all-system flake evaluation also passed.
 This duration includes compilation and is not a test-execution measurement.
 
+### Recursive cutoff experiment
+
+The paired baseline leaves a separate recursive cost after the top-level
+fallback is addressed. `divModBurnikelZieglerCutoff128` keeps the chunk-reading
+fallback and raises only the recursive leaf condition from `n < 4` to
+`n < 128` divisor bytes. For the sampled powers of two, this stops at 64-byte
+leaves. The original recursion remains available as the comparison control.
+The value 128 is a bounded first candidate, not a calibrated optimum.
+
+Run `./bm --verified-division --config profiling-division-cutoff.json` for the
+`division-paired-cutoffs-v1` comparison. It covers 64–2048-byte recursive
+divisors plus 63/127/129-byte unchanged fallback controls. Both methods receive
+identical inputs, allocation setup and GMP quotient/remainder checks. The
+empty candidate failed the fixture and allocation tests before implementation;
+the new CLI route also failed before being connected. Injected timing tests
+cover both batch orders and exact input coverage for every comparison pair.
+
+This experiment reduces recursive work before considering instruction-level
+changes. No SIMD or compiler-vectorization claim follows from the baseline:
+the current evidence measures complete calls, not an instruction profile.
+The production cutoff remains four bytes until measurements support a change.
+
+The complete native suite passed in 91 seconds of mixed Nix preparation/check
+time. The production/probe build and all-system evaluation passed as well.
+
 ## CRT correctness-reference cost
 
 At commit `43c296f`, a fresh diagnostic run split the 100-case CRT fuzz test

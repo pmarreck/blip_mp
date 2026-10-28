@@ -21,6 +21,7 @@ pub fn main(init: std.process.Init) !void {
 	const args = try init.minimal.args.toSlice(init.arena.allocator());
 	if (args.len > 1 and std.mem.eql(u8, args[1], "paired")) return @import("division_crossover.zig").run(init, args[2..], .kernels);
 	if (args.len > 1 and std.mem.eql(u8, args[1], "paired-fallback")) return @import("division_crossover.zig").run(init, args[2..], .fallbacks);
+	if (args.len > 1 and std.mem.eql(u8, args[1], "paired-cutoff")) return @import("division_crossover.zig").run(init, args[2..], .cutoffs);
 	const options = try parse(args[1..]);
 	var fixture = try Fixture.init(std.heap.c_allocator, options.kind);
 	defer fixture.deinit();
