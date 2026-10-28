@@ -1449,22 +1449,14 @@ pub fn divModSingleByte(a: []u8, a_len: usize, b: u8) struct { q_len: usize, rem
 	return .{ .q_len = n, .rem = @intCast(r) };
 }
 
-/// Same schoolbook long division as `divModSingleByte`, but operating on
-/// 8-byte (u64) chunks: at each step the window is (r << 64) | chunk and
-/// the divide is u128/u64 → u128 quotient, u128%u64 → u64 remainder. On
-/// aarch64 this lowers to a single `udiv` x-register followed by `umsub`
-/// per chunk — roughly 4-6× faster than per-byte for aligned input.
-///
-/// Strategy for unaligned inputs: process the high partial chunk
-/// byte-by-byte first to drive `r` to where the next-lowest 8-byte
-/// boundary aligns; then process aligned u64 chunks down to byte 0.
-/// (Picking the *low* tail instead would leave the schoolbook invariant
-/// inconsistent — we'd need a chunked window with a sub-chunk shift count
-/// which is awkward and slower than just walking the low byte tail
-/// straight via `divModSingleByte` semantics. Doing the partial-chunk
-/// work at the *high* end keeps the chunked loop pure.)
+pub const SingleU64DivModResult = struct { q_len: usize, rem: u64 };
+
+/// Schoolbook division over 8-byte reads from a little-endian byte payload.
+/// Each window is (remainder << 64) | chunk. Its quotient fits u64 because
+/// the previous remainder is below b. The high partial chunk is processed
+/// byte by byte before the complete chunks, preserving the same invariant.
 /// Caller guarantees b != 0.
-pub fn divModSingleU64(a: []u8, a_len: usize, b: u64) struct { q_len: usize, rem: u64 } {
+pub fn divModSingleU64(a: []u8, a_len: usize, b: u64) SingleU64DivModResult {
 	std.debug.assert(b != 0);
 	if (a_len == 0) return .{ .q_len = 0, .rem = 0 };
 
@@ -1478,13 +1470,7 @@ pub fn divModSingleU64(a: []u8, a_len: usize, b: u64) struct { q_len: usize, rem
 		// 72-bit window safely fits in u128 (8-bit shift + 64-bit r).
 		const w: u128 = (@as(u128, r) << 8) | @as(u128, a[i]);
 		const q: u64 = @truncate(w / @as(u128, b));
-		// q always fits in u8 only when r < b initially; in general
-		// q here can exceed u8 because the shift was only 8 bits but
-		// r is u64. Each per-byte step is the same inner loop as
-		// divModSingleByte but with a u64 running remainder. We only
-		// store one byte per step, so q must be ≤ 0xFF: it is, because
-		// after the prior step r < b ≤ u64.max, and (r << 8) | byte is
-		// still less than (b << 8), so q < 256. The truncate is exact.
+		// r < b implies this window is below b * 256, so q fits one byte.
 		a[i] = @intCast(q);
 		r = @intCast(w % @as(u128, b));
 	}
@@ -1504,8 +1490,13 @@ pub fn divModSingleU64(a: []u8, a_len: usize, b: u64) struct { q_len: usize, rem
 	return .{ .q_len = n, .rem = r };
 }
 
+/// Conservative experimental boundary from the first measured winning length.
+pub fn divModSingleReciprocalEligible(a_len: usize) bool {
+	return a_len >= 64;
+}
+
 /// Experimental reciprocal reuse for division of byte payloads by a native divisor.
-pub fn divModSingleReciprocal(a: []u8, a_len: usize, b: u64) struct { q_len: usize, rem: u64 } {
+pub fn divModSingleReciprocal(a: []u8, a_len: usize, b: u64) SingleU64DivModResult {
 	std.debug.assert(b != 0 and a_len <= a.len);
 	if (a_len == 0) return .{ .q_len = 0, .rem = 0 };
 	const payload = a[0..a_len];
@@ -3144,6 +3135,14 @@ pub fn divModSigned(
 	r_pay: []u8,
 	work: []u8,
 ) DivModResult {
+	return divModSignedWithReciprocal(false, a_pay, b_pay, q_pay, r_pay, work);
+}
+
+pub fn divModSignedReciprocal(a_pay: []const u8, b_pay: []const u8, q_pay: []u8, r_pay: []u8, work: []u8) DivModResult {
+	return divModSignedWithReciprocal(true, a_pay, b_pay, q_pay, r_pay, work);
+}
+
+fn divModSignedWithReciprocal(comptime reciprocal: bool, a_pay: []const u8, b_pay: []const u8, q_pay: []u8, r_pay: []u8, work: []u8) DivModResult {
 	const a_neg = signExtByte(a_pay) == 0xFF;
 	const b_neg = signExtByte(b_pay) == 0xFF;
 
@@ -3191,7 +3190,10 @@ pub fn divModSigned(
 		// Build the divisor as u64 LE.
 		var divisor: u64 = 0;
 		for (0..b_mag_len) |k| divisor |= @as(u64, b_mag_buf[k]) << @intCast(8 * k);
-		const out = divModSingleU64(a_mag_buf, a_mag_len, divisor);
+		const out = if (reciprocal and divModSingleReciprocalEligible(a_mag_len))
+			divModSingleReciprocal(a_mag_buf, a_mag_len, divisor)
+		else
+			divModSingleU64(a_mag_buf, a_mag_len, divisor);
 		// Copy quotient bytes to q_pay.
 		@memcpy(q_pay[0..out.q_len], a_mag_buf[0..out.q_len]);
 		q_mag_len = out.q_len;
@@ -5300,6 +5302,15 @@ test "divModSingleU64: 1000 random pairs vs u512 oracle (a_len ≤ 64, full u64 
 		try testing.expectEqual(expected_len, out.q_len);
 		try testing.expectEqualSlices(u8, q_bytes[0..expected_len], work[0..out.q_len]);
 	}
+}
+
+test "divModSingleReciprocal: selection classifies the complete bounded length domain" {
+	var wanted: [4099]bool = @splat(false);
+	@memset(wanted[64..], true);
+	var actual: [wanted.len]bool = undefined;
+	for (&actual, 0..) |*selected, len| selected.* = divModSingleReciprocalEligible(len);
+	try std.testing.expectEqualSlices(bool, &wanted, &actual);
+	try std.testing.expect(divModSingleReciprocalEligible(std.math.maxInt(usize)));
 }
 
 test "divModSingleReciprocal: native oracle across normalization, tail and quotient boundaries" {

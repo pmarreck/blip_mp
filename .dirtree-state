@@ -114,6 +114,7 @@ annotate=[
 	tests/benchmark/division_geometry.zig = Verified Knuth versus selected B-Z crossover across dividend length gaps
 	tests/benchmark/division_public.zig = Paired signed BLIP division across divisor widths and quotient geometries
 	tests/benchmark/division_single.zig = Identical variable-divisor byte division and GMP probe with full-result controls
+	tests/benchmark/division_single_signed.zig = Signed small-divisor GMP fixtures, alias and allocation-failure controls
 	tests/benchmark/gmp.zig = Independent GMP test and benchmark oracles
 	tests/benchmark/goldilocks.zig = Verified contemporaneous Goldilocks layout measurement adapter
 	tests/benchmark/immediate_add.zig = Verified immediate-add workload, CPU/wall probe and independent sum checks

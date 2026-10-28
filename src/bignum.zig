@@ -627,6 +627,10 @@ pub const Mp = struct {
 	/// to think about that, but the inline-i64 fast path snapshots both
 	/// operand values before writing).
 	pub fn divMod(q: *Mp, rem: *Mp, a: *const Mp, b: *const Mp) ArithError!void {
+		return divModWithReciprocal(false, q, rem, a, b);
+	}
+
+	fn divModWithReciprocal(comptime reciprocal: bool, q: *Mp, rem: *Mp, a: *const Mp, b: *const Mp) ArithError!void {
 		// Reject division by zero up front (cheap with cached sign).
 		if (b.cached_sign == 0) return error.DivisionByZero;
 
@@ -642,7 +646,12 @@ pub const Mp = struct {
 				return;
 			}
 		}
-		try tier3DivModOp(q, rem, a, b);
+		try tier3DivModOp(reciprocal, q, rem, a, b);
+	}
+
+	/// Experimental small-divisor reciprocal path with ordinary signed semantics.
+	pub fn divModSmallReciprocal(q: *Mp, rem: *Mp, a: *const Mp, b: *const Mp) ArithError!void {
+		return divModWithReciprocal(true, q, rem, a, b);
 	}
 
 	/// Fixed cutoff-128 B-Z comparison path, without the leading-block shortcut.
@@ -3538,7 +3547,7 @@ fn powmMontgomery(comptime symmetric: bool, r: *Mp, base_red: *const Mp, exp: *c
 const BZ_INTEGRATION_THRESHOLD: usize = 99999;
 
 /// Tier-3 truncated division with GMP `mpz_tdiv_qr` sign conventions.
-fn tier3DivModOp(q: *Mp, rem: *Mp, a: *const Mp, b: *const Mp) ArithError!void {
+fn tier3DivModOp(comptime reciprocal: bool, q: *Mp, rem: *Mp, a: *const Mp, b: *const Mp) ArithError!void {
 	const a_bytes = a.bytes();
 	const b_bytes = b.bytes();
 	const a_pay = a_bytes[a.cached_pay_off .. a.cached_pay_off + a.cached_pay_len];
@@ -3576,7 +3585,7 @@ fn tier3DivModOp(q: *Mp, rem: *Mp, a: *const Mp, b: *const Mp) ArithError!void {
 	const r_buf: []u8 = if (r_pay_max <= stack_r.len) stack_r[0..r_pay_max] else tier3.div_scratch.r_buf[0..r_pay_max];
 	const w_buf: []u8 = if (work_need <= stack_w.len) stack_w[0..work_need] else tier3.div_scratch.w_buf[0..work_need];
 
-	const got = tier3.divModSigned(a_pay, b_pay, q_buf, r_buf, w_buf);
+	const got = if (reciprocal) tier3.divModSignedReciprocal(a_pay, b_pay, q_buf, r_buf, w_buf) else tier3.divModSigned(a_pay, b_pay, q_buf, r_buf, w_buf);
 
 	// Write canonical BLIP for q and rem from the produced two's-comp payloads.
 	try writeMpFromPayload(q, q_buf[0..got.q_len]);
@@ -5440,7 +5449,7 @@ test "divMod: 8 sign combinations match GMP truncated semantics" {
 	for (cases) |c| {
 		try a_mp.setI64(c.a);
 		try b_mp.setI64(c.b);
-		inline for (.{Mp.divMod,Mp.divModBurnikelZiegler,Mp.divModBurnikelZieglerLeadingBlock,Mp.divModBurnikelZieglerShortQuotient,Mp.divModBurnikelZieglerShortCarry,Mp.divModBurnikelZieglerWideQuotient,Mp.divModBurnikelZieglerSelected,Mp.divModBurnikelZieglerQuotient1024,Mp.divModBurnikelZieglerPadded,Mp.divModBurnikelZieglerGuarded}) |divide| {
+		inline for (.{Mp.divMod,Mp.divModBurnikelZiegler,Mp.divModBurnikelZieglerLeadingBlock,Mp.divModBurnikelZieglerShortQuotient,Mp.divModBurnikelZieglerShortCarry,Mp.divModBurnikelZieglerWideQuotient,Mp.divModBurnikelZieglerSelected,Mp.divModBurnikelZieglerQuotient1024,Mp.divModBurnikelZieglerPadded,Mp.divModBurnikelZieglerGuarded,Mp.divModSmallReciprocal}) |divide| {
 			try divide(&q_mp,&r_mp,&a_mp,&b_mp);
 			try testing.expectEqual(c.q, try q_mp.getI64());
 			try testing.expectEqual(c.rem, try r_mp.getI64());
@@ -5476,7 +5485,7 @@ test "divMod: division by zero returns error.DivisionByZero" {
 	defer r.deinit();
 	try a.setI64(42);
 	try b.setI64(0);
-	inline for (.{Mp.divMod,Mp.divModBurnikelZiegler,Mp.divModBurnikelZieglerLeadingBlock,Mp.divModBurnikelZieglerShortQuotient,Mp.divModBurnikelZieglerShortCarry,Mp.divModBurnikelZieglerWideQuotient,Mp.divModBurnikelZieglerSelected,Mp.divModBurnikelZieglerQuotient1024,Mp.divModBurnikelZieglerPadded,Mp.divModBurnikelZieglerGuarded}) |divide| {
+	inline for (.{Mp.divMod,Mp.divModBurnikelZiegler,Mp.divModBurnikelZieglerLeadingBlock,Mp.divModBurnikelZieglerShortQuotient,Mp.divModBurnikelZieglerShortCarry,Mp.divModBurnikelZieglerWideQuotient,Mp.divModBurnikelZieglerSelected,Mp.divModBurnikelZieglerQuotient1024,Mp.divModBurnikelZieglerPadded,Mp.divModBurnikelZieglerGuarded,Mp.divModSmallReciprocal}) |divide| {
 		try testing.expectError(error.DivisionByZero,divide(&q,&r,&a,&b));
 	}
 	try testing.expectError(error.DivisionByZero, Mp.div(&q, &a, &b));
@@ -5502,7 +5511,7 @@ test "divMod: i64.min / -1 promotes to tier 3 and returns 2^63" {
 	try testing.expectEqual(@as(i64, 0), try r.getI64());
 	const expected = [_]u8{0x89,0,0,0,0,0,0,0,0x80,0};
 	try testing.expectEqualSlices(u8,&expected,q.bytes());
-	inline for (.{Mp.divModBurnikelZiegler,Mp.divModBurnikelZieglerLeadingBlock,Mp.divModBurnikelZieglerShortQuotient,Mp.divModBurnikelZieglerShortCarry,Mp.divModBurnikelZieglerWideQuotient,Mp.divModBurnikelZieglerSelected,Mp.divModBurnikelZieglerQuotient1024,Mp.divModBurnikelZieglerPadded,Mp.divModBurnikelZieglerGuarded}) |divide| {
+	inline for (.{Mp.divModBurnikelZiegler,Mp.divModBurnikelZieglerLeadingBlock,Mp.divModBurnikelZieglerShortQuotient,Mp.divModBurnikelZieglerShortCarry,Mp.divModBurnikelZieglerWideQuotient,Mp.divModBurnikelZieglerSelected,Mp.divModBurnikelZieglerQuotient1024,Mp.divModBurnikelZieglerPadded,Mp.divModBurnikelZieglerGuarded,Mp.divModSmallReciprocal}) |divide| {
 		try divide(&q,&r,&a,&b);
 		try testing.expectEqualSlices(u8,&expected,q.bytes());
 		try testing.expectEqual(@as(i64,0),try r.getI64());

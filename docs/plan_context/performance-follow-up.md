@@ -2216,6 +2216,34 @@ executable SHA-256 was `9470b41d80526ac94d5fc8bd0fbd3b6672ac42b29bbcccb29b09eeea
 source digest `ce75ccbdb70ec3934d543f1fbb8c7403d019cc5cae1538b0c198fb63b23f0f79`
 stayed unchanged. Exact-commit CI passed. Public dispatch is unchanged.
 
+### Signed reciprocal qualification
+
+`Mp.divModSmallReciprocal` is an experimental comparison entry. It shares
+the ordinary immediate-value fast path, sign conversion, scratch ownership
+and result encoding with `Mp.divMod`. For divisors of at most eight magnitude
+bytes, it selects reciprocal division only when the dividend has at least
+64 magnitude bytes. Larger divisors retain the existing path. Ordinary
+`Mp.divMod` still selects its original kernel.
+
+The new entry first failed the existing sign, divide-by-zero and minimum-i64
+promotion tests. A complete bounded length classifier failed before the
+64-byte guard was implemented. The signed fixture tests then failed against
+their placeholder before construction and execution were connected.
+
+The fixtures cover four signs and eight normalization shifts. Native `i256`
+division checks 8- and 16-byte input references. GMP checks the full results
+at 16, 63, 64, 65, 257 and 4,097 dividend bytes, including a 9-byte-divisor
+control for the unchanged larger-divisor path. Aliasing checks write quotient
+and remainder over both inputs in both arrangements. Separate reference
+corruptions must reject wrong quotients and remainders. Allocation-failure
+injection covers partial signed fixture construction, heap-backed outputs
+and cold division scratch.
+
+All four signed fixture checks passed. The complete suite passed in 90
+seconds of mixed Nix preparation/check time, including an 86-second unit/C-API
+build phase. Production build and all-system evaluation passed. Timed signed
+comparisons and direct GMP measurements remain outstanding.
+
 ### Build feedback follow-up
 
 Repeated full checks take roughly 90–120 seconds of mixed preparation and

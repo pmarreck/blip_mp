@@ -9,6 +9,7 @@ pub extern "c" fn __gmpz_import(value: *Z, count: usize, order: c_int, size: usi
 pub extern "c" fn __gmpz_export(bytes: [*]u8, count: *usize, order: c_int, size: usize, endian: c_int, nails: usize, value: *const Z) ?[*]u8;
 pub extern "c" fn __gmpz_invert(result: *Z, a: *const Z, m: *const Z) c_int;
 pub extern "c" fn __gmpz_tdiv_qr(q: *Z, r: *Z, a: *const Z, b: *const Z) void;
+pub extern "c" fn __gmpz_neg(result: *Z, value: *const Z) void;
 pub extern "c" fn __gmpz_mul(result: *Z, a: *const Z, b: *const Z) void;
 pub extern "c" fn __gmpz_powm(result: *Z, a: *const Z, exponent: *const Z, modulus: *const Z) void;
 

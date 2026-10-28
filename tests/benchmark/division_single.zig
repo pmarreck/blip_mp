@@ -24,9 +24,9 @@ fn parse(args: []const []const u8) !Options {
 	return options;
 }
 
-const Pool = struct {
+pub const Pool = struct {
 	cases: []Case, work: []u8, arena: std.heap.ArenaAllocator, q: gmp.Z, r: gmp.Z,
-	fn init(parent: std.mem.Allocator, divisor: usize, width: usize, count: usize) !@This() {
+	pub fn init(parent: std.mem.Allocator, divisor: usize, width: usize, count: usize) !@This() {
 		var arena = std.heap.ArenaAllocator.init(parent); errdefer arena.deinit();
 		const allocator = arena.allocator();
 		const cases = try allocator.alloc(Case,count);
@@ -67,7 +67,7 @@ const Pool = struct {
 			},
 		}
 	}
-	fn deinit(self: *@This()) void {
+	pub fn deinit(self: *@This()) void {
 		for (self.cases) |*case| case.deinit();
 		gmp.__gmpz_clear(&self.q); gmp.__gmpz_clear(&self.r);
 		self.arena.deinit();

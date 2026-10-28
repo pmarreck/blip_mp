@@ -4,6 +4,7 @@ test { _ = @import("division_competitors.zig"); }
 test { _ = @import("division_public.zig"); }
 test { _ = @import("division_geometry.zig"); }
 test { _ = @import("division_single.zig"); }
+test { _ = @import("division_single_signed.zig"); }
 const blip = @import("blip_mp");
 const gmp = @import("gmp.zig");
 test { _ = @import("division_crossover.zig"); }
