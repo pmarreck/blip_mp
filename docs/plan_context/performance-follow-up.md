@@ -1432,6 +1432,55 @@ seconds of mixed Nix preparation/check time; production build and all-system
 evaluation passed. SIMD remains deferred while the measured algorithm choice
 is being qualified.
 
+### Wider quotient fallback results
+
+The proposed inclusive 2,048-byte gap cutoff is rejected for default dispatch.
+At clean commit `6a6e66d2764008e1aa33ba3d790983ee434ed310`, paired measurements
+show that a cutoff derived from aligned widths regresses at neighboring even
+widths. The table gives candidate/fixed-short-carry CPU ratios, with ranges
+spanning the 1/12-CPU paired medians. Ratios below one favor the candidate.
+
+| Divisor bytes | Gap 8 | Gap 2,047 | Gap 2,048 |
+|---:|---:|---:|---:|
+| 4,096 | 0.055 | 0.757–0.758 | 0.701–0.702 |
+| 4,098 | 0.166–0.167 | 1.099–1.100 | 1.087–1.089 |
+| 8,192 | 0.047 | 0.702–0.703 | 0.676 |
+| 8,194 | 0.148 | 1.024–1.026 | 1.023–1.025 |
+| 16,384 | 0.040 | 0.618–0.619 | 0.607–0.608 |
+| 16,386 | 0.127 | 0.921–0.922 | 0.921–0.922 |
+
+Every process mean, including diagnostic attempts, agrees on the direction of
+each changed row. The eight-byte-gap cases improve about 6–25 times, relative
+to the preceding B-Z kernel. Near the proposed upper cutoff, aligned widths
+save 24–39% CPU, while 4,098-byte divisors regress 9–10% and 8,194-byte divisors
+regress 2–3%. These are local kernel comparisons, with GMP supplying references
+outside timing. They establish no new comparison with GMP or public dispatch.
+
+Odd divisors, the 4,094-byte below-floor control, seven-byte gaps, 2,049-byte
+gaps and balanced divisions retain the same algorithm. Their paired medians
+range from 0.998 to 1.010; individual process means range from 0.923 to 1.049.
+The [machine-readable summary](../benchmarks/storage-aware/division-wide-quotient-summary.json)
+preserves sample ranges and all process means, including diagnostic attempts.
+
+All 105 processes verified full quotient/remainder results and canaries.
+Three cohorts used the single permitted variation retry. Seventeen cohorts
+are unbaselined; the 8,192-byte/12-CPU cohort remains inconclusive. No baseline
+was approved. All 18 source digests stayed
+`b2acb95196f6613763b6f8eb946480e986515a102ebecd1ca769ba4ac1bc1cd1`;
+the probe SHA-256 was
+`d3c38a5b44bdcd3543e2e1a3a6466bd775fb422665c05ac80c00e79f077223d2`.
+External records use prefix `blip-mp-division-wide-quotient-20261028T201907Z-`
+and the case names in `profiling-division-wide-quotient.json`. Exact-commit CI
+passed in 190 seconds.
+
+Halving a width such as 4,098 produces a large odd leaf, whereas 4,096 continues
+recursing. That structural difference is a plausible explanation for different
+crossovers; these measurements do not isolate its causal contribution. The next
+bounded experiment samples gaps 8 through 2,048 at 4,096, 4,098, 8,194 and
+16,386 bytes using the same fixed methods. `profiling-division-gap-crossover.json`
+records that sweep. A narrower universal cutoff is a hypothesis pending those
+results; neither the candidate nor public integration threshold changes here.
+
 ### Exact-capacity remainder regression
 
 Reviewing the B-Z entry point exposed a separate single-byte-divisor bug. With

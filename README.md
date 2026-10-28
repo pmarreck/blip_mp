@@ -97,7 +97,11 @@ The [quotient-geometry sweep](docs/plan_context/performance-follow-up.md#quotien
 finds that selected B-Z still takes 1.42–1.64× Knuth's CPU time with a 2,048-byte
 dividend gap at the sampled large aligned widths. A 4,096-byte gap puts the
 methods near parity. All 35 processes verified their results; the six cohorts
-remain unbaselined. A wider fallback is the next experiment, not yet selected.
+remain unbaselined. The [wider fallback experiment](docs/plan_context/performance-follow-up.md#wider-quotient-fallback-results)
+rejects a universal 2,048-byte gap cutoff: it saves 24–39% at aligned widths,
+but regresses 9–10% at 4,098-byte divisors and 2–3% at 8,194 bytes near that
+cutoff. Default dispatch stays unchanged. All 105 processes verified their
+results; seventeen cohorts are unbaselined and one remains inconclusive.
 
 ## Quick start
 
