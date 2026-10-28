@@ -132,6 +132,12 @@ and a dividend at least twice the divisor's byte length. Its sampled cases
 save 8–52% median CPU versus the fixed BLIP kernel, with one diagnostic
 process losing 0.5%. All 165 processes verified results; all 32 cohorts are
 unbaselined. The guard is not yet selected.
+The [signed-wrapper check](docs/plan_context/performance-follow-up.md#guarded-signed-results)
+finds about 11–12% lower CPU time at 6,145-byte divisors and 44–45% at
+16,385 bytes on balanced and long dividends, against the fixed BLIP kernel.
+At 12,290 bytes, savings shrink to 1–2% and some processes lose. All 55
+processes are correct, with ten unbaselined cohorts. The candidate remains
+experimental; this comparison does not time GMP.
 
 ## Quick start
 

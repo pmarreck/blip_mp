@@ -1903,6 +1903,45 @@ The CLI check separately failed on the missing route. The corrected method is
 8,194-byte width is a control for the guard. GMP supplies references outside
 timing, so this does not replace the direct GMP comparison.
 
+### Guarded signed results
+
+The signed-wrapper comparison confirms gains at 6,145 and 16,385 divisor
+bytes, but the 12,290-byte case has only a small median gain. Keep the guard
+experimental while measuring its direct GMP position and the marginal region.
+The normal divider and public threshold remain unchanged.
+
+| Divisor bytes | Guarded / fixed CPU, balanced | Guarded / fixed CPU, 4:1 dividend |
+|---:|---:|---:|
+| 6,145 | 0.894 / 0.892 | 0.885 / 0.882 |
+| 8,194 (excluded control) | 0.999 / 1.000 | 0.999 / 0.998 |
+| 12,290 | 0.980 / 0.980 | 0.989 / 0.986 |
+| 16,385 | 0.561 / 0.561 | 0.555 / 0.556 |
+
+Cells give paired medians for the 1-CPU / 12-CPU cohorts. The 6,145-byte
+cases save about 11–12% CPU and the 16,385-byte cases save 44–45%; every
+process mean favors the guard in those cells. At 12,290 bytes, median savings
+are only 1–2%, and some processes lose up to 1.9%. The short-gap and excluded
+control medians remain within 0.3% of parity, with wider individual-process
+variation retained in the [summary](../benchmarks/storage-aware/division-guarded-signed-summary.json).
+
+These are full signed calls with four sign combinations and eight normalization
+shifts, compared against the fixed quotient-1024 signed wrapper. Differences
+from the preceding positive byte-kernel experiment include the fixture corpus,
+allocation and verification adapters, so their percentages are not interchangeable.
+GMP supplies canonical quotient/remainder references outside timing; it is not
+a timed competitor in this campaign.
+
+Campaign `blip-mp-guard-20261028T222133Z` measured commit
+`878bec6b4874435e62a312574294591440a089cc` using
+`profiling-division-guarded-signed.json`. All 55 processes were correct,
+including one five-process retry for `two_chunk_start` in the 12-CPU cohort.
+All ten cohorts are unbaselined; no baseline was approved. Source digest
+`f5fc23915eb0a7b4ce83ad5c72efa86fd297b97a5240d2d822d669a3ec375029`
+remained stable and the probe SHA-256 was
+`d69942a3901f078b2a5415c4f37c0b50d395c6272c8ebee312019d6b7bdc2e95`.
+The Linux x86_64 / Threadripper 3990X / Zig 0.16.0 ReleaseFast / GMP 6.3.0
+configuration is unchanged. Exact-commit CI passed in 211 seconds.
+
 ### Tiny division clock follow-up
 
 The first complete guarded-padding suite failed on a non-advancing process CPU

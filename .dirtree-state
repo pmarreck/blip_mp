@@ -39,6 +39,7 @@ annotate=[
 	docs/benchmarks/storage-aware/division-fixed-public-recheck-summary.json = Fixed cutoff-128 signed control run initially mislabeled selected in configuration
 	docs/benchmarks/storage-aware/division-gap-crossover-summary.json = Neighboring even-width quotient-gap sweep with all process ratios
 	docs/benchmarks/storage-aware/division-geometry-summary.json = Knuth and selected B-Z ratios across independent dividend gaps
+	docs/benchmarks/storage-aware/division-guarded-signed-summary.json = Guarded versus fixed signed division ratios, including diagnostic processes
 	docs/benchmarks/storage-aware/division-leading-summary.json = Paired signed B-Z leading-block ratios, controls and timing verdicts
 	docs/benchmarks/storage-aware/division-padding-shape-summary.json = Padding crossover ratios by odd recursive leaf and relative quotient gap
 	docs/benchmarks/storage-aware/division-padding-summary.json = Byte-padding CPU ratios with all process means and inconclusive cohorts
