@@ -303,3 +303,52 @@ test "competitor fixtures and arithmetic release partial allocations" {
 	};
 	try std.testing.checkAllAllocationFailures(std.testing.allocator,FailureCase.run,.{});
 }
+
+test "explicit B-Z allocation failures release memory including optional cache recovery" {
+	const Check = struct {
+		fn run(allocator: std.mem.Allocator, width: usize) !void {
+			var fixture = try Fixture.init(allocator,width,1); defer fixture.deinit();
+			try Mp.divModBurnikelZiegler(&fixture.q,&fixture.r,&fixture.cases[0].a,&fixture.cases[0].b);
+			try std.testing.expectEqualSlices(u8,fixture.cases[0].mq.bytes(),fixture.q.bytes());
+			try std.testing.expectEqualSlices(u8,fixture.cases[0].mr.bytes(),fixture.r.bytes());
+		}
+	};
+	for ([_]usize{16,256}) |width| {
+		var baseline = std.testing.FailingAllocator.init(std.testing.allocator,.{});
+		try Check.run(baseline.allocator(),width);
+		try std.testing.expectEqual(baseline.allocated_bytes,baseline.freed_bytes);
+		for (0..baseline.alloc_index) |index| {
+			var failing = std.testing.FailingAllocator.init(std.testing.allocator,.{ .fail_index = index });
+			Check.run(failing.allocator(),width) catch |err| try std.testing.expectEqual(error.OutOfMemory,err);
+			try std.testing.expect(failing.has_induced_failure);
+			try std.testing.expectEqual(failing.allocated_bytes,failing.freed_bytes);
+		}
+	}
+}
+
+test "explicit public B-Z division preserves signed results and input aliases" {
+	var zero = Mp.init(std.testing.allocator); defer zero.deinit();
+	try zero.setI64(0);
+	for ([_]usize{8,64,128,256}) |width| {
+		var fixture = try Fixture.init(std.testing.allocator,width,32); defer fixture.deinit();
+		for (fixture.cases,0..) |*case,index| {
+			const negative_a = (index/8)%4 == 1 or (index/8)%4 == 3;
+			const negative_b = (index/8)%4 >= 2;
+			if (negative_a) {
+				try case.a.sub(&zero,&case.a); try case.mr.sub(&zero,&case.mr);
+			}
+			if (negative_b) try case.b.sub(&zero,&case.b);
+			if (negative_a != negative_b) try case.mq.sub(&zero,&case.mq);
+			for (0..3) |alias_mode| {
+				var a = Mp.init(std.testing.allocator); defer a.deinit();
+				var b = Mp.init(std.testing.allocator); defer b.deinit();
+				try a.setBytes(case.a.bytes()); try b.setBytes(case.b.bytes());
+				const q = switch (alias_mode) { 0 => &fixture.q, 1 => &a, else => &b };
+				const r = switch (alias_mode) { 0 => &fixture.r, 1 => &b, else => &a };
+				try Mp.divModBurnikelZiegler(q,r,&a,&b);
+				try std.testing.expectEqualSlices(u8,case.mq.bytes(),q.bytes());
+				try std.testing.expectEqualSlices(u8,case.mr.bytes(),r.bytes());
+			}
+		}
+	}
+}

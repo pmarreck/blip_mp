@@ -789,6 +789,32 @@ ratios, and the complete public path with a controlled alternative dispatch.
 The existing verification overhead differs between the public and kernel
 adapters, as described above.
 
+### Explicit signed B-Z entry point
+
+`Mp.divModBurnikelZiegler` exposes the existing signed B-Z wrapper directly for
+controlled comparisons with `Mp.divMod`. It preserves truncated division signs,
+canonical BLIP results and division-by-zero rejection. It bypasses automatic
+algorithm selection; the ordinary public dispatcher is unchanged.
+
+The placeholder failed independent GMP-result and allocation controls before
+implementation. Signed cases cover all four sign combinations and all eight
+normalization shifts at 8-, 64-, 128- and 256-byte divisor widths, including
+quotient/remainder outputs aliasing either input. Native integer boundary cases
+also cover zero dividends and minimum signed integer divided by minus one.
+
+The strict standard allocation-failure helper rejected a successful division
+when the arena's optional capacity-retention allocation failed afterward. The
+qualified control injects every allocation failure and accepts either a fully
+verified result or `OutOfMemory`, while requiring induced failure and complete
+release of tracked bytes. It covers 16- and 256-byte divisors. This preserves
+the arena's documented ability to recover from failed cache retention; it does
+not treat incorrect results or leaked memory as successful recovery.
+
+The complete native suite passed in 120 seconds of mixed Nix preparation/check
+time; the production build and all-system evaluation passed. An initial
+boundary assertion incorrectly used `getU64` for positive `2^63`, although the
+current getter decodes through `i64`. It now checks the exact canonical bytes.
+
 ### Exact-capacity remainder regression
 
 Reviewing the B-Z entry point exposed a separate single-byte-divisor bug. With
