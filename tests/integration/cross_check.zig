@@ -605,6 +605,9 @@ fn checkEncodedFft(allocator: std.mem.Allocator) !usize {
 							if (!std.mem.eql(u8, expected[0..expected_len], actual[0..len])) return error.PairedGoldProductMismatch;
 							checks += 1;
 						}
+						const truncated_len = fft.goldMulMagnitudesTruncated(a, b, actual, scratch[0..bytes], scratch[bytes .. 2 * bytes], scratch[2 * bytes .. 5 * bytes / 2], scratch[5 * bytes / 2 .. 3 * bytes]);
+						if (!std.mem.eql(u8, expected[0..expected_len], actual[0..truncated_len])) return error.TruncatedGoldProductMismatch;
+						checks += 1;
 						break :blk fft.goldMulMagnitudesWithScratch(a, b, actual, scratch[0..bytes], scratch[bytes .. 2 * bytes], scratch[2 * bytes .. 5 * bytes / 2], scratch[5 * bytes / 2 .. 3 * bytes], scratch[3 * bytes .. 4 * bytes]);
 					};
 					if (!std.mem.eql(u8, expected[0..expected_len], actual[0..actual_len])) {

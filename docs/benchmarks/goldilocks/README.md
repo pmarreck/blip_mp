@@ -170,3 +170,6 @@ and checking, with 13,159 GMP comparisons. The production build and all-system
 evaluation also passed. This is executed Linux x86_64 coverage; evaluation alone
 does not establish runtime coverage on other platforms. The suite's previously
 recorded five-second execution target remains unmet.
+
+The next experiment is an [input/output-truncated transform](TRUNCATED.md) that
+uses known zero coefficients to skip work around padding boundaries.
