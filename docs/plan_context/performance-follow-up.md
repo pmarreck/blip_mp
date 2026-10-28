@@ -857,6 +857,71 @@ Nix preparation/check time. The production build and all-system evaluation also
 passed. Both the focused storage regression and the full signed-corpus
 allocation sweep are part of the complete suite.
 
+### Signed public division results, October 28, 2026
+
+Campaign `blip-mp-division-public-20261028T174704Z` measured commit
+`e7a85740baa52bd94759ab19510a0473b95b3802` with source digest
+`55fd2979069e6921095ae9c1cebb6c3c3bd05f2679edb092cb672498768dca00`
+unchanged. Linux x86_64, Threadripper 3990X and Zig 0.16.0 ReleaseFast match
+the preceding competitor campaign. All 40 processes verified every result.
+All six cohorts were `UNBASELINED`; balanced/12-CPU and long-dividend/1-CPU
+each needed their one permitted variation retry. No baseline was approved.
+Shared admission took about four minutes, excluded from timed samples.
+
+Each cell below is the median B-Z/current CPU ratio for **1-CPU / 12-CPU
+affinity**, using thirty paired samples per selected cohort. A value below one
+favors explicit B-Z. Widths are magnitude bytes; the odd divisor uses the
+Knuth fallback. These serial algorithms do not gain parallelism from affinity.
+
+| Divisor bytes | Dividend = divisor + 1 byte | Dividend = 2 × divisor | Dividend = 4 × divisor |
+|---:|---:|---:|---:|
+| 8,192 | 59.21 / 59.24 | 1.095 / 1.107 | 0.818 / 0.817 |
+| 12,288 | 59.23 / 59.39 | 0.787 / 0.789 | 0.598 / 0.597 |
+| 16,384 | 67.97 / 67.81 | 0.724 / 0.756 | 0.560 / 0.559 |
+| 16,385 | 1.293 / 1.298 | 1.005 / 1.004 | 0.999 / 0.998 |
+
+The [summary](../benchmarks/storage-aware/division-public-summary.json) preserves
+selected CPU/wall components, sample ranges and every process-mean ratio,
+including diagnostic attempts. Full external records use the campaign prefix
+and the six case names in `profiling-division-public.json`. The primary engine
+sample averages both methods; the ratios above use paired components.
+
+At recursive widths, every process mean, including retries, agrees with each
+table cell's direction. B-Z saves about 21–28% for the larger balanced inputs
+and 18–44% for long dividends. Short quotients instead cost about 59–68 times
+the current path. The fallback costs about 29–30% extra for short quotients
+and stays near parity for the other geometries. These findings support keeping
+the public 99,999-byte threshold unchanged. They do not establish that the
+existing threshold is optimal, or that an unconditional lower threshold is safe.
+This campaign does not time GMP; the separate matched comparison above remains
+the evidence for that competitor.
+
+### Division geometry follow-up
+
+Source inspection identifies two bounded candidates. The current wrapper sends
+its highest normalized block through recursive division even though that block
+has quotient zero or one. A comparison and at most one subtraction can establish
+its initial remainder. First qualify this shortcut independently, retain the
+old path as a fixed comparator, and measure complete calls. SIMD is deferred
+while removing potentially unnecessary recursive work is tested.
+
+The current block width also causes odd divisors, or even widths that halve
+to large odd widths, to reach Knuth leaves. For example, the 16,385-byte control
+does not qualify the neighboring 16,386-byte recursion shape. A later experiment
+can pad both magnitudes by the same low zero bytes and undo that scale on the
+remainder. [V8's B-Z implementation](https://chromium.googlesource.com/v8/v8.git/+/main/src/bigint/div-burnikel.cc)
+already rounds the divisor to a suitable multiple and starts with its highest
+two blocks. This is an established design to adapt and measure, not a novelty
+claim. Its benefit for BLIP byte storage is unmeasured.
+
+[GMP's small-quotient algorithm](https://gmplib.org/manual/Small-Quotient-Division)
+uses only the leading portions to estimate a short quotient, then corrects it
+with a full multiply/subtract. That supplies another candidate if avoiding the
+trivial leading block leaves the measured short-quotient penalty. Recursive
+division can benefit from Karatsuba and Toom multiplication already present
+here; [GMP's divide-and-conquer discussion](https://gmplib.org/manual/Divide-and-Conquer-Division)
+does not require FFT multiplication for a crossover.
+
 ### Exact-capacity remainder regression
 
 Reviewing the B-Z entry point exposed a separate single-byte-divisor bug. With

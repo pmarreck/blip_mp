@@ -61,6 +61,14 @@ Improved Burnikel–Ziegler division beats our Knuth kernel by about 23% at the
 is unchanged. All results were verified; the single-CPU cohort is unbaselined,
 and the 12-CPU affinity cohort remains inconclusive after one variation retry.
 
+A separate [signed public-path comparison](docs/plan_context/performance-follow-up.md#signed-public-division-results-october-28-2026)
+finds B-Z saving 21–28% CPU time at 12,288/16,384-byte divisors with twice-width
+dividends, and 18–44% across sampled recursive widths with four-times-width
+dividends. When the dividend is only one byte wider, it takes 59–68× current
+division's time. These compare two BLIP paths; GMP supplies correctness answers
+outside timing. The six cohorts are unbaselined. Dispatch remains unchanged
+because divisor width alone cannot predict the benefit.
+
 ## Quick start
 
 The [verified immediate-add probe](docs/plan_context/performance-follow-up.md#verified-immediate-add-probe-october-27-2026)
@@ -95,7 +103,8 @@ division speedup.
 The subsequent [recursive-cutoff comparison](docs/plan_context/performance-follow-up.md#recursive-cutoff-result-and-selection)
 cut B-Z kernel CPU time by about 78–94% at sampled 64–2048-byte divisor widths.
 The default recursive cutoff is now 128 bytes; the public B-Z integration
-threshold is unchanged pending a comparison against the existing public path.
+threshold is unchanged after the public-path comparison exposed severe
+short-quotient regressions.
 
 `./bm --verified-powm` measures public modular exponentiation on the retained
 512–3072-bit workloads, with every result checked against GMP. Its
