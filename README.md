@@ -88,6 +88,8 @@ notes retain the unbaselined and inconclusive cohort verdicts.
 `./bm --verified-truncated` compares the experimental
 [truncated product](docs/benchmarks/goldilocks/TRUNCATED.md) against Stockham
 and fusion around transform-padding boundaries.
+Its first measurements saved 15–22% CPU time just above sampled padding jumps
+but lost elsewhere, so production continues to use fusion.
 
 Requires [Nix](https://nixos.org/) (handles the Zig 0.16.0 toolchain and GMP build for benchmarks).
 

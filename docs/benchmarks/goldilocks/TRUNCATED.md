@@ -96,3 +96,46 @@ Nix preparation/check time, plus the production build and all-system evaluation.
 SIMD work remains deferred while the measured question is whether pruning
 outweighs recursive control and lost stage fusion. The existing fused control
 uses scalar BMI2 multiplication; no vectorization benefit is assumed here.
+
+## First complete-product result
+
+Campaign `blip-mp-truncated-20261028T060552Z` measured commit
+`a62962387f03bf26faed0c4d5120eb75830f8a6a` on the same Ryzen Threadripper 3990X,
+Linux 6.18, Zig 0.16.0 ReleaseFast and GMP 6.3.0 configuration as the fused
+comparison. The source hash stayed
+`4fddce8029f209f3b07210d280541492bae87d592c00471442353052f21f3d0a`.
+All ten processes verified their products. Both affinity cohorts were
+`UNBASELINED` after one attempt; no historical baseline has been approved.
+
+| Bytes per operand | Truncated/fused CPU ratio, 1 CPU | Truncated/fused CPU ratio, 12 CPUs |
+|---:|---:|---:|
+| 1024 | 1.446 | 1.447 |
+| 1025 | 0.855 | 0.852 |
+| 1537 | 1.176 | 1.173 |
+| 4096 | 1.433 | 1.429 |
+| 4097 | 0.825 | 0.824 |
+| 6145 | 1.144 | 1.143 |
+| 16384 | 1.418 | 1.422 |
+| 16385 | 0.808 | 0.804 |
+| 65535 | 1.414 | 1.406 |
+| 65536 | 1.412 | 1.411 |
+| 65537 | 0.786 | 0.783 |
+| 98305 | 1.113 | 1.110 |
+| 100000 | 1.124 | 1.126 |
+
+Ratios below one favor truncation. Each cell is the upper median of 30 paired
+sample ratios across the five processes. Every process mean agreed on the
+direction of the result at each size. The [summary](truncated-summary.jsonl)
+also preserves comparisons with Stockham, CPU/wall component means and process
+ratios. Full records remain in external performance history.
+
+Just above the sampled padding jumps, truncation saved 15–22% CPU time versus
+fusion. Nearly full transforms lost roughly 41–45%; intermediate fill ratios
+also lost, including 12–13% at 100000 bytes. Keep fusion in production. The next
+candidate should prune partial regions while using fused passes for complete
+subtrees; its correctness and cost need separate verification.
+
+The successful campaign waited roughly six minutes for admission. An earlier
+launch completed measurement but saved no records because a trailing separator
+in the supplied run identifier produced an invalid history ID. The corrected
+launch retained the same source/settings; it is not a selected timing retry.

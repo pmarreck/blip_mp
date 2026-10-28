@@ -125,10 +125,12 @@ result remains historical evidence, not a current guarantee.
 3. Test sparse/truncated transforms around large padding jumps, with dense
    controls. Header-only zero initialization is implemented. The
    [input/output-truncated Goldilocks experiment](../goldilocks/TRUNCATED.md)
-   now passes independent transform and GMP product checks; measurements remain
-   necessary before production selection.
-4. Derive truncated Montgomery carry bounds before implementation. No claim
-   of a Montgomery speedup is made by this work.
+   measured 15–22% lower CPU time just above sampled padding jumps, but lost to
+   fusion elsewhere. Test fused complete subtrees before production selection.
+4. The [truncated Montgomery carry derivation](MONTGOMERY.md) establishes an
+   exact recovery bound, but its scalar schoolbook product count exceeds the
+   current reduction's count. Profile before implementing a candidate; no
+   Montgomery speedup is claimed.
 5. Revisit contextual BLIP types only after profiling the remaining codec cost.
    The [type proposal](../../BLIP_ALGORITHM_TYPES.md) is not a wire-format change.
 
