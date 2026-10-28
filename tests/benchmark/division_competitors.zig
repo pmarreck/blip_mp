@@ -129,6 +129,23 @@ test "wide quotient fallback classifies divisor floor and dividend gap boundarie
 		.{true,true,true,true,true,true},
 		.{true,true,true,true,true,false},
 	};
+	try checkOuterFallback(blip.tier3.divModBurnikelZieglerWideQuotient,&test_widths,&gaps,&expected);
+}
+
+test "selected quotient fallback classifies the measured 1024-byte gap boundary" {
+	const test_widths = [_]usize{4094,4095,4096,4097,4098};
+	const gaps = [_]usize{0,7,8,1023,1024,1025,2048};
+	const expected = [_][7]bool{
+		.{true,true,false,false,false,false,false},
+		.{true,true,true,true,true,true,true},
+		.{true,true,true,true,true,false,false},
+		.{true,true,true,true,true,true,true},
+		.{true,true,true,true,true,false,false},
+	};
+	try checkOuterFallback(blip.tier3.divModBurnikelZiegler,&test_widths,&gaps,&expected);
+}
+
+fn checkOuterFallback(comptime divide: anytype, comptime test_widths: []const usize, comptime gaps: []const usize, expected: []const [gaps.len]bool) !void {
 	var actual: [test_widths.len][gaps.len]bool = @splat(@splat(false));
 	for (test_widths,0..) |width,wi| for (gaps,0..) |gap,gi| {
 		var arena = std.heap.ArenaAllocator.init(std.testing.allocator); defer arena.deinit();
@@ -140,7 +157,7 @@ test "wide quotient fallback classifies divisor floor and dividend gap boundarie
 		const q = try a.alloc(u8,gap+3); @memset(q,0xa5);
 		const r = try a.alloc(u8,width+2); @memset(r,0xa5);
 		var limited = std.testing.FailingAllocator.init(std.testing.allocator,.{.fail_index=1});
-		if (blip.tier3.divModBurnikelZieglerWideQuotient(u,u.len,v,width,q[1..gap+2],r[1..width+1],limited.allocator())) |got| {
+		if (divide(u,u.len,v,width,q[1..gap+2],r[1..width+1],limited.allocator())) |got| {
 			actual[wi][gi] = true;
 			try std.testing.expectEqual(gap+1,got.q_len);
 			try std.testing.expectEqual(width-1,got.r_len);
@@ -543,12 +560,21 @@ test "explicit B-Z allocation failures release memory including optional cache r
 		try Check.verify(divide,width,dividend_len);
 	};
 	for ([_]usize{8,2048,2049}) |gap| try Check.verify(Mp.divModBurnikelZieglerWideQuotient,4096,4096+gap);
+	for ([_]usize{4096,4098}) |width| for ([_]usize{1024,1025}) |gap| try Check.verify(Mp.divModBurnikelZiegler,width,width+gap);
 }
 
 test "wide quotient boundary preserves every sign and input alias" {
+	try checkSignedOuterBoundary(Mp.divModBurnikelZieglerWideQuotient,4096,&.{8,2048,2049});
+}
+
+test "selected quotient boundary preserves every sign and input alias" {
+	for ([_]usize{4096,4098}) |width| try checkSignedOuterBoundary(Mp.divModBurnikelZiegler,width,&.{1023,1024,1025});
+}
+
+fn checkSignedOuterBoundary(comptime divide: anytype, width: usize, gaps: []const usize) !void {
 	var zero = Mp.init(std.testing.allocator); defer zero.deinit(); try zero.setI64(0);
-	for ([_]usize{8,2048,2049}) |gap| {
-		var fixture = try Fixture.initSized(std.testing.allocator,4096,32,4096+gap); defer fixture.deinit();
+	for (gaps) |gap| {
+		var fixture = try Fixture.initSized(std.testing.allocator,width,32,width+gap); defer fixture.deinit();
 		for (fixture.cases,0..) |*case,index| {
 			const negative_a = (index/8)%4 == 1 or (index/8)%4 == 3;
 			const negative_b = (index/8)%4 >= 2;
@@ -561,7 +587,7 @@ test "wide quotient boundary preserves every sign and input alias" {
 				try a.setBytes(case.a.bytes()); try b.setBytes(case.b.bytes());
 				const q = switch (alias_mode) { 0 => &fixture.q, 1 => &a, else => &b };
 				const r = switch (alias_mode) { 0 => &fixture.r, 1 => &b, else => &a };
-				try Mp.divModBurnikelZieglerWideQuotient(q,r,&a,&b);
+				try divide(q,r,&a,&b);
 				try std.testing.expectEqualSlices(u8,case.mq.bytes(),q.bytes());
 				try std.testing.expectEqualSlices(u8,case.mr.bytes(),r.bytes());
 			}

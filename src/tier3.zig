@@ -2266,6 +2266,7 @@ fn bzDiv3n_2n(
 const BZ_TOPLEVEL_THRESHOLD: usize = 64;
 const BZ_WIDE_QUOTIENT_MIN_DIVISOR: usize = 4096;
 const BZ_WIDE_QUOTIENT_MAX_GAP: usize = 2048;
+const BZ_SELECTED_QUOTIENT_MAX_GAP: usize = 1024;
 
 const BzOptions = struct {
 	chunk_fallback: bool = true,
@@ -2273,12 +2274,12 @@ const BzOptions = struct {
 	leading_block: bool = false,
 	short_quotient: bool = false,
 	short_carry: bool = false,
-	wide_quotient: bool = false,
+	wide_quotient_gap: usize = 0,
 };
 
 /// Experimental wider outer Knuth fallback for large divisors.
 pub fn divModBurnikelZieglerWideQuotient(u: []const u8, u_len: usize, v: []const u8, v_len: usize, q: []u8, r: []u8, allocator: std.mem.Allocator) std.mem.Allocator.Error!struct { q_len: usize, r_len: usize } {
-	const got = try divModBurnikelZieglerImpl(.{.leading_block=true,.short_quotient=true,.short_carry=true,.wide_quotient=true},u,u_len,v,v_len,q,r,allocator);
+	const got = try divModBurnikelZieglerImpl(.{.leading_block=true,.short_quotient=true,.short_carry=true,.wide_quotient_gap=BZ_WIDE_QUOTIENT_MAX_GAP},u,u_len,v,v_len,q,r,allocator);
 	return .{.q_len=got.q_len,.r_len=got.r_len};
 }
 
@@ -2320,7 +2321,9 @@ pub fn divModBurnikelZieglerByteFallback(u: []const u8, u_len: usize, v: []const
 
 /// Burnikel-Ziegler recursive divider — top-level entry. Byte-direct,
 /// magnitude-only (caller handles signs). A quotient bounded to one native
-/// chunk uses Knuth directly. Otherwise, for divisor sizes ≥
+/// chunk uses Knuth directly. Divisors of at least 4096 bytes also use Knuth
+/// when the dividend is at most 1024 bytes wider, based on paired crossover
+/// measurements including neighboring even widths. Otherwise, for divisor sizes ≥
 /// BZ_TOPLEVEL_THRESHOLD AND even (so the recursive halving lands cleanly),
 /// runs the B-Z algorithm: normalize the divisor so its top bit is set,
 /// shift the dividend identically, pad the dividend to a multiple of n,
@@ -2342,7 +2345,7 @@ pub fn divModBurnikelZiegler(
 	r_out: []u8,
 	allocator: std.mem.Allocator,
 ) std.mem.Allocator.Error!struct { q_len: usize, r_len: usize } {
-	const got = try divModBurnikelZieglerImpl(.{.recurse_threshold=BZ_RECURSE_THRESHOLD,.leading_block=true,.short_quotient=true,.short_carry=true}, u, u_len_in, v, v_len, q_out, r_out, allocator);
+	const got = try divModBurnikelZieglerImpl(.{.recurse_threshold=BZ_RECURSE_THRESHOLD,.leading_block=true,.short_quotient=true,.short_carry=true,.wide_quotient_gap=BZ_SELECTED_QUOTIENT_MAX_GAP}, u, u_len_in, v, v_len, q_out, r_out, allocator);
 	return .{ .q_len = got.q_len, .r_len = got.r_len };
 }
 
@@ -2395,9 +2398,9 @@ fn divModBurnikelZieglerImpl(
 	// eight bytes bounds the quotient to one native chunk. The candidate
 	// uses Knuth before allocating recursive work; other entries stay fixed.
 	const short = options.short_quotient and u_len - v_len < @sizeOf(u64);
-	// Paired crossover measurements motivate this conservative candidate.
-	// The current default and fixed short-carry entry retain the old bound.
-	const wide = options.wide_quotient and v_len >= BZ_WIDE_QUOTIENT_MIN_DIVISOR and u_len - v_len <= BZ_WIDE_QUOTIENT_MAX_GAP;
+	// The 2048-byte experiment regressed at neighboring even widths. Select
+	// the measured 1024-byte bound; explicit comparison entries stay fixed.
+	const wide = options.wide_quotient_gap != 0 and v_len >= BZ_WIDE_QUOTIENT_MIN_DIVISOR and u_len - v_len <= options.wide_quotient_gap;
 	// Knuth also handles small or odd divisor widths (B-Z needs even n).
 	if (short or wide or v_len < BZ_TOPLEVEL_THRESHOLD or (v_len & 1) != 0) {
 		if (options.chunk_fallback) {

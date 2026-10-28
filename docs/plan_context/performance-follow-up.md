@@ -1481,6 +1481,61 @@ bounded experiment samples gaps 8 through 2,048 at 4,096, 4,098, 8,194 and
 records that sweep. A narrower universal cutoff is a hypothesis pending those
 results; neither the candidate nor public integration threshold changes here.
 
+### Bounded quotient fallback selection
+
+Campaign `blip-mp-division-gap-crossover-20261028T202603Z` measured clean commit
+`089a24267bf3b23feb758aca26afc36a3dd55593` with the fixed short-carry and
+2,048-byte-gap experimental kernels. It adds gaps 16, 32, 64, 128, 256, 512
+and 1,024 at 4,096, 4,098, 8,194 and 16,386-byte divisors. Knuth uses less
+CPU in every process mean at every sampled gap through 1,024, including the
+diagnostic attempts. At that upper bound, the paired medians save 18–55%.
+
+| Divisor bytes | Knuth/B-Z at gap 512, 1 / 12 CPUs | At gap 1,024, 1 / 12 CPUs | All process means at gap 1,024 |
+|---:|---:|---:|---:|
+| 4,096 | 0.270 / 0.270 | 0.451 / 0.452 | 0.370–0.453 |
+| 4,098 | 0.478 / 0.567 | 0.703 / 0.815 | 0.675–0.816 |
+| 8,194 | 0.528 / 0.528 | 0.730 / 0.728 | 0.722–0.733 |
+| 16,386 | 0.403 / 0.478 | 0.576 / 0.678 | 0.555–0.744 |
+
+Some 1-CPU process ratios differ substantially from the 12-CPU cohort and the
+preceding sweep despite identical code and data. Near gaps 2,047/2,048,
+individual process means at 4,098 and 8,194 even cross parity. No cause is
+assigned to that variation. The cutoff is kept at 1,024, where every process
+mean remains below 0.816. This is finite evidence for the measured widths,
+fixtures and platform, not proof of an optimal or universally faster cutoff.
+
+All 50 processes verified full results and canaries. Two cohorts used their
+single permitted variation retry. Seven cohorts are unbaselined; the
+16,386-byte/12-CPU cohort remains inconclusive. No baseline was approved.
+The source digest stayed
+`23ef5f0666c590ef1bdfc38762f1bb2584b27bb16a1541e40ddcdfc380301653`.
+The probe SHA-256 remained
+`d3c38a5b44bdcd3543e2e1a3a6466bd775fb422665c05ac80c00e79f077223d2`,
+matching the preceding boundary campaign. The
+[summary](../benchmarks/storage-aware/division-gap-crossover-summary.json)
+retains every process mean and selected-attempt sample range. Configuration
+is `profiling-division-gap-crossover.json`; method and fixture policy remain
+`division-wide-quotient-paired-v1`, with GMP references outside timing.
+
+The default recursive entry now uses Knuth when the canonical divisor is at
+least 4,096 bytes and the canonical dividend length exceeds it by at most
+1,024 bytes. The explicit short-carry and 2,048-byte experimental entries stay
+fixed. A one-allocation classifier first failed on the unchanged default,
+then verifies the accepted set at five floor/odd/even widths and gaps 0, 7, 8,
+1,023, 1,024, 1,025 and 2,048. Independent powers-of-256 identities check exact
+outputs, high-zero input padding, capacities and canaries. Signed GMP-derived
+tests cover all signs, normalization shifts and input aliases at 4,096 and
+4,098 bytes on both sides of the new boundary; allocation-failure checks cover
+the selected and recursive paths. The public integration threshold remains
+99,999 payload bytes, and this selection establishes no fresh GMP comparison.
+
+The complete suite passed in 93 seconds of mixed Nix preparation/check time;
+the production build and all-system evaluation passed. The feedback budget
+remains unmet; this duration includes compilation and is not a measured
+test-execution-only time. `profiling-division-selected-public.json` prepares
+the next paired signed comparison against current public division at five
+geometries, using the existing public-v2 method and unchanged fixture policy.
+
 ### Exact-capacity remainder regression
 
 Reviewing the B-Z entry point exposed a separate single-byte-divisor bug. With

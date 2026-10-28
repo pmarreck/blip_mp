@@ -103,6 +103,14 @@ but regresses 9–10% at 4,098-byte divisors and 2–3% at 8,194 bytes near that
 cutoff. Default dispatch stays unchanged. All 105 processes verified their
 results; seventeen cohorts are unbaselined and one remains inconclusive.
 
+The [neighboring-width sweep](docs/plan_context/performance-follow-up.md#bounded-quotient-fallback-selection)
+supports a narrower 1,024-byte gap cutoff for divisors of at least 4,096 bytes.
+At that gap, the measured Knuth path saves 18–55% CPU against the preceding
+B-Z kernel; every process mean favors it at all sampled gaps through 1,024.
+The recursive entry now selects this bound. Public integration stays unchanged;
+this is not a new GMP comparison. All 50 processes verified their results,
+with seven cohorts unbaselined and one inconclusive.
+
 ## Quick start
 
 The [verified immediate-add probe](docs/plan_context/performance-follow-up.md#verified-immediate-add-probe-october-27-2026)
