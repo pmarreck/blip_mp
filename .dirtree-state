@@ -20,6 +20,7 @@ annotate=[
 	docs/benchmarks/shifted-residues = Shifted-residue benchmark samples, validation and measured conclusions
 	docs/benchmarks/storage-aware = Storage-aware FFT ablation samples and analysis
 	docs/benchmarks/storage-aware/RESEARCH.md = Recursive Toom and blocked multiplication results and correctness findings
+	docs/benchmarks/storage-aware/crossover-summary.jsonl = Selected-process crossover and allocation observations with cohort verdicts
 	docs/benchmarks/storage-aware/test-evidence.txt = Recorded red and green boundary tests
 	docs/benchmarks/storage-aware/tuned-full-summary.jsonl = Full API comparison exposing and resolving recursive crossover regression
 	docs/benchmarks/storage-aware/tuned-summary.jsonl = Retained recursion and blocked-product CPU/wall medians and ranges

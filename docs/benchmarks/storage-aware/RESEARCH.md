@@ -168,3 +168,52 @@ time was 86 seconds. All-system evaluation passed, with execution on Linux
 x86_64 only. The initial adapter failed all five new behavioral tests, and the
 new command route failed before implementation. The final adapter also passed
 the optimized CLI checks and ReleaseSafe cleanup/corruption controls.
+
+## October 28 crossover observations
+
+Commit `bb28dc7` completed 48 cases at 04:10:19–04:12:30 UTC. All 315 fresh
+processes, including 15 automatic five-process retries, verified their products.
+Forty-two cases were unbaselined and six remained inconclusive. No baseline was
+approved. Host load at the initial snapshot was 26.29. The source digest stayed
+`f7376327e2e7fd25798e0fcb760980f1854b4bf934384d37a6ecc341dc65dc6d`.
+
+[The complete selected-process summary](crossover-summary.jsonl) retains all
+192 size/method/affinity rows and their case verdicts. Raw processes and retries
+remain in external history under prefix `blip-mp-multiplication-20261028T041012Z-`
+plus each case name from `profiling-multiplication.json`. The table below shows
+one-CPU direct-kernel mean CPU microseconds, including result verification.
+
+| Longer × shorter bytes | Schoolbook | Blocked |
+|---|---:|---:|
+| 2047 × 1024 | 44.33 | 28.16 |
+| 4093 × 2047 | 172.89 | 87.89 |
+| 4095 × 2048 | 171.93 | 112.31 |
+| 4096 × 2048 | 134.28 | 111.14 |
+| 4097 × 2048 | 184.37 | 131.69 |
+| 8191 × 4096 | 686.53 | 341.38 |
+| 8192 × 4096 | 510.41 | 337.12 |
+| 8193 × 4096 | 686.30 | 394.85 |
+
+The sampled region just below 2:1 favors blocked products, and the 2047-byte
+shorter operand also benefits before the current 2048-byte public threshold.
+These observations motivate a broader crossover experiment rather than a new
+universal dispatch rule. Alignment matters: schoolbook selects different paths
+when both byte lengths are divisible by eight. The one-byte tail above 2:1 also
+forces an extra padded balanced product in the current blocked implementation.
+The next narrow candidate handles a final block that fits a native register
+with the existing byte-direct multiply-by-u64 operation.
+
+Wider ratios generally retain the blocked benefit, but separate processes can
+occupy different timing modes. For example, direct blocked 32768-by-4096 products
+took 2441.76 microseconds in the selected one-CPU process versus 1351.65 with
+12 CPUs allowed, while public warm calls took 1360.41 and 1383.45 respectively.
+This discrepancy prevents treating every isolated ratio as an algorithm effect.
+
+The cold-buffer measurement does not establish a reliable allocation penalty.
+For 65536-by-4096 public products, warm/cold means were 2755.82/5378.05
+microseconds in the one-CPU cohort, but 2863.83/2788.01 with 12 CPUs allowed.
+Smaller cases likewise include cold calls both above and below warm calls.
+Correctness and allocation-lifetime controls passed; separating the small
+allocation cost from process modes requires a contemporaneous paired experiment.
+No production dispatch or claim of improved GMP-relative performance follows
+from this campaign.

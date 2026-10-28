@@ -44,3 +44,4 @@ Completed PLAN.md items retired by plan-retire, oldest retirement first.
 ## Retired 2026-10-28
 
 - [x] [Current bounded milestone] Move the five division timing tests to optimized probes; retain all six fixtures, add GMP quotient/remainder checks and corruption controls, and pass the full native suite, build and all-system evaluation (context: docs/plan_context/performance-follow-up.md; done 2026-10-27 23:04 EDT; this commit).
+- [x] [Current bounded milestone] Replace the CRT fuzz test's quadratic reference with an independently checked GMP byte oracle; retain all 100 seeded cases and ReleaseSafe checks, reducing that test from 9.996 to 0.989 seconds and core execution to 15.531 seconds (context: docs/plan_context/performance-follow-up.md; done 2026-10-27 23:33 EDT; this commit).
