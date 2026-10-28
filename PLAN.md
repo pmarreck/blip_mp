@@ -4,14 +4,13 @@ Purpose: [INTENT.md](INTENT.md). The [legacy roadmap](docs/plan_context/legacy-r
 
 ## Current bounded milestone
 
+- [x] Complete bounded add-variation controls: SMT integer contention raises mixed-add cycles with stable instructions, another core sharing L3 does not reproduce that slowdown, and the fixed-address binary excludes main-code ASLR; historical outliers and L1/L2 attribution remain unresolved (context: docs/plan_context/performance-follow-up.md; done 2026-10-27 23:53 EDT; this commit).
 - [x] Execute inverse cross-checks with eight bounded workers, preserving all 3900 pairs, 3223 inverses, result comparisons and leak checks; pass the full suite/build and measure core execution at 6.251 seconds, with the five-second budget still unmet (context: docs/plan_context/performance-follow-up.md; done 2026-10-27 23:42 EDT; this commit).
 - [x] Replace the CRT fuzz test's quadratic reference with an independently checked GMP byte oracle; retain all 100 seeded cases and ReleaseSafe checks, reducing that test from 9.996 to 0.989 seconds and core execution to 15.531 seconds (context: docs/plan_context/performance-follow-up.md; done 2026-10-27 23:33 EDT; this commit).
 - [x] Move the five division timing tests to optimized probes; retain all six fixtures, add GMP quotient/remainder checks and corruption controls, and pass the full native suite, build and all-system evaluation (context: docs/plan_context/performance-follow-up.md; done 2026-10-27 23:04 EDT; this commit).
-- [x] Attribute core unit latency and move inverse timing loops to GMP-verified optimized probes; preserve all fixture comparisons, add existence checks, and measure core execution at 40.995 seconds before and 24.352 after (context: docs/plan_context/performance-follow-up.md; done 2026-10-27 22:47 EDT; this commit).
 
 ## Follow-up and existing backlog
 
-- [ ] Distinguish shared-core contention, cache behavior and code placement as causes of add-cycle variation using bounded contemporaneous controls; preserve the unapproved observations (context: docs/plan_context/performance-follow-up.md).
 
 - [ ] Measure blocked-product crossover, cold allocation costs and wider ratios; continue fused Goldilocks, sparse/truncated FFT and Montgomery experiments in ranked order (context: docs/benchmarks/storage-aware/RESEARCH.md).
 

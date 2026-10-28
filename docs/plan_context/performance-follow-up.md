@@ -428,3 +428,58 @@ The full native suite and production build passed in 95 seconds combined,
 including 94 seconds of mixed Nix preparation/check time. The diagnostic core
 compilation took 46 seconds. These shared-host observations establish a useful
 test-feedback reduction without declaring a new performance baseline.
+
+## Controlled SMT contention
+
+At commit `5906f17`, a bounded experiment compared four consecutive conditions:
+no added competitor, an integer competitor on the measured CPU's SMT sibling,
+the same competitor on another core sharing L3, and no added competitor again.
+The shared engine retained five fresh processes per 1/12-CPU cohort, six
+interleaved samples per fixture and its single permitted timing retry.
+
+The competitor was `stress-ng` 0.22.01 from the project's pinned Nixpkgs, using
+`--cpu 1 --cpu-method int64 --verify --timeout 90s --metrics-brief` and explicit
+CPU affinity. On this host CPU 0's sibling is 64; CPU 65 belongs to another core
+in the same L3 group, `0-3,64-67`. The harness waited until the competitor child
+had consumed CPU time, checked its affinity, and confirmed it remained alive
+through each measurement. It then interrupted and reaped it. Both competitor
+runs passed their checks. No host scheduling or SMT settings were changed.
+
+The table gives selected-process means for the mixed-add fixture pinned to CPU 0.
+The 12-CPU cohorts allowed migration across CPUs 0–11 and do not isolate the
+same sibling relationship.
+
+| Added competitor | CPU ns/add | Cycles/add | Instructions/add |
+|---|---:|---:|---:|
+| None, before | 6.339 | 23.662 | 89.000 |
+| SMT sibling, integer work | 11.535 | 42.644 | 89.000 |
+| Other core sharing L3, integer work | 6.164 | 22.480 | 89.000 |
+| None, after | 5.741 | 22.460 | 89.000 |
+
+SMT contention can reproduce a substantial slowdown with unchanged instruction
+counts. This control does not distinguish shared execution resources from L1/L2
+effects, and the other-core integer workload is not a deliberate cache-thrashing
+test. It therefore does not rule out cache effects from other workloads. Host
+load fell from 100.51 to 87.98 during the campaign; the first no-added-load
+cohort still had individual samples as high as 18.54 ns/add. The original
+historical outliers remain unassigned. Future close comparisons need matched,
+contemporaneous controls and sibling-load awareness; CPU affinity alone is
+insufficient isolation.
+
+`readelf -h` identifies this probe as ELF `EXEC`, with entry address `0x1017970`.
+Random placement of the main executable's code cannot explain process-to-process
+variation for this binary. This does not exclude randomized data addresses or
+code-layout differences between separately compiled binaries. The probe's SHA256
+stayed `3405ddaab2f5d53875d585d9b15f2f057b81dff0286eb268fbf6101ba15f9d55`.
+
+All 50 measured processes, including two five-process retries, verified their
+results. Six cohorts were unbaselined; the 12-CPU before/SMT cohorts were
+inconclusive. No baseline was approved. External records use prefix
+`blip-mp-contention-20261028T035059Z-`, followed by the condition
+(`idle_before`, `smt_int64`, `shared_l3_int64`, `idle_after`) and case name
+`contention_<condition>_<1|12>core`. Records span 03:51:03–03:51:40 UTC on October
+28. Each condition used a copy of `profiling-linux-counters.json` with its case
+names and definitions suffixed by that condition; each source digest remained
+stable within its run. The binaries and measured work were identical across
+conditions. Execution waited for shared admission before starting; queue time
+is excluded from the recorded probe samples.
