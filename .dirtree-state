@@ -63,6 +63,7 @@ annotate=[
 	profiling-division-leading.json = Paired signed B-Z leading-block shortcut experiment across operand geometries
 	profiling-division-paired.json = Identical-input Burnikel-Ziegler and Knuth division measurement cohorts
 	profiling-division-public.json = Signed public B-Z versus current dispatch across three dividend geometries
+	profiling-division-selected-competitors.json = Matched public BLIP, selected B-Z kernel, Knuth and GMP cohorts
 	profiling-division-short-public.json = Paired short-quotient B-Z versus current public division
 	profiling-division-short.json = Paired short-quotient fallback versus fixed leading-block B-Z
 	profiling-division.json = Verified division workloads with separate 1/12 CPU cohorts

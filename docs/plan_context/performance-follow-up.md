@@ -1214,6 +1214,28 @@ After selection, the complete suite passed in 89 seconds of mixed Nix
 preparation/check time, including the default allocation regression. The
 optimized production build and all-system evaluation passed.
 
+### Selected-kernel GMP comparison qualification
+
+`profiling-division-selected-competitors.json` retains the original matched
+positive 2:1 corpus, widths, iteration counts, warmups, verification adapters
+and 1/12-CPU cohorts. Its method is `division-selected-competitors-v1`. The
+four methods are public BLIP, Knuth, selected B-Z and ordinary GMP. The selected
+entry includes the leading-block, outer short-quotient and short-carry changes.
+The original `competitors` mode still times the fixed cutoff-128 entry.
+
+An injected schedule test first failed when the new mode timed the old B-Z
+slot. It checks all eight mirrored rounds, full input visitation, normalization
+and exclusion of the old slot. Complete-reference/corruption and partial-
+allocation tests failed against a placeholder selected method, then passed
+with the actual default magnitude divider. The new CLI mode failed its check
+before routing was connected. Both modes remain in the complete entry point.
+
+The full suite passed in 103 seconds of mixed Nix preparation/check time;
+production build and all-system evaluation passed. This does not meet the
+fast-feedback target or isolate test execution from compilation. The fresh
+measurement still includes each method's native result-verification adapter;
+it will not be reported as an instruction-only arithmetic comparison.
+
 ### Exact-capacity remainder regression
 
 Reviewing the B-Z entry point exposed a separate single-byte-divisor bug. With

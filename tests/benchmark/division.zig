@@ -27,6 +27,7 @@ pub fn main(init: std.process.Init) !void {
 	if (args.len > 1 and std.mem.eql(u8,args[1],"short-public")) return @import("division_public.zig").runShort(init,args[2..],true);
 	if (args.len > 1 and std.mem.eql(u8,args[1],"carry")) return @import("division_public.zig").runCarry(init,args[2..]);
 	if (args.len > 1 and std.mem.eql(u8, args[1], "competitors")) return @import("division_competitors.zig").run(init, args[2..]);
+	if (args.len > 1 and std.mem.eql(u8, args[1], "selected-competitors")) return @import("division_competitors.zig").runSelected(init, args[2..]);
 	if (args.len > 1 and std.mem.eql(u8, args[1], "paired")) return @import("division_crossover.zig").run(init, args[2..], .kernels);
 	if (args.len > 1 and std.mem.eql(u8, args[1], "paired-fallback")) return @import("division_crossover.zig").run(init, args[2..], .fallbacks);
 	if (args.len > 1 and std.mem.eql(u8, args[1], "paired-cutoff")) return @import("division_crossover.zig").run(init, args[2..], .cutoffs);

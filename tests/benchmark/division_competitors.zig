@@ -4,7 +4,9 @@ const blip = @import("blip_mp");
 const Mp = blip.Mp;
 const gmp = @import("gmp.zig");
 const widths = [_]usize{ 8,16,32,64,128,256,512,1024,2048,4096,8192,16384 };
-const Method = enum { public_blip, knuth, bz128, gmp };
+const Method = enum { public_blip, knuth, bz128, gmp, selected_bz };
+const original_methods = [4]Method{.public_blip,.knuth,.bz128,.gmp};
+const selected_methods = [4]Method{.public_blip,.knuth,.selected_bz,.gmp};
 const Timing = struct { cpu_ns: f64, wall_ns: f64 };
 const Sample = struct { cpu_ns: [4]f64, wall_ns: [4]f64 };
 const Options = struct { sizes: [widths.len]usize, count: usize };
@@ -139,11 +141,19 @@ test "short carry division handles exact blocks followed by zero and small block
 }
 
 fn balancedSample(state: anytype, comptime batch: anytype, count: usize, repeats: usize, round: usize) !Sample {
+	return sampleWith(original_methods,state,batch,count,repeats,round);
+}
+
+fn selectedSample(state: anytype, comptime batch: anytype, count: usize, repeats: usize, round: usize) !Sample {
+	return sampleWith(selected_methods,state,batch,count,repeats,round);
+}
+
+fn sampleWith(comptime methods: [4]Method, state: anytype, comptime batch: anytype, count: usize, repeats: usize, round: usize) !Sample {
 	if (count == 0 or count % 2 != 0 or repeats == 0) return error.InvalidArguments;
 	var sample: Sample = .{ .cpu_ns = @splat(0), .wall_ns = @splat(0) };
 	for (0..8) |position| {
 		const index = ((if (position < 4) position else 7-position) + round) % 4;
-		const duration = try batch(state,@enumFromInt(index),if (position < 4) 0 else count/2,count/2,repeats);
+		const duration = try batch(state,methods[index],if (position < 4) 0 else count/2,count/2,repeats);
 		sample.cpu_ns[index] += duration.cpu_ns;
 		sample.wall_ns[index] += duration.wall_ns;
 	}
@@ -151,6 +161,34 @@ fn balancedSample(state: anytype, comptime batch: anytype, count: usize, repeats
 		cpu.* /= @floatFromInt(count*repeats); wall.* /= @floatFromInt(count*repeats);
 	}
 	return sample;
+}
+
+test "selected competitor timing substitutes only the B-Z slot" {
+	const Fake = struct {
+		position: usize = 0,
+		calls: [8]Method = undefined,
+		visits: [5][8]usize = @splat(@splat(0)),
+		fn batch(self: *@This(), method: Method, start: usize, count: usize, repeats: usize) !Timing {
+			for (start..start+count) |i| self.visits[@intFromEnum(method)][i] += repeats;
+			self.calls[self.position] = method; self.position += 1;
+			return .{.cpu_ns=@floatFromInt(count*repeats),.wall_ns=@floatFromInt(2*count*repeats)};
+		}
+	};
+	const orders = [_][8]Method{
+		.{.public_blip,.knuth,.selected_bz,.gmp,.gmp,.selected_bz,.knuth,.public_blip},
+		.{.knuth,.selected_bz,.gmp,.public_blip,.public_blip,.gmp,.selected_bz,.knuth},
+		.{.selected_bz,.gmp,.public_blip,.knuth,.knuth,.public_blip,.gmp,.selected_bz},
+		.{.gmp,.public_blip,.knuth,.selected_bz,.selected_bz,.knuth,.public_blip,.gmp},
+	};
+	for (0..8) |round| {
+		var fake: Fake = .{};
+		const got = try selectedSample(&fake,Fake.batch,8,3,round);
+		try std.testing.expectEqualSlices(Method,&orders[round%4],&fake.calls);
+		try std.testing.expectEqualSlices(f64,&.{1,1,1,1},&got.cpu_ns);
+		try std.testing.expectEqualSlices(f64,&.{2,2,2,2},&got.wall_ns);
+		for (selected_methods) |method| try std.testing.expectEqualSlices(usize,&@as([8]usize,@splat(3)),&fake.visits[@intFromEnum(method)]);
+		try std.testing.expectEqualSlices(usize,&@as([8]usize,@splat(0)),&fake.visits[@intFromEnum(Method.bz128)]);
+	}
 }
 
 fn setMagnitude(value: *Mp, bytes: []const u8, allocator: std.mem.Allocator) !void {
@@ -244,12 +282,15 @@ const Fixture = struct {
 				gmp.__gmpz_tdiv_qr(&self.gq,&self.gr,&case.ga,&case.gb);
 				if (gmp.__gmpz_cmp(&self.gq,&case.gq) != 0 or gmp.__gmpz_cmp(&self.gr,&case.gr) != 0) return error.IncorrectWork;
 			},
-			.knuth, .bz128 => {
+			.knuth, .bz128, .selected_bz => {
 				if (!self.scratch.reset(.retain_capacity)) return error.OutOfMemory;
 				@memset(self.quotient,0xa5); @memset(self.remainder,0xa5);
 				const q = self.quotient[1..self.quotient.len-1]; const r = self.remainder[1..self.remainder.len-1];
 				const q_len, const r_len = if (method == .knuth) blk: {
 					const got = try blip.tier3.divModKnuthU64Bytes(case.dividend,case.dividend.len,case.divisor,case.divisor.len,q,r,self.scratch.allocator());
+					break :blk .{got.q_len,got.r_len};
+				} else if (method == .selected_bz) blk: {
+					const got = try blip.tier3.divModBurnikelZiegler(case.dividend,case.dividend.len,case.divisor,case.divisor.len,q,r,self.scratch.allocator());
 					break :blk .{got.q_len,got.r_len};
 				} else blk: {
 					const got = try blip.tier3.divModBurnikelZieglerCutoff128(case.dividend,case.dividend.len,case.divisor,case.divisor.len,q,r,self.scratch.allocator());
@@ -341,6 +382,15 @@ fn nativeBatch(fixture: *Fixture, method: Method, start: usize, count: usize, re
 }
 
 pub fn run(init: std.process.Init, args: []const []const u8) !void {
+	return runWith(false,init,args);
+}
+
+pub fn runSelected(init: std.process.Init, args: []const []const u8) !void {
+	return runWith(true,init,args);
+}
+
+fn runWith(comptime selected: bool, init: std.process.Init, args: []const []const u8) !void {
+	const methods = if (selected) selected_methods else original_methods;
 	const options = try parse(args);
 	const count = 64;
 	const Component = struct { method: []const u8, cpu_ns: [8]f64, wall_ns: [8]f64 };
@@ -353,15 +403,15 @@ pub fn run(init: std.process.Init, args: []const []const u8) !void {
 	for (options.sizes[0..options.count],0..) |width,row_index| {
 		var fixture = try Fixture.init(std.heap.c_allocator,width,count);
 		defer fixture.deinit();
-		for (0..count) |index| for (std.enums.values(Method)) |method| try fixture.run(method,index);
+		for (0..count) |index| for (methods) |method| try fixture.run(method,index);
 		const repeats: usize = if (width <= 128) 16 else 1;
 		var row: Row = .{ .size = width, .iterations = count*repeats, .divisor_min_bits = width*8-7,
 			.divisor_max_bits = width*8, .samples = undefined, .components = undefined };
-		for (&row.components,std.enums.values(Method)) |*component,method| {
+		for (&row.components,methods) |*component,method| {
 			component.* = .{ .method = @tagName(method), .cpu_ns = undefined, .wall_ns = undefined };
 		}
 		for (0..8) |round| {
-			const sample = try balancedSample(&fixture,nativeBatch,count,repeats,round);
+			const sample = try sampleWith(methods,&fixture,nativeBatch,count,repeats,round);
 			var cpu: f64 = 0; var wall: f64 = 0;
 			for (&row.components,0..) |*component,index| {
 				component.cpu_ns[round] = sample.cpu_ns[index]; component.wall_ns[round] = sample.wall_ns[index];
@@ -374,7 +424,7 @@ pub fn run(init: std.process.Init, args: []const []const u8) !void {
 	const report = .{
 		.schema = "performance-measurement/v1", .correct = true, .build_mode = "ReleaseFast",
 		.compiler = @import("builtin").zig_version_string, .gmp_version = std.mem.span(gmp.__gmp_version),
-		.method = "division-native-competitors-v1",
+		.method = if (selected) "division-selected-competitors-v1" else "division-native-competitors-v1",
 		.cpu_clock = "CLOCK_PROCESS_CPUTIME_ID", .wall_clock = "CLOCK_MONOTONIC",
 		.seed_usage = "0xB2D151A5 + divisor_bytes*257 + case_index; eight normalization shifts; engine seed does not alter inputs",
 		.normalization = "rotating ABCDDCBA half-pool batches; eight samples; primary averages four methods per operation; no subtraction",
