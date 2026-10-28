@@ -324,7 +324,7 @@
 							.method == (if $comparison == "paired" then "division-paired-kernels-v1" elif $comparison == "paired-fallback" then "division-paired-fallbacks-v1" else "division-paired-cutoffs-v1" end) and .build_mode == "ReleaseFast" and
 							[.rows[].size] == [128,129] and all(.rows[]; . as $row |
 								.fixture_count == 256 and .iterations == 1024 and .warmup_cases == 512 and
-								[.components[].method] == (if $comparison == "paired" then ["knuth","burnikel_ziegler"] elif $comparison == "paired-fallback" then ["burnikel_ziegler","burnikel_ziegler_chunk_fallback"] else ["burnikel_ziegler_chunk_fallback","burnikel_ziegler_cutoff128"] end) and
+								[.components[].method] == (if $comparison == "paired" then ["knuth","burnikel_ziegler_byte_fallback"] elif $comparison == "paired-fallback" then ["burnikel_ziegler_byte_fallback","burnikel_ziegler_chunk_fallback"] else ["burnikel_ziegler_chunk_fallback","burnikel_ziegler_cutoff128"] end) and
 								all(.samples[]; length == 5 and all(.[]; . > 0)) and
 								all(.components[]; (.cpu_ns|length) == 5 and (.wall_ns|length) == 5 and all(.cpu_ns[],.wall_ns[]; . > 0)) and
 								all(range(5); . as $i |

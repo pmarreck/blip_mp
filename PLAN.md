@@ -9,8 +9,7 @@ Purpose: [INTENT.md](INTENT.md). The [legacy roadmap](docs/plan_context/legacy-r
 
 
 
-- [x] Prepare an explicit chunk-reading B-Z fallback candidate with GMP, allocation and paired timing controls; pass the complete suite, build and all-system evaluation (context: docs/plan_context/performance-follow-up.md; done 2026-10-28 06:00 EDT; this commit).
-- [ ] Measure the chunk-reading B-Z fallback candidate against the old fallback with recursive widths as controls; select only if supported, then investigate recursive cutoffs (context: docs/plan_context/performance-follow-up.md).
+- [x] Select the chunk-reading B-Z fallback after paired samples show 6–19× gains with near-parity recursive controls; preserve unbaselined/inconclusive verdicts and pass full tests/build/evaluation (context: docs/plan_context/performance-follow-up.md; done 2026-10-28 06:34 EDT; this commit).
 - [x] Qualify an explicit 128-byte recursive cutoff against independent GMP, allocation and paired timing controls; pass the complete suite, build and all-system evaluation (context: docs/plan_context/performance-follow-up.md; done 2026-10-28 06:16 EDT; this commit).
 - [ ] Measure the 128-byte recursive cutoff against the four-byte control, keeping the same chunk-reading fallback and unchanged odd-width controls (context: docs/plan_context/performance-follow-up.md).
 - [x] Report inverse-probe significant widths and correct the historical recursive-HGCD fallback attribution; pass the complete suite, build and all-system evaluation (context: docs/plan_context/performance-follow-up.md; done 2026-10-28 06:29 EDT; this commit).

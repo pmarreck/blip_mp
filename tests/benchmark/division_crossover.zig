@@ -19,18 +19,18 @@ fn parse(args: []const []const u8) !Options {
 	return options;
 }
 
-const Method = enum { knuth, burnikel_ziegler, burnikel_ziegler_chunk_fallback, burnikel_ziegler_cutoff128 };
+const Method = enum { knuth, burnikel_ziegler_byte_fallback, burnikel_ziegler_chunk_fallback, burnikel_ziegler_cutoff128, production };
 pub const Comparison = enum { kernels, fallbacks, cutoffs };
 fn comparisonMethods(comparison: Comparison) [2]Method {
 	return switch (comparison) {
-		.kernels => .{ .knuth, .burnikel_ziegler },
-		.fallbacks => .{ .burnikel_ziegler, .burnikel_ziegler_chunk_fallback },
+		.kernels => .{ .knuth, .burnikel_ziegler_byte_fallback },
+		.fallbacks => .{ .burnikel_ziegler_byte_fallback, .burnikel_ziegler_chunk_fallback },
 		.cutoffs => .{ .burnikel_ziegler_chunk_fallback, .burnikel_ziegler_cutoff128 },
 	};
 }
 
 test "division comparison selects the intended algorithm pairs" {
-	const expected = [_][2]Method{ .{.knuth,.burnikel_ziegler}, .{.burnikel_ziegler,.burnikel_ziegler_chunk_fallback}, .{.burnikel_ziegler_chunk_fallback,.burnikel_ziegler_cutoff128} };
+	const expected = [_][2]Method{ .{.knuth,.burnikel_ziegler_byte_fallback}, .{.burnikel_ziegler_byte_fallback,.burnikel_ziegler_chunk_fallback}, .{.burnikel_ziegler_chunk_fallback,.burnikel_ziegler_cutoff128} };
 	for (std.enums.values(Comparison), expected) |comparison, methods| {
 		try std.testing.expectEqualSlices(Method, &methods, &comparisonMethods(comparison));
 	}
@@ -70,7 +70,7 @@ test "paired division batches cover each input equally and cancel linear drift" 
 	const Fake = struct {
 		position: usize = 0,
 		calls: [4]Method = undefined,
-		visits: [4][8]usize = @splat(@splat(0)),
+		visits: [5][8]usize = @splat(@splat(0)),
 		fn batch(self: *@This(), method: Method, start: usize, count: usize, repeats: usize) !Timing {
 			const index: usize = @intFromEnum(method);
 			for (start .. start + count) |i| self.visits[index][i] += repeats;
@@ -81,13 +81,13 @@ test "paired division batches cover each input equally and cancel linear drift" 
 		}
 	};
 	const orders = [_][4]Method{
-		.{.knuth,.burnikel_ziegler,.burnikel_ziegler,.knuth}, .{.burnikel_ziegler,.knuth,.knuth,.burnikel_ziegler},
-		.{.burnikel_ziegler,.burnikel_ziegler_chunk_fallback,.burnikel_ziegler_chunk_fallback,.burnikel_ziegler},
-		.{.burnikel_ziegler_chunk_fallback,.burnikel_ziegler,.burnikel_ziegler,.burnikel_ziegler_chunk_fallback},
+		.{.knuth,.burnikel_ziegler_byte_fallback,.burnikel_ziegler_byte_fallback,.knuth}, .{.burnikel_ziegler_byte_fallback,.knuth,.knuth,.burnikel_ziegler_byte_fallback},
+		.{.burnikel_ziegler_byte_fallback,.burnikel_ziegler_chunk_fallback,.burnikel_ziegler_chunk_fallback,.burnikel_ziegler_byte_fallback},
+		.{.burnikel_ziegler_chunk_fallback,.burnikel_ziegler_byte_fallback,.burnikel_ziegler_byte_fallback,.burnikel_ziegler_chunk_fallback},
 		.{.burnikel_ziegler_chunk_fallback,.burnikel_ziegler_cutoff128,.burnikel_ziegler_cutoff128,.burnikel_ziegler_chunk_fallback},
 		.{.burnikel_ziegler_cutoff128,.burnikel_ziegler_chunk_fallback,.burnikel_ziegler_chunk_fallback,.burnikel_ziegler_cutoff128},
 	};
-	const pairs = [_][2]Method{ .{.knuth,.burnikel_ziegler}, .{.burnikel_ziegler,.burnikel_ziegler_chunk_fallback}, .{.burnikel_ziegler_chunk_fallback,.burnikel_ziegler_cutoff128} };
+	const pairs = [_][2]Method{ .{.knuth,.burnikel_ziegler_byte_fallback}, .{.burnikel_ziegler_byte_fallback,.burnikel_ziegler_chunk_fallback}, .{.burnikel_ziegler_chunk_fallback,.burnikel_ziegler_cutoff128} };
 	const expected_cpu = [_][2]f64{ .{115,95}, .{95,75}, .{75,55} };
 	const expected_wall = [_][2]f64{ .{120,100}, .{100,80}, .{80,60} };
 	for (orders, 0..) |order, round| {
@@ -103,7 +103,7 @@ test "paired division batches cover each input equally and cancel linear drift" 
 		}
 	}
 	var state: Fake = .{};
-	const methods: [2]Method = .{.knuth,.burnikel_ziegler};
+	const methods: [2]Method = .{.knuth,.burnikel_ziegler_byte_fallback};
 	for ([_]usize{0,1,7}) |count| try std.testing.expectError(error.InvalidArguments, pairedSample(&state, Fake.batch, methods, count, 3, 0));
 	try std.testing.expectError(error.InvalidArguments, pairedSample(&state, Fake.batch, methods, 8, 0, 0));
 	const Failure = struct {
@@ -261,8 +261,8 @@ const Fixture = struct {
 				const got = try tier3.divModKnuthU64Bytes(case.dividend, case.dividend.len, case.divisor, case.divisor.len, q, r, self.scratch.allocator());
 				break :blk .{ got.q_len, got.r_len };
 			},
-			.burnikel_ziegler => blk: {
-				const got = try tier3.divModBurnikelZiegler(case.dividend, case.dividend.len, case.divisor, case.divisor.len, q, r, self.scratch.allocator());
+			.burnikel_ziegler_byte_fallback => blk: {
+				const got = try tier3.divModBurnikelZieglerByteFallback(case.dividend, case.dividend.len, case.divisor, case.divisor.len, q, r, self.scratch.allocator());
 				break :blk .{ got.q_len, got.r_len };
 			},
 			.burnikel_ziegler_chunk_fallback => blk: {
@@ -271,6 +271,10 @@ const Fixture = struct {
 			},
 			.burnikel_ziegler_cutoff128 => blk: {
 				const got = try tier3.divModBurnikelZieglerCutoff128(case.dividend, case.dividend.len, case.divisor, case.divisor.len, q, r, self.scratch.allocator());
+				break :blk .{ got.q_len, got.r_len };
+			},
+			.production => blk: {
+				const got = try tier3.divModBurnikelZiegler(case.dividend, case.dividend.len, case.divisor, case.divisor.len, q, r, self.scratch.allocator());
 				break :blk .{ got.q_len, got.r_len };
 			},
 		};

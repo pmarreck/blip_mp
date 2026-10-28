@@ -2271,9 +2271,15 @@ pub fn divModBurnikelZieglerCutoff128(u: []const u8, u_len: usize, v: []const u8
 	return .{ .q_len = got.q_len, .r_len = got.r_len };
 }
 
-/// Experimental top-level fallback selection; recursion is unchanged.
+/// Explicit chunk-reading fallback control; recursion is unchanged.
 pub fn divModBurnikelZieglerChunkFallback(u: []const u8, u_len: usize, v: []const u8, v_len: usize, q: []u8, r: []u8, allocator: std.mem.Allocator) std.mem.Allocator.Error!struct { q_len: usize, r_len: usize } {
 	const got = try divModBurnikelZieglerImpl(true, BZ_RECURSE_THRESHOLD, u, u_len, v, v_len, q, r, allocator);
+	return .{ .q_len = got.q_len, .r_len = got.r_len };
+}
+
+/// Historical byte fallback retained for paired measurements.
+pub fn divModBurnikelZieglerByteFallback(u: []const u8, u_len: usize, v: []const u8, v_len: usize, q: []u8, r: []u8, allocator: std.mem.Allocator) std.mem.Allocator.Error!struct { q_len: usize, r_len: usize } {
+	const got = try divModBurnikelZieglerImpl(false, BZ_RECURSE_THRESHOLD, u, u_len, v, v_len, q, r, allocator);
 	return .{ .q_len = got.q_len, .r_len = got.r_len };
 }
 
@@ -2283,8 +2289,8 @@ pub fn divModBurnikelZieglerChunkFallback(u: []const u8, u_len: usize, v: []cons
 /// runs the B-Z algorithm: normalize the divisor so its top bit is set,
 /// shift the dividend identically, pad the dividend to a multiple of n,
 /// then iterate top-block-to-bottom calling bzDiv2nByN with the carried
-/// remainder of the previous block. Otherwise delegates to byte-direct
-/// Knuth D.
+/// remainder of the previous block. Otherwise uses chunk-reading Knuth for
+/// divisors above eight bytes and byte Knuth for smaller divisors.
 ///
 /// Preconditions:
 ///   - v_len >= 1, v[v_len-1] != 0 (canonical divisor magnitude).
@@ -2299,7 +2305,7 @@ pub fn divModBurnikelZiegler(
 	r_out: []u8,
 	allocator: std.mem.Allocator,
 ) std.mem.Allocator.Error!struct { q_len: usize, r_len: usize } {
-	const got = try divModBurnikelZieglerImpl(false, BZ_RECURSE_THRESHOLD, u, u_len_in, v, v_len, q_out, r_out, allocator);
+	const got = try divModBurnikelZieglerImpl(true, BZ_RECURSE_THRESHOLD, u, u_len_in, v, v_len, q_out, r_out, allocator);
 	return .{ .q_len = got.q_len, .r_len = got.r_len };
 }
 
@@ -6310,7 +6316,7 @@ test "divModBurnikelZiegler: exact one-byte remainder capacity" {
 			const expected_r = dividend % divisor;
 			const expected_q_len: usize = if (expected_q > 255) 2 else if (expected_q != 0) 1 else 0;
 			const expected_r_len: usize = if (expected_r != 0) 1 else 0;
-			inline for (.{ divModBurnikelZiegler, divModBurnikelZieglerChunkFallback, divModBurnikelZieglerCutoff128 }) |divide| {
+			inline for (.{ divModBurnikelZiegler, divModBurnikelZieglerByteFallback, divModBurnikelZieglerChunkFallback, divModBurnikelZieglerCutoff128 }) |divide| {
 				var q = [_]u8{0xa5} ** 4;
 				var r = [_]u8{0xa5} ** 3;
 				const got = try divide(&u, u.len, &v, v.len, q[1..3], r[1..2], std.testing.allocator);

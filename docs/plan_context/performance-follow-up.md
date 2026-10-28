@@ -483,8 +483,8 @@ Neither campaign establishes a benefit from changing the recursive cutoff.
 The explicit `divModBurnikelZieglerChunkFallback` variant replaces only the
 top-level small/odd-divisor fallback with the existing `divModBZLeaf` dispatcher.
 That leaf already uses chunk-reading Knuth above eight divisor bytes and
-byte-Knuth at smaller widths. The recursive calls, cutoff and default entry
-point remain unchanged. The shared GMP fixture tests failed against an empty
+byte-Knuth at smaller widths. The initial experiment kept the recursive calls,
+cutoff and default entry point unchanged. The shared GMP fixture tests failed against an empty
 candidate before passing with the reused leaf, including allocation failures.
 
 Run `./bm --verified-division --config profiling-division-fallback.json` for a
@@ -492,12 +492,53 @@ paired old/new comparison on the boundary corpus. The 64/128-byte recursive
 rows serve as unchanged algorithm controls. The `division-paired-fallbacks-v1`
 mode retains the same fixtures, workload counts, allocation coverage and
 mirrored timing as the baseline. Pair-selection and equal-coverage tests cover
-both comparisons; warmup visits only the selected pair. No production fallback
-change follows until measurements support it.
+both comparisons; warmup visits only the selected pair.
 
 The complete native suite passed in 96 seconds of mixed Nix preparation/check
 time. The production/probe build and all-system flake evaluation also passed.
 This duration includes compilation and is not a test-execution measurement.
+
+### Fallback result and selection
+
+Campaign `blip-mp-division-fallback-20261028T101244Z` measured commit
+`0642c6e49b4e94207a2b65b5042f12d7d39b274e`. Its source hash stayed
+`2bc2c82afffd422fd1f14a85900716b2b0e878346031d93b0655f6ec5e02953c`.
+All 15 processes verified their complete quotient/remainder results. The
+one-CPU cohort was `UNBASELINED` after one attempt; the 12-CPU cohort remained
+`INCONCLUSIVE` after its one permitted variation retry. No baseline was approved.
+Shared admission delayed execution by more than ten minutes; that wait is
+excluded from the samples.
+
+| Divisor bytes | Path | Chunk/byte paired CPU median, 1 CPU | Chunk/byte paired CPU median, 12 CPUs |
+|---:|---|---:|---:|
+| 31 | Fallback | 0.161 | 0.161 |
+| 32 | Fallback | 0.159 | 0.162 |
+| 63 | Fallback | 0.086 | 0.086 |
+| 64 | Unchanged recursion | 1.000 | 0.999 |
+| 65 | Fallback | 0.089 | 0.088 |
+| 127 | Fallback | 0.053 | 0.053 |
+| 128 | Unchanged recursion | 0.998 | 0.998 |
+| 129 | Fallback | 0.054 | 0.054 |
+
+These are medians of 25 paired sample ratios from each selected attempt. Every
+fallback process mean, including the diagnostic attempt, favored chunk reading.
+The sampled fallback gains are about 6–19×, while unchanged recursive medians
+stay within 0.2% of parity. Individual control process ratios ranged from about
+0.969 to 1.058. The [summary](../benchmarks/storage-aware/division-fallback-summary.json)
+retains all process ratios, selected CPU/wall components and cohort verdicts.
+
+The default B-Z entry point now reuses the chunk-reading leaf for its fallback.
+The old byte fallback remains explicit as `divModBurnikelZieglerByteFallback`,
+and the paired probe labels it `burnikel_ziegler_byte_fallback` so later runs
+keep a fixed control. GMP and allocation checks also exercise the default
+entry point. The four-byte recursive cutoff and the public B-Z integration
+threshold remain unchanged. This is a magnitude-kernel improvement; it neither
+times GMP nor establishes a public signed-division speedup at the sampled sizes.
+
+After selection, the complete native suite passed in 93 seconds of mixed Nix
+preparation/check time. The production/probe build and all-system evaluation
+also passed. The corpus now checks the default and all explicit B-Z variants,
+including the exact-capacity remainder regression.
 
 ### Recursive cutoff experiment
 

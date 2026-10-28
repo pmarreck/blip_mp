@@ -60,8 +60,10 @@ mixed, immediate and promoted results with separate CPU-affinity cohorts and
 external measurement history. Its checksum overhead makes it a new measurement
 method; it does not replace the historical benchmark numbers above.
 
-`./bm --verified-inverse` measures Lehmer, wider HGCD, recursive HGCD and Stein
-on the historical fixed fixtures. Every result is checked against GMP; CPU and
+`./bm --verified-inverse` measures Lehmer, wider HGCD, the recursive entry point
+and Stein on historical fixed fixtures. The recursive entry falls back at every
+allowed fixture size; the probe reports significant modulus widths explicitly.
+Every result is checked against GMP; CPU and
 wall samples include that comparison. See the [measurement notes](docs/plan_context/performance-follow-up.md#unit-latency-and-inverse-probe)
 for scope and retained correctness coverage.
 
@@ -69,6 +71,12 @@ for scope and retained correctness coverage.
 GMP quotient/remainder checks. Repeated timing work runs outside the unit suite;
 its [probe checks and method](docs/plan_context/performance-follow-up.md#division-probes)
 remain part of `./test`.
+The [paired fallback experiment](docs/plan_context/performance-follow-up.md#fallback-result-and-selection)
+measured about 6–19× faster B-Z fallback calls at the sampled small and odd
+divisor widths by reusing chunk-reading Knuth. The default fallback now uses
+that leaf. Recursive controls stayed near parity; the cohorts remain unbaselined
+or inconclusive. These kernel measurements do not time GMP or establish a public
+division speedup.
 
 `./bm --verified-powm` measures public modular exponentiation on the retained
 512–3072-bit workloads, with every result checked against GMP. Its
