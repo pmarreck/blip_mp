@@ -1236,6 +1236,53 @@ fast-feedback target or isolate test execution from compilation. The fresh
 measurement still includes each method's native result-verification adapter;
 it will not be reported as an instruction-only arithmetic comparison.
 
+### Selected-kernel GMP results
+
+Campaign `blip-mp-division-selected-competitors-20261028T192923Z` measured
+clean commit `3319ea430337347ef0b3bb033849586e179c9813` with ordinary GMP
+6.3.0 and Zig 0.16.0 ReleaseFast on Linux x86_64, on the same Threadripper
+3990X. Both affinity cohorts were `UNBASELINED` on their first attempt; all
+ten processes verified every result, and no baseline was approved. The source
+digest stayed `9f8ec454147268d03cf8f418042c468163e6e9745d3bcffc109a74b84ae773f8`.
+The probe SHA-256 was
+`d336fca230205a8972bb367cf431afa0ea0fe60dabe1ad17bf6e8d3483822410`.
+
+Cells show median paired CPU ratios for **1-CPU / 12-CPU affinity**, with
+forty samples per cell. Divisor widths are magnitude bytes; dividends have
+twice that width. The retained native verification adapters are included in
+timing. This is a direct measurement of verified calls, not a projection from
+the preceding BLIP-only gains.
+
+| Divisor bytes | Public BLIP / GMP | Selected B-Z / GMP | Selected B-Z / Knuth |
+|---:|---:|---:|---:|
+| 8 | 2.04 / 2.04 | 7.98 / 7.93 | 4.13 / 4.15 |
+| 16 | 2.93 / 2.93 | 3.88 / 3.88 | 1.11 / 1.11 |
+| 32 | 2.30 / 2.31 | 3.02 / 3.03 | 1.06 / 1.06 |
+| 64 | 2.48 / 2.48 | 10.17 / 10.25 | 3.37 / 3.37 |
+| 128 | 2.65 / 2.65 | 11.79 / 11.86 | 3.68 / 3.71 |
+| 256 | 2.33 / 2.33 | 9.22 / 9.25 | 3.45 / 3.46 |
+| 512 | 2.55 / 2.55 | 7.60 / 7.60 | 2.73 / 2.74 |
+| 1,024 | 3.08 / 3.06 | 6.35 / 6.33 | 1.97 / 1.96 |
+| 2,048 | 3.96 / 3.95 | 5.54 / 5.53 | 1.36 / 1.36 |
+| 4,096 | 5.26 / 5.22 | 5.30 / 5.25 | 0.994 / 0.994 |
+| 8,192 | 7.13 / 7.10 | 5.13 / 5.12 | 0.714 / 0.714 |
+| 16,384 | 11.21 / 11.20 | 5.74 / 5.74 | 0.510 / 0.510 |
+
+GMP wins every process-mean comparison against public BLIP, Knuth and selected
+B-Z at every sampled width. The selected B-Z kernel saves about 29% and 49%
+against Knuth at 8,192 and 16,384 bytes. All process means agree with those
+directions; their ratios span 0.710–0.744 and 0.509–0.554, respectively. At
+4,096 bytes the methods are near parity, not a supported large gain. One
+representative selected single-CPU process at 16,384 bytes spends 6.326 ms in
+public BLIP, 6.347 ms in Knuth, 3.237 ms in selected B-Z and 0.564 ms in GMP.
+
+The [complete summary](../benchmarks/storage-aware/division-selected-competitors-summary.json)
+retains raw-sample ratio ranges, every process mean, selected component times
+and verdicts. Public dispatch remains unchanged: the balanced power-of-two
+cases do not resolve the short-quotient cliff or unfavorable divisor alignment.
+The original matched comparison remains historical evidence for its fixed
+cutoff-128 kernel; these current results supersede its headline ratios.
+
 ### Exact-capacity remainder regression
 
 Reviewing the B-Z entry point exposed a separate single-byte-divisor bug. With

@@ -52,14 +52,14 @@ Silicon and Zen 4 measurements remain historical records; they are not results
 for this revision. GMP without assembly is a separate comparison and does not
 by itself isolate BLIP's storage costs from algorithm or compiler differences.
 
-The October 28 [matched division comparison](docs/plan_context/performance-follow-up.md#matched-division-results-october-28-2026)
-finds public BLIP division taking 1.8–11.1× ordinary GMP's CPU time across
+The latest October 28 [matched division comparison](docs/plan_context/performance-follow-up.md#selected-kernel-gmp-results)
+finds public BLIP division taking 2.0–11.2× ordinary GMP's CPU time across
 8–16,384-byte divisors with dividends twice as wide. The earlier 6–19× fallback
 speedups and 78–94% recursive CPU savings compare against older BLIP kernels.
-Improved Burnikel–Ziegler division beats our Knuth kernel by about 23% at the
-16,384-byte divisor point, but still takes 8.5–8.6× GMP's time. Public dispatch
-is unchanged. All results were verified; the single-CPU cohort is unbaselined,
-and the 12-CPU affinity cohort remains inconclusive after one variation retry.
+The selected Burnikel–Ziegler kernel saves about 29% and 49% versus our Knuth
+kernel at 8,192- and 16,384-byte divisors, respectively, but still takes about
+5.12× and 5.74× GMP's time. Public dispatch is unchanged. All ten processes
+verified their results; both affinity cohorts remain unbaselined, without retries.
 
 A separate [signed public-path comparison](docs/plan_context/performance-follow-up.md#signed-public-division-results-october-28-2026)
 finds B-Z saving 21–28% CPU time at 12,288/16,384-byte divisors with twice-width
