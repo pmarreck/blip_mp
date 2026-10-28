@@ -52,7 +52,7 @@ Silicon and Zen 4 measurements remain historical records; they are not results
 for this revision. GMP without assembly is a separate comparison and does not
 by itself isolate BLIP's storage costs from algorithm or compiler differences.
 
-The latest October 28 [matched division comparison](docs/plan_context/performance-follow-up.md#gmp-refresh-after-bounded-quotient-selection)
+The October 28 [broad matched division comparison](docs/plan_context/performance-follow-up.md#gmp-refresh-after-bounded-quotient-selection)
 finds public BLIP division taking 2.2–11.2× ordinary GMP's CPU time across
 8–16,384-byte divisors with dividends twice as wide. The earlier 6–19× fallback
 speedups and 78–94% recursive CPU savings compare against older BLIP kernels.
@@ -61,6 +61,13 @@ kernel at 8,192- and 16,384-byte divisors, respectively, but still takes about
 5.10–5.13× and 5.74–5.76× GMP's time. Public dispatch is unchanged. All fifteen
 processes verified their results; the one-CPU cohort is unbaselined and the
 12-CPU cohort remains inconclusive after its permitted variation retry.
+
+The later [guarded-padding comparison](docs/plan_context/performance-follow-up.md#guarded-direct-gmp-results)
+samples six 6,145–16,385-byte divisors. Public BLIP takes 6.2–11.2× GMP's CPU
+time; the experimental guarded kernel takes 4.9–5.8×. At 16,385 bytes the
+guarded kernel halves the fixed BLIP kernel's time, but still takes 5.8× GMP's.
+All 15 processes are correct and both cohorts are unbaselined. The public
+threshold remains unchanged, and the guarded kernel remains experimental.
 
 A separate [signed public-path comparison](docs/plan_context/performance-follow-up.md#signed-public-division-results-october-28-2026)
 finds B-Z saving 21–28% CPU time at 12,288/16,384-byte divisors with twice-width

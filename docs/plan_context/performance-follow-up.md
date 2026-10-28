@@ -1973,6 +1973,79 @@ and execution. The production build and all-system evaluation passed. This
 qualifies the measurement method; it does not establish execution-only test
 latency or a new performance result.
 
+### Guarded direct GMP results
+
+GMP remains faster in the direct guarded-padding comparison. At the six
+sampled divisor widths, public BLIP takes 6.2–11.2 times GMP's CPU time and
+the experimental guarded byte kernel takes 4.9–5.8 times GMP's time. The
+large local improvements therefore do not establish a division win over GMP.
+
+| Divisor bytes | Public / GMP CPU | Fixed B-Z / GMP CPU | Guarded B-Z / GMP CPU | Guarded / fixed CPU |
+|---:|---:|---:|---:|---:|
+| 6,145 | 6.23 / 6.27 | 6.28 / 6.32 | 5.27 / 5.30 | 0.838 / 0.838 |
+| 8,192 | 7.10 / 7.14 | 4.91 / 4.93 | 4.91 / 4.92 | 1.000 / 0.998 |
+| 8,194 | 7.07 / 7.10 | 5.05 / 5.06 | 5.05 / 5.07 | 0.999 / 1.001 |
+| 12,290 | 8.89 / 8.90 | 5.77 / 5.77 | 5.28 / 5.30 | 0.916 / 0.918 |
+| 16,384 | 11.17 / 11.22 | 5.44 / 5.45 | 5.44 / 5.45 | 1.000 / 0.999 |
+| 16,385 | 11.17 / 11.19 | 11.22 / 11.22 | 5.81 / 5.82 | 0.518 / 0.519 |
+
+Cells give paired medians for 1-CPU / 12-CPU affinity cohorts. Dividends are
+twice the divisor's magnitude byte width. At 6,145 bytes the guarded kernel
+saves about 16% against the fixed B-Z control; at 16,385 bytes it saves 48%.
+Every process mean favors the guard in those two widths. The 12,290-byte
+case saves about 8% at the median, but one diagnostic process takes 3.8%
+more CPU than the fixed control. The aligned and excluded widths remain
+near parity between the two kernels. Their differences from earlier GMP
+ratios are not attributed to padding, which those widths do not select.
+
+The public path is still unchanged. Kernel-to-public ratios include different
+allocation and verification adapters and cannot by themselves establish a
+public dispatch crossover. The separate signed-wrapper campaign also found
+only 1–2% median savings at 12,290 bytes. Keep the guard experimental; no
+public threshold or historical baseline is selected from these results.
+
+Campaign `blip-mp-guard-gmp-20261028T223257Z` measured commit
+`7182b6ce897590ab0b5e741cf1997158214561ca` using
+`profiling-division-guarded-competitors.json`. All 15 processes verified their
+results, including the single permitted five-process retry of the 1-CPU case.
+Both cohorts are unbaselined. The
+[summary](../benchmarks/storage-aware/division-guarded-competitors-summary.json)
+preserves all process-mean ratios and selected paired-sample ranges.
+
+The platform was Linux x86_64 / Threadripper 3990X with Zig 0.16.0 ReleaseFast
+and ordinary GMP 6.3.0. Source digest
+`46868c8f77e7ec4c03c2ae6cc1f85d0361f1e97e6b319ed59339d695e7ac1fa7`
+remained unchanged; probe SHA-256 was
+`05662d3f475a8465e25c1da7412e33e7f7f8c4a5a5420d43465e67cbeb940866`.
+Exact-commit CI passed in 201 seconds after about four minutes in the queue.
+
+### Small divisor follow-up
+
+The next bounded experiment concerns a large byte payload divided by a
+register-sized value. The existing `divModSingleU64` walks 8-byte chunks and
+handles a high partial chunk byte by byte. In the ReleaseFast x86_64 binary
+used for the guarded GMP campaign, both loops call `__udivti3` once per step.
+The compiler derives the remainder with a multiply and subtraction; it already
+combines the source division and remainder operations. This is code-generation
+evidence, not yet a profile attributing total public-call time to that helper.
+
+`invertChunk` and `div2by1` already implement a reciprocal-assisted primitive
+elsewhere in the library. Test whether its one-time normalization and reciprocal
+cost can be amortized across a long payload. A separate native division for the
+leading partial chunk is another candidate. Neither technique is claimed new.
+Both can keep stored arbitrary-precision values in bytes and use register-local
+operands without introducing a limb array.
+
+First qualify an identical-input probe with variable divisors, full GMP
+quotient/remainder checks and aligned/unaligned dividend lengths. The historical
+`single_byte` and `single_chunk` cases use different constant divisors, 101 and
+65,537, so their timings cannot isolate this proposed change. Retain the current
+kernel as a fixed control, measure setup costs and short-input regressions, and
+check the signed public path before selecting a dispatch rule. The loop's
+remainder dependency limits straightforward SIMD across chunks of one division;
+batch throughput is a separate workload. No small-divisor implementation change
+has been made in this report.
+
 ### Tiny division clock follow-up
 
 The first complete guarded-padding suite failed on a non-advancing process CPU
