@@ -1788,6 +1788,37 @@ remained unchanged; the probe SHA-256 was
 Exact-commit CI passed in 227 seconds. The single-threaded kernels do not
 become parallel merely because a cohort permits 12 CPUs.
 
+### Padding shape follow-up
+
+The next experiment tests a more specific explanation for the mixed results:
+padding may help when the unpadded recursion reaches a large odd leaf and the
+dividend is sufficiently longer than the divisor. This is a hypothesis, not a
+selected rule. `profiling-division-padding-shape.json` samples divisor widths
+around 6,144, 8,192, 12,288 and 16,384 bytes, including odd neighbors and even
+neighbors whose first halving reaches an odd width. Its gap axis is one
+quarter, one half, one and three times the divisor width, rounding down the
+first two. The longest inputs therefore have four times the divisor's width.
+
+The new `padding-shape` mode retains the fixed `quotient_1024` and `padded`
+components, full GMP references, 32 cases and six paired samples. It declares
+`division-padding-shape-paired-v1` separately. Five fresh processes run in each
+1-CPU and 12-CPU cohort. Arithmetic and dispatch are unchanged. This campaign
+also does not time GMP.
+
+Failing-first checks classify the complete accepted width and relative-gap
+domains and verify long quotients against GMP, including corruption rejection.
+The long-quotient check exposed the fixture's historical two-divisor-width
+output capacity. Its allocation now grows when that capacity cannot hold the
+quotient, while old workloads retain their original capacity and timed output
+poisoning cost. The CLI check first failed on the missing mode, then checks the
+full metadata and component-sample normalization at a small and a new large
+width. These controls remain part of the complete test entry point.
+
+The expanded probe passed the full suite in 87 seconds of mixed Nix
+preparation/check time, plus the production build and all-system evaluation.
+The focused probe's combined compilation/execution phase took 36 seconds.
+These durations do not isolate test execution or establish its latency budget.
+
 ### Exact-capacity remainder regression
 
 Reviewing the B-Z entry point exposed a separate single-byte-divisor bug. With

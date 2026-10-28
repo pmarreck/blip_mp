@@ -429,6 +429,23 @@
 									all(range(6); . as $i | (($row.samples.cpu_ns[$i] - ([$row.components[].cpu_ns[$i]]|add/2))|fabs)<0.001 and (($row.samples.wall_ns[$i] - ([$row.components[].wall_ns[$i]]|add/2))|fabs)<0.001))
 							' padding.json > /dev/null
 						done
+						for width in 64 6145; do
+							gaps="$((width/4)),$((width/2)),$width,$((3*width))"
+							if ! ${self.packages.${system}.division-probe}/bin/blip-mp-division-probe padding-shape "$width" "$gaps" > shape.json 2> stderr; then
+								echo "division padding-shape probe failed at width $width" >&2
+								cat stderr >&2
+								exit 1
+							fi
+							test ! -s stderr
+							jq -e --argjson width "$width" --arg gaps "$gaps" '
+								.correct == true and .method == "division-padding-shape-paired-v1" and .divisor_bytes == $width and
+								[.rows[].size] == ($gaps|split(",")|map(tonumber)) and all(.rows[]; . as $row |
+									.dividend_bytes == $width+.size and .fixture_count == 32 and .iterations == (if $width <=128 then 512 else 32 end) and .warmup_cases == 64 and
+									[.components[].method] == ["quotient_1024","padded"] and
+									all(.components[]; (.cpu_ns|length)==6 and (.wall_ns|length)==6 and all(.cpu_ns[],.wall_ns[]; .>0)) and
+									all(range(6); . as $i | (($row.samples.cpu_ns[$i] - ([$row.components[].cpu_ns[$i]]|add/2))|fabs)<0.001 and (($row.samples.wall_ns[$i] - ([$row.components[].wall_ns[$i]]|add/2))|fabs)<0.001))
+							' shape.json > /dev/null
+						done
 						mkdir -p "$out"
 					'';
 

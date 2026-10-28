@@ -410,7 +410,7 @@ pub const Fixture = struct {
 		return initSized(parent,width,count,2*width);
 	}
 	pub fn initSized(parent: std.mem.Allocator, width: usize, count: usize, dividend_len: usize) !Fixture {
-		const neighbors = [_]usize{4094,4095,4097,4098,8191,8193,8194,16383,16385,16386};
+		const neighbors = [_]usize{4094,4095,4097,4098,6143,6144,6145,6146,8191,8193,8194,12287,12288,12289,12290,16383,16385,16386};
 		if ((std.mem.indexOfScalar(usize,&widths,width) == null and std.mem.indexOfScalar(usize,&neighbors,width) == null) or count == 0 or count > 64) return error.InvalidArguments;
 		var arena = std.heap.ArenaAllocator.init(parent);
 		errdefer arena.deinit();
@@ -422,7 +422,9 @@ pub const Fixture = struct {
 			case.* = try Case.initSized(allocator,parent,width,index,dividend_len);
 			initialized += 1;
 		}
-		const quotient = try allocator.alloc(u8,2*width+2);
+		// Preserve the historical buffer size for existing corpora. Long
+		// dividends need enough capacity for their full quotient plus canaries.
+		const quotient = try allocator.alloc(u8,@max(2*width,(dividend_len -| width)+1)+2);
 		const remainder = try allocator.alloc(u8,width+2);
 		var gq: gmp.Z = undefined; gmp.__gmpz_init(&gq);
 		var gr: gmp.Z = undefined; gmp.__gmpz_init(&gr);
