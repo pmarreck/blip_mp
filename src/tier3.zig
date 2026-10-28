@@ -2326,14 +2326,8 @@ fn divModBurnikelZieglerImpl(
 		@memcpy(u_scratch, u[0..u_len]);
 		const out = divModSingleU64(u_scratch, u_len, divisor);
 		@memcpy(q_out[0..out.q_len], u_scratch[0..out.q_len]);
-		var rem = out.rem;
-		var i: usize = 0;
-		while (rem != 0) : (i += 1) {
-			r_out[i] = @truncate(rem);
-			rem >>= 8;
-			if (i + 1 >= r_out.len) break;
-		}
-		return .{ .q_len = out.q_len, .r_len = i };
+		if (out.rem != 0) r_out[0] = @intCast(out.rem);
+		return .{ .q_len = out.q_len, .r_len = @intFromBool(out.rem != 0) };
 	}
 
 	// u < v → q=0 (q_len = 0), r=u.
@@ -6305,6 +6299,30 @@ test "divModBurnikelZiegler: single-byte divisor degenerate case (256 / 3)" {
 	try testing.expectEqual(@as(u8, 85), q[0]);
 	try testing.expectEqual(@as(usize, 1), got.r_len);
 	try testing.expectEqual(@as(u8, 1), r[0]);
+}
+
+test "divModBurnikelZiegler: exact one-byte remainder capacity" {
+	for ([_]u16{ 0, 1, 2, 254, 255, 256, 257, 65535 }) |dividend| {
+		for ([_]u8{ 1, 2, 3, 127, 128, 254, 255 }) |divisor| {
+			const u = [_]u8{ @truncate(dividend), @truncate(dividend >> 8) };
+			const v = [_]u8{divisor};
+			const expected_q = dividend / divisor;
+			const expected_r = dividend % divisor;
+			const expected_q_len: usize = if (expected_q > 255) 2 else if (expected_q != 0) 1 else 0;
+			const expected_r_len: usize = if (expected_r != 0) 1 else 0;
+			inline for (.{ divModBurnikelZiegler, divModBurnikelZieglerChunkFallback, divModBurnikelZieglerCutoff128 }) |divide| {
+				var q = [_]u8{0xa5} ** 4;
+				var r = [_]u8{0xa5} ** 3;
+				const got = try divide(&u, u.len, &v, v.len, q[1..3], r[1..2], std.testing.allocator);
+				try testing.expectEqual(expected_q_len, got.q_len);
+				try testing.expectEqual(expected_r_len, got.r_len);
+				if (got.q_len > 0) try testing.expectEqual(@as(u8, @truncate(expected_q)), q[1]);
+				if (got.q_len > 1) try testing.expectEqual(@as(u8, @truncate(expected_q >> 8)), q[2]);
+				if (got.r_len > 0) try testing.expectEqual(@as(u8, @intCast(expected_r)), r[1]);
+				try testing.expectEqualSlices(u8, &.{0xa5,0xa5,0xa5,0xa5}, &.{q[0],q[3],r[0],r[2]});
+			}
+		}
+	}
 }
 
 test "divModBurnikelZiegler: cross-check vs divModKnuth on 200 random pairs" {

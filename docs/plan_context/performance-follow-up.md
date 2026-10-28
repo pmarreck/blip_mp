@@ -504,6 +504,24 @@ The production cutoff remains four bytes until measurements support a change.
 The complete native suite passed in 91 seconds of mixed Nix preparation/check
 time. The production/probe build and all-system evaluation passed as well.
 
+### Exact-capacity remainder regression
+
+Reviewing the B-Z entry point exposed a separate single-byte-divisor bug. With
+exactly one byte of remainder capacity, a nonzero remainder was stored but its
+reported length was zero: the capacity guard broke before incrementing the
+length. Existing tests supplied extra remainder capacity and missed this case.
+
+A native-arithmetic oracle now covers eight dividend boundaries and seven
+nonzero byte divisors for all three B-Z variants, with exact remainder capacity
+and output canaries. It failed with `expected 1, found 0` before the fix. Since
+division by a byte leaves a remainder smaller than 256, the implementation now
+writes that byte directly and derives its length from whether it is nonzero.
+This branch is shared by the variants but is outside the paired performance
+corpus, whose divisors are at least eight bytes.
+
+The complete native suite passed in 91 seconds of mixed Nix preparation/check
+time after the fix. Production/probe builds and all-system evaluation passed.
+
 ## CRT correctness-reference cost
 
 At commit `43c296f`, a fresh diagnostic run split the 100-case CRT fuzz test
