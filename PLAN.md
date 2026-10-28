@@ -4,11 +4,11 @@ Purpose: [INTENT.md](INTENT.md). The [legacy roadmap](docs/plan_context/legacy-r
 
 ## Current bounded milestone
 
-- [x] Measure current variable-small-divisor division against GMP; Answer: unsigned byte kernel takes 0.67–0.95× GMP CPU at 8/9-byte dividends and 3.21–3.43× at 4,096 bytes; all 50 processes correct, seven cohorts unbaselined and one inconclusive (context: docs/plan_context/performance-follow-up.md#variable-small-divisor-results; done 2026-10-28 19:21 EDT; this commit).
 - [x] Qualify an experimental reciprocal small-divisor kernel and paired fixed-control probe; failing-first native-oracle, GMP, corruption, allocation and CLI controls pass, plus full suite, build and evaluation; assembly confirms division removed from the inner loop (context: docs/plan_context/performance-follow-up.md#reciprocal-small-divisor-qualification; done 2026-10-28 19:30 EDT; this commit).
 - [x] Measure reciprocal reuse against the fixed small-divisor kernel; Answer: 20–27% CPU savings at 64-byte dividends and 51–52% at 4,096 bytes, with short-input regressions; 65 correct processes, six cohorts unbaselined and two inconclusive, public dispatch unchanged (context: docs/plan_context/performance-follow-up.md#reciprocal-small-divisor-results; done 2026-10-28 19:35 EDT; this commit).
 - [x] Qualify the experimental signed reciprocal entry with the 64-byte magnitude guard; failing-first sign, zero, promotion, classifier, native/GMP, alias and allocation-failure checks pass, plus the complete suite, build and evaluation (context: docs/plan_context/performance-follow-up.md#signed-reciprocal-qualification; done 2026-10-28 19:47 EDT; this commit).
-- [ ] Add and measure paired signed reciprocal/public and reciprocal/GMP probes before any public selection (context: docs/plan_context/performance-follow-up.md#signed-reciprocal-qualification).
+- [x] Qualify paired signed reciprocal/public and reciprocal/GMP probes; parser and CLI fail before implementation, matching BLIP call boundaries confirmed in assembly, full suite/build/evaluation pass (context: docs/plan_context/performance-follow-up.md#signed-reciprocal-timing-probe; done 2026-10-28 19:56 EDT; this commit).
+- [ ] Measure signed reciprocal/public and reciprocal/GMP probes, then verify any proposed public selection through its actual consumer path (context: docs/plan_context/performance-follow-up.md#signed-reciprocal-timing-probe).
 - [ ] Narrow Nix artifact source closures and separate compilation from test-execution timing after the current arithmetic experiment; preserve complete required coverage and isolated controls (context: docs/plan_context/performance-follow-up.md#build-feedback-follow-up).
 
 ## Follow-up and existing backlog

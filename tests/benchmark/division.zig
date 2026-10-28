@@ -26,6 +26,7 @@ pub fn main(init: std.process.Init) !void {
 	const args = try init.minimal.args.toSlice(init.arena.allocator());
 	if (args.len > 1 and std.mem.eql(u8,args[1],"single-variable")) return @import("division_single.zig").run(init,args[2..]);
 	if (args.len > 1 and std.mem.eql(u8,args[1],"single-reciprocal")) return @import("division_single.zig").runReciprocal(init,args[2..]);
+	if (args.len > 1 and std.mem.eql(u8,args[1],"single-signed")) return @import("division_single_signed.zig").run(init,args[2..]);
 	if (args.len > 1 and std.mem.eql(u8,args[1],"public")) return @import("division_public.zig").run(init,args[2..]);
 	if (args.len > 1 and std.mem.eql(u8,args[1],"selected-public")) return @import("division_public.zig").runSelected(init,args[2..]);
 	if (args.len > 1 and std.mem.eql(u8,args[1],"leading")) return @import("division_public.zig").runLeading(init,args[2..]);

@@ -5,6 +5,100 @@ const Mp = blip.Mp;
 const gmp = @import("gmp.zig");
 const Base = @import("division_single.zig").Pool;
 const Method = enum { current, reciprocal, gmp };
+const widths = [_]usize{8,9,16,17,63,64,65,256,257,1024,1025,4096,4097};
+const Comparison = enum { public, gmp };
+const Options = struct { comparison: Comparison, divisor_bytes: usize, sizes: [widths.len]usize, count: usize };
+
+fn parse(args: []const []const u8) !Options {
+	if (args.len!=3) return error.InvalidArguments;
+	const comparison = std.meta.stringToEnum(Comparison,args[0]) orelse return error.InvalidArguments;
+	const divisor = std.fmt.parseInt(usize,args[1],10) catch return error.InvalidArguments;
+	if (std.mem.indexOfScalar(usize,&.{1,2,4,8},divisor)==null) return error.InvalidArguments;
+	var options: Options = .{.comparison=comparison,.divisor_bytes=divisor,.sizes=undefined,.count=0};
+	var parts = std.mem.splitScalar(u8,args[2],',');
+	while (parts.next()) |part| {
+		const width = std.fmt.parseInt(usize,part,10) catch return error.InvalidArguments;
+		if (std.mem.indexOfScalar(usize,&widths,width)==null or options.count==widths.len) return error.InvalidArguments;
+		if (options.count>0 and width<=options.sizes[options.count-1]) return error.InvalidArguments;
+		options.sizes[options.count]=width; options.count+=1;
+	}
+	return options;
+}
+
+fn nativeBatch(pool: *Pool, method: Method, start: usize, count: usize, repeats: usize) !struct { cpu_ns: f64, wall_ns: f64 } {
+	const Clock = struct {
+		pub fn read(_: *@This(), kind: std.c.CLOCK) !u64 { return @import("immediate_add.zig").now(kind); }
+	};
+	var clock: Clock = .{};
+	const got = try @import("division_crossover.zig").timedBatch(pool,&clock,method,start,count,repeats);
+	return .{.cpu_ns=got.cpu_ns,.wall_ns=got.wall_ns};
+}
+
+pub fn run(init: std.process.Init, args: []const []const u8) !void {
+	const options = try parse(args);
+	const count = 32;
+	const repeats = 512;
+	const methods: [2]Method = if (options.comparison==.public) .{.current,.reciprocal} else .{.gmp,.reciprocal};
+	const Component = struct { method: []const u8, cpu_ns: [6]f64, wall_ns: [6]f64 };
+	const Row = struct {
+		size: usize, fixture_count: usize = count, iterations: usize = count*repeats, warmup_cases: usize = 2*count,
+		samples: struct { cpu_ns: [6]f64, wall_ns: [6]f64 }, components: [2]Component,
+	};
+	var rows: [widths.len]Row = undefined;
+	for (options.sizes[0..options.count],0..) |width,index| {
+		var pool = try Pool.init(std.heap.c_allocator,options.divisor_bytes,width,count); defer pool.deinit();
+		for (0..count) |i| for (methods) |method| try pool.run(method,i);
+		var row: Row = .{.size=width,.samples=undefined,.components=undefined};
+		for (&row.components,methods) |*component,method| component.*=.{.method=@tagName(method),.cpu_ns=undefined,.wall_ns=undefined};
+		for (0..6) |round| {
+			const sample = try @import("division_crossover.zig").pairedSample(&pool,nativeBatch,methods,count,repeats,round);
+			for (&row.components,0..) |*component,mi| { component.cpu_ns[round]=sample.cpu_ns[mi]; component.wall_ns[round]=sample.wall_ns[mi]; }
+			row.samples.cpu_ns[round]=(sample.cpu_ns[0]+sample.cpu_ns[1])/2;
+			row.samples.wall_ns[round]=(sample.wall_ns[0]+sample.wall_ns[1])/2;
+		}
+		rows[index]=row;
+	}
+	const report = .{
+		.schema="performance-measurement/v1",.correct=true,.build_mode="ReleaseFast",
+		.compiler=@import("builtin").zig_version_string,.gmp_version=std.mem.span(gmp.__gmp_version),
+		.method=if (options.comparison==.public) "division-single-signed-public-paired-v1" else "division-single-signed-gmp-paired-v1",
+		.divisor_bytes=options.divisor_bytes,.divisor_min_bits=8*options.divisor_bytes-7,.divisor_max_bits=8*options.divisor_bytes,
+		.cpu_clock="CLOCK_PROCESS_CPUTIME_ID",.wall_clock="CLOCK_MONOTONIC",
+		.seed_usage="0xB2D151A5 + divisor_bytes*257 + index; eight normalization shifts in each of four sign combinations; engine seed does not alter inputs",
+		.operation="signed truncated quotient and remainder; variable 1/2/4/8-byte divisor magnitude; size is dividend magnitude bytes; reciprocal entry retains original kernel below 64 bytes",
+		.normalization="six ABBA/BAAB half-pool samples; 512 repeats per fixture; primary averages two methods; no subtraction",
+		.verification="GMP references outside timing, native signed oracle in tests; complete canonical BLIP or GMP quotient/remainder comparison on every call",
+		.allocator_coverage="prepared signed inputs, reused outputs and warmed scratch; both BLIP entries called without inlining; BLIP conversion, arithmetic allocation and encoding included; GMP uses preconverted mpz inputs; full comparisons included; cold allocation unmeasured",
+		.rows=rows[0..options.count],
+	};
+	const json = try std.json.Stringify.valueAlloc(init.arena.allocator(),report,.{});
+	try std.Io.File.stdout().writeStreamingAll(init.io,json);
+	try std.Io.File.stdout().writeStreamingAll(init.io,"\n");
+}
+
+test "signed small-divisor parser classifies comparisons and complete width sets" {
+	const divisor_widths = [_]usize{1,2,4,8};
+	const dividend_widths = [_]usize{8,9,16,17,63,64,65,256,257,1024,1025,4096,4097};
+	for (std.enums.values(Comparison)) |comparison| for (0..10) |divisor| for (0..4100) |width| {
+		var db: [24]u8 = undefined; var wb: [24]u8 = undefined;
+		const da = try std.fmt.bufPrint(&db,"{d}",.{divisor}); const wa = try std.fmt.bufPrint(&wb,"{d}",.{width});
+		const accepted = if (parse(&.{@tagName(comparison),da,wa})) |options| blk: {
+			try std.testing.expectEqual(comparison,options.comparison);
+			try std.testing.expectEqual(divisor,options.divisor_bytes);
+			try std.testing.expectEqual(@as(usize,1),options.count);
+			try std.testing.expectEqual(width,options.sizes[0]); break :blk true;
+		} else |err| blk: { try std.testing.expectEqual(error.InvalidArguments,err); break :blk false; };
+		try std.testing.expectEqual(std.mem.indexOfScalar(usize,&divisor_widths,divisor)!=null and std.mem.indexOfScalar(usize,&dividend_widths,width)!=null,accepted);
+	};
+	const options = try parse(&.{"public","8","8,9,16,17,63,64,65,256,257,1024,1025,4096,4097"});
+	try std.testing.expectEqualSlices(usize,&dividend_widths,options.sizes[0..options.count]);
+	for ([_][]const u8{"","8,","8,8","9,8","-1","x","18446744073709551616"}) |arg| try std.testing.expectError(error.InvalidArguments,parse(&.{"public","8",arg}));
+	for ([_][]const u8{"","-1","x","18446744073709551616"}) |arg| try std.testing.expectError(error.InvalidArguments,parse(&.{"public",arg,"8"}));
+	try std.testing.expectError(error.InvalidArguments,parse(&.{"unknown","8","8"}));
+	try std.testing.expectError(error.InvalidArguments,parse(&.{}));
+	try std.testing.expectError(error.InvalidArguments,parse(&.{"public","8"}));
+	try std.testing.expectError(error.InvalidArguments,parse(&.{"public","8","8","9"}));
+}
 
 const Pool = struct {
 	base: Base, q: Mp, r: Mp,
@@ -30,8 +124,8 @@ const Pool = struct {
 	pub fn run(self: *@This(), method: Method, index: usize) !void {
 		const case = &self.base.cases[index];
 		switch (method) {
-			.current => try Mp.divMod(&self.q,&self.r,&case.a,&case.b),
-			.reciprocal => try Mp.divModSmallReciprocal(&self.q,&self.r,&case.a,&case.b),
+			.current => try @call(.never_inline,Mp.divMod,.{&self.q,&self.r,&case.a,&case.b}),
+			.reciprocal => try @call(.never_inline,Mp.divModSmallReciprocal,.{&self.q,&self.r,&case.a,&case.b}),
 			.gmp => return self.base.run(.gmp,index),
 		}
 		if (!std.mem.eql(u8,self.q.bytes(),case.mq.bytes()) or !std.mem.eql(u8,self.r.bytes(),case.mr.bytes())) return error.IncorrectWork;

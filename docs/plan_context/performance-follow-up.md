@@ -2244,6 +2244,43 @@ seconds of mixed Nix preparation/check time, including an 86-second unit/C-API
 build phase. Production build and all-system evaluation passed. Timed signed
 comparisons and direct GMP measurements remain outstanding.
 
+### Signed reciprocal timing probe
+
+`single-signed public` pairs the current public divider with the experimental
+signed entry. `single-signed gmp` pairs ordinary GMP with that same entry.
+The methods are `division-single-signed-public-paired-v1` and
+`division-single-signed-gmp-paired-v1`. Both keep the reciprocal entry as the
+second component, so candidate/reference CPU ratios have the same direction.
+
+The configuration declares five fresh processes in each 1-CPU and 12-CPU
+affinity cohort for both comparisons and all four divisor widths. Dividend
+magnitudes span 8/9, 16/17, 63/64/65, 256/257, 1,024/1,025 and 4,096/4,097
+bytes. Each row uses 32 fixtures covering four signs and eight normalization
+shifts, 64 warmup calls and six ABBA/BAAB samples with 16,384 calls per method
+per sample. Setup and cold allocation are outside timing. Public BLIP calls
+include sign conversion, arithmetic allocation and result encoding; GMP uses
+preconverted inputs and reusable results. Every call compares complete outputs.
+
+The comparison/width classifier failed against its placeholder, and the CLI
+check rejected the missing mode. The completed CLI contract checks both
+component bindings, declared work counts, positive CPU/wall samples and
+aggregate normalization at 8, 63, 64 and 65 bytes for every divisor width.
+
+Generated-code inspection initially found the candidate inlined into the
+adapter while the current public divider remained a function call. The adapter
+now forbids inlining for both BLIP calls, giving the comparison a shared call
+boundary. This is a benchmark control; library callers retain normal compiler
+inlining decisions. The final public-dispatch change, if justified, must still
+be measured through its actual consumer path.
+
+The final executable contains separate calls to `Mp.divMod` and
+`Mp.divModSmallReciprocal` in both warmup and timed paths. The candidate's
+64-byte magnitude check precedes its reciprocal call. Executable SHA-256 is
+`c1ff3c9dd8a020424a12bd67b6345d5e45e53360a0894bbd63b85071b2617654`.
+The complete suite passed in 87 seconds of mixed Nix preparation/check time,
+including an 85-second unit/C-API build phase. Production build and all-system
+evaluation passed.
+
 ### Build feedback follow-up
 
 Repeated full checks take roughly 90–120 seconds of mixed preparation and
