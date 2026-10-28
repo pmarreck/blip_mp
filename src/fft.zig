@@ -13,6 +13,7 @@ const std = @import("std");
 pub const residue = @import("fft_residue.zig").Small;
 pub const gold_residue = @import("fft_residue.zig").Gold;
 pub const gold_centered_residue = @import("fft_residue.zig").CenteredGold;
+pub const gold_centered_fast_residue = @import("fft_residue.zig").CenteredGoldFast;
 pub const shifted_residue = @import("fft_residue.zig").Shifted(P);
 
 // ── Field parameters (single-prime variant) ──────────────────────────────────
@@ -3011,7 +3012,7 @@ test "paired Goldilocks transforms match a direct field DFT and canonical bytes"
 	defer zero.deinit();
 	try zero.setI64(0);
 	var rng = std.Random.DefaultPrng.init(0x601D_F053);
-	inline for (.{ gold_residue, @import("fft_residue.zig").CenteredGold }) |Codec| for ([_]usize{ 1, 2, 4, 8, 16, 32, 64 }) |n| {
+	inline for (.{ gold_residue, gold_centered_residue, gold_centered_fast_residue }) |Codec| for ([_]usize{ 1, 2, 4, 8, 16, 32, 64 }) |n| {
 		const backing = try testing.allocator.alloc(u8, n * Codec.slot_bytes + 2);
 		defer testing.allocator.free(backing);
 		const actual = backing[1 .. backing.len - 1];
@@ -3259,6 +3260,10 @@ pub fn goldMulMagnitudesCentered(a: []const u8, b: []const u8, out: []u8, pa: []
 	return goldMulMagnitudesImpl(@import("fft_residue.zig").CenteredGold, .fused, false, false, a, b, out, pa, pb, tw_fwd, tw_inv, &.{});
 }
 
+pub fn goldMulMagnitudesCenteredFast(a: []const u8, b: []const u8, out: []u8, pa: []u8, pb: []u8, tw_fwd: []u8, tw_inv: []u8) usize {
+	return goldMulMagnitudesImpl(gold_centered_fast_residue, .fused, false, false, a, b, out, pa, pb, tw_fwd, tw_inv, &.{});
+}
+
 /// Experimental input/output-truncated product with no Stockham scratch.
 /// N is the next power of two at least ceil(a.len/2)+ceil(b.len/2)-1.
 /// Data buffers need N encoded slots; each twiddle table needs N/2 slots.
@@ -3302,11 +3307,13 @@ test "truncated Goldilocks products match GMP across packing and carry boundarie
 				if (pattern == 2) a[a.len - 1] = 1;
 			}
 			const expected_len = try @import("gmp_test_support").product(a, b, expected);
-			inline for (0..6) |method| {
+			inline for (0..7) |method| {
 				@memset(result, 0xa5); @memset(storage, 0xa5);
 				const centered_bytes = n * @import("fft_residue.zig").CenteredGold.slot_bytes;
 				const centered_tw_bytes = n / 2 * @import("fft_residue.zig").CenteredGold.slot_bytes;
-				const len = if (method == 5)
+				const len = if (method == 6)
+					goldMulMagnitudesCenteredFast(a, b, result[1 .. result.len - 1], work[0..centered_bytes], work[centered_bytes .. 2 * centered_bytes], work[2 * centered_bytes ..][0..centered_tw_bytes], work[2 * centered_bytes + centered_tw_bytes ..][0..centered_tw_bytes])
+				else if (method == 5)
 					goldMulMagnitudesCentered(a, b, result[1 .. result.len - 1], work[0..centered_bytes], work[centered_bytes .. 2 * centered_bytes], work[2 * centered_bytes ..][0..centered_tw_bytes], work[2 * centered_bytes + centered_tw_bytes ..][0..centered_tw_bytes])
 				else if (method == 4)
 					goldMulMagnitudesTruncatedFused(a, b, result[1 .. result.len - 1], work[0..bytes], work[bytes .. 2 * bytes], work[2 * bytes ..][0..tw_bytes], work[2 * bytes + tw_bytes ..][0..tw_bytes])
@@ -3334,6 +3341,8 @@ test "truncated Goldilocks products match GMP across packing and carry boundarie
 	try testing.expectEqual(@as(usize, 0), goldMulMagnitudesTruncatedFused(&.{1}, &.{}, &empty_out, &.{}, &.{}, &.{}, &.{}));
 	try testing.expectEqual(@as(usize, 0), goldMulMagnitudesCentered(&.{}, &.{1}, &empty_out, &.{}, &.{}, &.{}, &.{}));
 	try testing.expectEqual(@as(usize, 0), goldMulMagnitudesCentered(&.{1}, &.{}, &empty_out, &.{}, &.{}, &.{}, &.{}));
+	try testing.expectEqual(@as(usize, 0), goldMulMagnitudesCenteredFast(&.{}, &.{1}, &empty_out, &.{}, &.{}, &.{}, &.{}));
+	try testing.expectEqual(@as(usize, 0), goldMulMagnitudesCenteredFast(&.{1}, &.{}, &empty_out, &.{}, &.{}, &.{}, &.{}));
 	try testing.expectEqual(@as(u8, 0xa5), empty_out[0]);
 }
 

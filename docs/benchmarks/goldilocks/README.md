@@ -46,6 +46,54 @@ positive samples and normalization. The complete native suite passed in 100
 seconds of mixed Nix preparation/check time, with 15,535 integration GMP
 comparisons unchanged. Production build and all-system evaluation passed.
 
+### Centered result
+
+Campaign `blip-mp-centered-20261028T085038Z` measured commit
+`5e26e9d17cf9d7b05140c4812a723ce52c50165a`, with source hash
+`9d09e185050a5dca187d6ca169ec9c18ad272acec909997274f9c0a5e8c8be6d`
+unchanged. All ten processes verified their products. Both affinity cohorts
+were `UNBASELINED` after one attempt, with no approved baseline epoch.
+
+| Operand bytes | Centered/positive fused CPU, 1 CPU | Centered/positive fused CPU, 12 CPUs |
+|---:|---:|---:|
+| 1024 | 1.377 | 1.378 |
+| 16384 | 1.413 | 1.410 |
+| 65536 | 1.413 | 1.413 |
+| 100000 | 1.424 | 1.422 |
+| 131072 | 1.425 | 1.425 |
+| 262144 | 1.397 | 1.413 |
+
+These are medians of 30 paired sample ratios per size and cohort. Every process
+mean was slower with centered storage. The [summary](centered-summary.json)
+retains process ratios, sample ranges, selected CPU/wall components and verdicts.
+The 10% smaller slot capacity did not compensate for roughly 38–43% more CPU
+time in these complete products. Production retains positive representatives.
+
+The measured executable had SHA-256
+`f1df5875dccc0103281e134fe38fe5e0d8350c944fa05187da4688913c037160`.
+Its centered fused forward transform occupied 2195 bytes, versus 1946 bytes
+for the positive codec. The centered reader emitted variable `SHLX`/`SARX`
+sign-extension instructions even for eight-byte payloads, followed by a
+sign-mask/add sequence to recover the unsigned field value. Function entry
+reserved 152 stack bytes versus 128; both also accessed red-zone storage.
+These static observations do not measure dynamic spills or attribute the
+entire timing difference to a particular instruction.
+
+The bounded follow-up adds a direct `0x88` header check before variable-length
+sign extension. Short canonical encodings retain the existing decoder. Its
+`centered_fast` probe mode compares positive fused, original centered fused and
+the common-header variant on identical inputs. Run
+`./bm --verified-goldilocks --config profiling-centered-fast.json`; it uses
+the same sizes, process/sample counts and deadlines with a distinct
+`gold-centered-common-header-v1` definition. This tests decoding cost; production
+storage remains unchanged.
+
+Both centered readers pass the same 10,050 canonical encoding and round-trip
+cases each. The independent DFT and GMP product corpora cover the new reader,
+and the new probe mode first failed its parser test. Full native tests passed
+in 136 seconds of mixed Nix preparation/check time, including 15,535 integration
+GMP comparisons. Production build and all-system evaluation also passed.
+
 ## Existing layout measurements
 
 This experiment follows the [blocked multiplication measurements](../storage-aware/RESEARCH.md).

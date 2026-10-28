@@ -4,39 +4,45 @@ const std = @import("std");
 pub const Small = FieldCodec(u32);
 pub const Gold = FieldCodec(u64);
 /// Experimental centered representatives in [-p/2, p/2], encoded as signed BLIP.
-pub const CenteredGold = struct {
-	pub const modulus: u64 = 18446744069414584321;
-	pub const slot_bytes: usize = 9;
-	pub fn encoded(bytes: []const u8, index: usize) []const u8 {
-		const slot = bytes[index * @This().slot_bytes ..][0..@This().slot_bytes];
-		return slot[0..if (slot[0] < 128) @as(usize, 1) else 1 + @as(usize, slot[0] & 31)];
-	}
-	/// Trusted algorithm-owned encodings only, as with the positive field codecs.
-	pub fn read(bytes: []const u8, index: usize) u64 {
-		const slot = bytes[index * @This().slot_bytes ..][0..@This().slot_bytes];
-		if (slot[0] < 128) return slot[0];
-		std.debug.assert(slot[0] >= 0x81 and slot[0] <= 0x88);
-		const shift: u6 = @intCast((8 - (slot[0] & 15)) * 8);
-		const raw = std.mem.readInt(u64, slot[1..9], .little);
-		const signed = @as(i64, @bitCast(raw << shift)) >> shift;
-		return @as(u64, @bitCast(signed)) +% (if (signed < 0) modulus else @as(u64, 0));
-	}
-	pub fn write(bytes: []u8, index: usize, value: u64) void {
-		std.debug.assert(value < modulus);
-		const slot = bytes[index * @This().slot_bytes ..][0..@This().slot_bytes];
-		if (value < 128) { slot[0] = @intCast(value); return; }
-		const negative = value > modulus / 2;
-		const raw = if (negative) value -% modulus else value;
-		const signless = if (negative) ~raw else raw;
-		const len: u8 = @intCast((65 - @as(usize, @clz(signless)) + 7) / 8);
-		slot[0] = 0x80 | len;
-		std.mem.writeInt(u64, slot[1..9], raw, .little);
-	}
-	pub fn clear(bytes: []u8) void {
-		std.debug.assert(bytes.len % @This().slot_bytes == 0);
-		for (0..bytes.len / @This().slot_bytes) |i| @This().write(bytes, i, 0);
-	}
-};
+pub const CenteredGold = CenteredCodec(false);
+pub const CenteredGoldFast = CenteredCodec(true);
+fn CenteredCodec(comptime common_header: bool) type {
+	return struct {
+		pub const modulus: u64 = 18446744069414584321;
+		pub const slot_bytes: usize = 9;
+		pub fn encoded(bytes: []const u8, index: usize) []const u8 {
+			const slot = bytes[index * @This().slot_bytes ..][0..@This().slot_bytes];
+			return slot[0..if (slot[0] < 128) @as(usize, 1) else 1 + @as(usize, slot[0] & 31)];
+		}
+		/// Trusted algorithm-owned encodings only, as with the positive field codecs.
+		pub fn read(bytes: []const u8, index: usize) u64 {
+			const slot = bytes[index * @This().slot_bytes ..][0..@This().slot_bytes];
+			if (slot[0] < 128) return slot[0];
+			std.debug.assert(slot[0] >= 0x81 and slot[0] <= 0x88);
+			const raw = std.mem.readInt(u64, slot[1..9], .little);
+			const signed: i64 = if (common_header and slot[0] == 0x88) @bitCast(raw) else blk: {
+				const shift: u6 = @intCast((8 - (slot[0] & 15)) * 8);
+				break :blk @as(i64, @bitCast(raw << shift)) >> shift;
+			};
+			return @as(u64, @bitCast(signed)) +% (if (signed < 0) modulus else @as(u64, 0));
+		}
+		pub fn write(bytes: []u8, index: usize, value: u64) void {
+			std.debug.assert(value < modulus);
+			const slot = bytes[index * @This().slot_bytes ..][0..@This().slot_bytes];
+			if (value < 128) { slot[0] = @intCast(value); return; }
+			const negative = value > modulus / 2;
+			const raw = if (negative) value -% modulus else value;
+			const signless = if (negative) ~raw else raw;
+			const len: u8 = @intCast((65 - @as(usize, @clz(signless)) + 7) / 8);
+			slot[0] = 0x80 | len;
+			std.mem.writeInt(u64, slot[1..9], raw, .little);
+		}
+		pub fn clear(bytes: []u8) void {
+			std.debug.assert(bytes.len % @This().slot_bytes == 0);
+			for (0..bytes.len / @This().slot_bytes) |i| @This().write(bytes, i, 0);
+		}
+	};
+}
 // General scalar codec retained for callers that need the full u64 range.
 pub const slot_bytes = Gold.slot_bytes;
 pub const encoded = Gold.encoded;
@@ -121,8 +127,11 @@ pub fn Shifted(comptime modulus: u64) type {
 }
 
 test "centered Goldilocks representatives match signed BLIP and both round trips" {
+	inline for (.{ CenteredGold, CenteredGoldFast }) |Codec| try testCenteredCodec(Codec);
+}
+
+fn testCenteredCodec(comptime Codec: type) !void {
 	const Mp = @import("bignum.zig").Mp;
-	const Codec = CenteredGold;
 	var expected = Mp.init(std.testing.allocator);
 	defer expected.deinit();
 	var storage: [3 * Codec.slot_bytes + 1]u8 = @splat(0xa5);
