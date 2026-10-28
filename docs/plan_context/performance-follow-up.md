@@ -2101,6 +2101,43 @@ mixed Nix preparation/check time, including an 87-second unit/C-API build
 phase. The production build and all-system evaluation passed. These checks
 qualify the mitigation without identifying the clock's underlying cause.
 
+### Variable small-divisor results
+
+The current byte kernel wins at the smallest sampled dividends and loses as
+the dividend grows. With 8- or 9-byte dividends, paired CPU ratios are
+0.67–0.95 times GMP; every process mean, including diagnostic attempts, is
+below one at those two lengths. At 4,096 bytes the kernel takes 3.21–3.43
+times GMP's CPU time. These are unsigned byte-kernel measurements with the
+adapter costs described above, not signed public-API results.
+
+| Divisor bytes | 8-byte dividend: current / GMP | 64-byte dividend: current / GMP | 4,096-byte dividend: current / GMP |
+|---:|---:|---:|---:|
+| 1 | 0.67 / 0.90 | 1.72 / 1.85 | 3.28 / 3.43 |
+| 2 | 0.87 / 0.86 | 2.12 / 2.19 | 3.41 / 3.41 |
+| 4 | 0.83 / 0.75* | 1.83 / 1.90* | 3.39 / 3.39* |
+| 8 | 0.87 / 0.83 | 1.76 / 1.94 | 3.21 / 3.36 |
+
+Cells give paired medians for 1-CPU / 12-CPU affinity cohorts. The starred
+4-byte-divisor, 12-CPU cohort remains inconclusive after its one permitted
+variation retry. The 8-byte-divisor, 12-CPU cohort also retried once and is
+unbaselined. The other six cohorts are unbaselined on their first attempt.
+All 50 processes verified their complete results. No baseline is accepted.
+Small-value ratios vary appreciably across processes, so this experiment
+does not establish a precise public crossover or a universal speedup.
+
+Campaign `blip-mp-single-20261028T231722Z` measured commit
+`c99ce4a703b02a9d4efb57b3be4b7eaf82c8f255` on Linux x86_64 with a Threadripper
+3990X, Zig 0.16.0 ReleaseFast and ordinary GMP 6.3.0. The measured executable
+SHA-256 was `8d9bf2713f5c862bfdbdc96ada625da6df518a0b0100b74850fdc55b745a64fc`;
+source digest `60db35aa87fd28ccc134c7e64ba0906aaf22d5e8907e63fced96a081f2e06e51`
+stayed unchanged throughout. The [sanitized summary](../benchmarks/storage-aware/division-single-variable-summary.json)
+retains all 96 size/cohort cells and every process ratio, including diagnostics.
+
+The growing gap justifies testing reciprocal reuse for longer dividends.
+Inspect the candidate's generated code and measure setup cost at small sizes
+before selecting it. The existing public divider and all thresholds remain
+unchanged.
+
 ### Build feedback follow-up
 
 Repeated full checks take roughly 90–120 seconds of mixed preparation and

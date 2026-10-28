@@ -69,6 +69,13 @@ guarded kernel halves the fixed BLIP kernel's time, but still takes 5.8× GMP's.
 All 15 processes are correct and both cohorts are unbaselined. The public
 threshold remains unchanged, and the guarded kernel remains experimental.
 
+A [variable small-divisor comparison](docs/plan_context/performance-follow-up.md#variable-small-divisor-results)
+finds the current unsigned byte kernel taking 0.67–0.95× GMP's CPU time for
+8- and 9-byte dividends, but 3.21–3.43× at 4,096 bytes. Divisors span 1, 2, 4
+and 8 bytes. All 50 processes are correct; seven cohorts are unbaselined and
+one remains inconclusive after its variation retry. These timings include
+different adapter costs and do not establish a signed public-API win.
+
 A separate [signed public-path comparison](docs/plan_context/performance-follow-up.md#signed-public-division-results-october-28-2026)
 finds B-Z saving 21–28% CPU time at 12,288/16,384-byte divisors with twice-width
 dividends, and 18–44% across sampled recursive widths with four-times-width
