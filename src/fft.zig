@@ -2868,6 +2868,169 @@ pub fn goldNttStockham(a: []u8, scratch: []u8, twiddles: []const u8) void {
 	}
 }
 
+/// Natural-order input to bit-reversed output. Pair with the unscaled inverse.
+pub fn goldNttForwardPaired(comptime fused: bool, a: []u8, twiddles: []const u8) void {
+	const n = a.len / gold_residue.slot_bytes;
+	std.debug.assert(n != 0 and n & (n - 1) == 0 and a.len % gold_residue.slot_bytes == 0);
+	std.debug.assert(twiddles.len / gold_residue.slot_bytes >= n / 2);
+	var m = n;
+	while (m > 1) : (m >>= 1) {
+		if (fused and m >= 4) {
+			const quarter = m >> 2;
+			const step = n / m;
+			var base: usize = 0;
+			while (base < n) : (base += m) {
+				for (0..quarter) |j| {
+					const x0 = gold_residue.read(a, base + j);
+					const x1 = gold_residue.read(a, base + j + quarter);
+					const x2 = gold_residue.read(a, base + j + 2 * quarter);
+					const x3 = gold_residue.read(a, base + j + 3 * quarter);
+					const sum0 = goldAddMod(x0, x2);
+					const sum1 = goldAddMod(x1, x3);
+					const diff0 = goldMulMod(goldSubMod(x0, x2), gold_residue.read(twiddles, j * step));
+					const diff1 = goldMulMod(goldSubMod(x1, x3), gold_residue.read(twiddles, (j + quarter) * step));
+					const w2 = gold_residue.read(twiddles, 2 * j * step);
+					gold_residue.write(a, base + j, goldAddMod(sum0, sum1));
+					gold_residue.write(a, base + j + quarter, goldMulMod(goldSubMod(sum0, sum1), w2));
+					gold_residue.write(a, base + j + 2 * quarter, goldAddMod(diff0, diff1));
+					gold_residue.write(a, base + j + 3 * quarter, goldMulMod(goldSubMod(diff0, diff1), w2));
+				}
+			}
+			m >>= 1; // The loop update completes the two-stage advance.
+			continue;
+		}
+		const half = m >> 1;
+		const step = n / m;
+		var base: usize = 0;
+		while (base < n) : (base += m) {
+			for (0..half) |j| {
+				const x = gold_residue.read(a, base + j);
+				const y = gold_residue.read(a, base + j + half);
+				const w = gold_residue.read(twiddles, j * step);
+				gold_residue.write(a, base + j, goldAddMod(x, y));
+				gold_residue.write(a, base + j + half, goldMulMod(goldSubMod(x, y), w));
+			}
+		}
+	}
+}
+
+/// Bit-reversed input to natural-order output, without the final N^-1 scale.
+pub fn goldNttInversePaired(comptime fused: bool, a: []u8, twiddles: []const u8) void {
+	const n = a.len / gold_residue.slot_bytes;
+	std.debug.assert(n != 0 and n & (n - 1) == 0 and a.len % gold_residue.slot_bytes == 0);
+	std.debug.assert(twiddles.len / gold_residue.slot_bytes >= n / 2);
+	var m: usize = 2;
+	while (m <= n) : (m <<= 1) {
+		if (fused and m <= n / 2) {
+			const quarter = m >> 1;
+			const width = m * 2;
+			const step = n / width;
+			var base: usize = 0;
+			while (base < n) : (base += width) {
+				for (0..quarter) |j| {
+					const w2 = gold_residue.read(twiddles, 2 * j * step);
+					const x0 = gold_residue.read(a, base + j);
+					const x1 = goldMulMod(gold_residue.read(a, base + j + quarter), w2);
+					const x2 = gold_residue.read(a, base + j + 2 * quarter);
+					const x3 = goldMulMod(gold_residue.read(a, base + j + 3 * quarter), w2);
+					const sum0 = goldAddMod(x0, x1);
+					const diff0 = goldSubMod(x0, x1);
+					const sum1 = goldMulMod(goldAddMod(x2, x3), gold_residue.read(twiddles, j * step));
+					const diff1 = goldMulMod(goldSubMod(x2, x3), gold_residue.read(twiddles, (j + quarter) * step));
+					gold_residue.write(a, base + j, goldAddMod(sum0, sum1));
+					gold_residue.write(a, base + j + 2 * quarter, goldSubMod(sum0, sum1));
+					gold_residue.write(a, base + j + quarter, goldAddMod(diff0, diff1));
+					gold_residue.write(a, base + j + 3 * quarter, goldSubMod(diff0, diff1));
+				}
+			}
+			m <<= 1;
+			continue;
+		}
+		const half = m >> 1;
+		const step = n / m;
+		var base: usize = 0;
+		while (base < n) : (base += m) {
+			for (0..half) |j| {
+				const x = gold_residue.read(a, base + j);
+				const y = goldMulMod(gold_residue.read(a, base + j + half), gold_residue.read(twiddles, j * step));
+				gold_residue.write(a, base + j, goldAddMod(x, y));
+				gold_residue.write(a, base + j + half, goldSubMod(x, y));
+			}
+		}
+	}
+}
+
+test "paired Goldilocks transforms match a direct field DFT and canonical bytes" {
+	const Oracle = struct {
+		fn mul(a: u64, b: u64) u64 { return @intCast((@as(u128, a) * b) % GOLDILOCKS_P); }
+		fn pow(a: u64, exponent: u64) u64 {
+			var base = a;
+			var e = exponent;
+			var value: u64 = 1;
+			while (e != 0) : (e >>= 1) {
+				if (e & 1 != 0) value = mul(value, base);
+				base = mul(base, base);
+			}
+			return value;
+		}
+		fn reverse(index: usize, n: usize) usize {
+			var bit = n >> 1;
+			var input = index;
+			var output: usize = 0;
+			while (bit != 0) : (bit >>= 1) {
+				if (input & 1 != 0) output |= bit;
+				input >>= 1;
+			}
+			return output;
+		}
+	};
+	const Mp = @import("bignum.zig").Mp;
+	var expected = Mp.init(testing.allocator);
+	defer expected.deinit();
+	var zero = Mp.init(testing.allocator);
+	defer zero.deinit();
+	try zero.setI64(0);
+	var rng = std.Random.DefaultPrng.init(0x601D_F053);
+	for ([_]usize{ 1, 2, 4, 8, 16, 32, 64 }) |n| {
+		const backing = try testing.allocator.alloc(u8, n * gold_residue.slot_bytes + 2);
+		defer testing.allocator.free(backing);
+		const actual = backing[1 .. backing.len - 1];
+		const input = try testing.allocator.alloc(u8, actual.len);
+		defer testing.allocator.free(input);
+		const tw = try testing.allocator.alloc(u8, n / 2 * gold_residue.slot_bytes);
+		defer testing.allocator.free(tw);
+		for (0..4) |pattern| {
+			for (0..n) |i| gold_residue.write(input, i, switch (pattern) {
+				0 => 0, 1 => @intFromBool(i == n - 1), 2 => GOLDILOCKS_P - 1,
+				else => rng.random().uintLessThan(u64, GOLDILOCKS_P),
+			});
+			inline for (.{ false, true }) |inverse| {
+				const root = Oracle.pow(7, (GOLDILOCKS_P - 1) / n);
+				const omega = if (inverse) Oracle.pow(root, GOLDILOCKS_P - 2) else root;
+				for (0..n / 2) |i| gold_residue.write(tw, i, Oracle.pow(omega, i));
+				inline for (.{ false, true }) |fused| {
+					@memset(backing, 0xa5);
+					for (0..n) |i| gold_residue.write(actual, if (inverse) Oracle.reverse(i, n) else i, gold_residue.read(input, i));
+					if (inverse) goldNttInversePaired(fused, actual, tw) else goldNttForwardPaired(fused, actual, tw);
+					for (0..n) |k| {
+						var sum: u64 = 0;
+						for (0..n) |j| {
+							const term = Oracle.mul(gold_residue.read(input, j), Oracle.pow(omega, j * k));
+							sum = @intCast((@as(u128, sum) + term) % GOLDILOCKS_P);
+						}
+						const index = if (inverse) k else Oracle.reverse(k, n);
+						try testing.expectEqual(sum, gold_residue.read(actual, index));
+						try expected.addU64(&zero, sum);
+						try testing.expectEqualSlices(u8, expected.bytes(), gold_residue.encoded(actual, index));
+					}
+					try testing.expectEqual(@as(u8, 0xa5), backing[0]);
+					try testing.expectEqual(@as(u8, 0xa5), backing[backing.len - 1]);
+				}
+			}
+		}
+	}
+}
+
 // ── Goldilocks 16-bit-digit multiplication ─────────────────────────────────
 
 /// Maximum combined byte length (a.len + b.len) supportable by the Goldilocks
@@ -2881,6 +3044,58 @@ pub fn goldNttStockham(a: []u8, scratch: []u8, twiddles: []const u8) void {
 /// Conservatively cap at half a megabyte combined.
 pub const GOLD_MAX_FFT_COMBINED_LEN: usize = 524288;
 
+pub const GoldLayout = enum { stockham, paired, fused };
+
+/// Experimental layout selection; paired layouts require no Stockham scratch.
+pub fn goldMulMagnitudesWithLayout(comptime layout: GoldLayout, a: []const u8, b: []const u8, out: []u8, pa: []u8, pb: []u8, tw_fwd: []u8, tw_inv: []u8, stockham_scratch: []u8) usize {
+	return goldMulMagnitudesImpl(layout, a, b, out, pa, pb, tw_fwd, tw_inv, stockham_scratch);
+}
+
+test "paired Goldilocks products match GMP across packing and carry boundaries" {
+	var rng = std.Random.DefaultPrng.init(0x601D_1234);
+	for ([_][2]usize{ .{1, 1}, .{1, 2}, .{7, 13}, .{257, 511}, .{4097, 4095} }) |sizes| {
+		const a = try testing.allocator.alloc(u8, sizes[0]);
+		defer testing.allocator.free(a);
+		const b = try testing.allocator.alloc(u8, sizes[1]);
+		defer testing.allocator.free(b);
+		const expected = try testing.allocator.alloc(u8, a.len + b.len);
+		defer testing.allocator.free(expected);
+		const result = try testing.allocator.alloc(u8, expected.len + 2);
+		defer testing.allocator.free(result);
+		var n: usize = 1;
+		while (n < (a.len + b.len + 1) / 2) n <<= 1;
+		const bytes = n * gold_residue.slot_bytes;
+		const tw_bytes = n / 2 * gold_residue.slot_bytes;
+		const storage = try testing.allocator.alloc(u8, 4 * bytes + 2);
+		defer testing.allocator.free(storage);
+		const work = storage[1 .. storage.len - 1];
+		for (0..4) |pattern| {
+			if (pattern == 0) {
+				rng.random().bytes(a); rng.random().bytes(b);
+			} else {
+				@memset(a, if (pattern == 1) 255 else 0);
+				@memset(b, 255);
+				if (pattern == 2) a[a.len - 1] = 1;
+			}
+			const expected_len = try @import("gmp_test_support").product(a, b, expected);
+			inline for (std.enums.values(GoldLayout)) |layout| {
+				@memset(result, 0xa5); @memset(storage, 0xa5);
+				const len = goldMulMagnitudesWithLayout(layout, a, b, result[1 .. result.len - 1], work[0..bytes], work[bytes .. 2 * bytes], work[2 * bytes ..][0..tw_bytes], work[2 * bytes + tw_bytes ..][0..tw_bytes], if (layout == .stockham) work[3 * bytes ..] else &.{});
+				try testing.expectEqualSlices(u8, expected[0..expected_len], result[1..][0..len]);
+				try testing.expectEqual(@as(u8, 0xa5), result[0]);
+				try testing.expectEqual(@as(u8, 0xa5), result[result.len - 1]);
+				try testing.expectEqual(@as(u8, 0xa5), storage[0]);
+				try testing.expectEqual(@as(u8, 0xa5), storage[storage.len - 1]);
+			}
+		}
+	}
+	inline for (std.enums.values(GoldLayout)) |layout| {
+		var out: [1]u8 = .{0xa5};
+		try testing.expectEqual(@as(usize, 0), goldMulMagnitudesWithLayout(layout, &.{}, &.{1}, &out, &.{}, &.{}, &.{}, &.{}, &.{}));
+		try testing.expectEqual(@as(u8, 0xa5), out[0]);
+	}
+}
+
 /// Multiply two unsigned magnitudes via Goldilocks-prime NTT with 16-bit
 /// digit packing. Caller supplies preallocated scratch (same convention as
 /// `mulMagnitudesWithScratch`). Returns canonical byte length of result.
@@ -2890,6 +3105,20 @@ pub const GOLD_MAX_FFT_COMBINED_LEN: usize = 524288;
 ///   - out.len ≥ a.len + b.len
 ///   - scratch sizes ≥ N where N = next pow 2 ≥ ceil((a.len + b.len) / 2)
 pub fn goldMulMagnitudesWithScratch(
+	a: []const u8,
+	b: []const u8,
+	out: []u8,
+	pa: []u8,
+	pb: []u8,
+	tw_fwd: []u8,
+	tw_inv: []u8,
+	stockham_scratch: []u8,
+) usize {
+	return goldMulMagnitudesImpl(.stockham, a, b, out, pa, pb, tw_fwd, tw_inv, stockham_scratch);
+}
+
+fn goldMulMagnitudesImpl(
+	comptime layout: GoldLayout,
 	a: []const u8,
 	b: []const u8,
 	out: []u8,
@@ -2913,19 +3142,21 @@ pub fn goldMulMagnitudesWithScratch(
 	std.debug.assert((tw_fwd.len / gold_residue.slot_bytes) >= N / 2);
 	std.debug.assert((tw_inv.len / gold_residue.slot_bytes) >= N / 2);
 
-	std.debug.assert((stockham_scratch.len / gold_residue.slot_bytes) >= N);
+	if (layout == .stockham) std.debug.assert((stockham_scratch.len / gold_residue.slot_bytes) >= N);
 
 	const pa_n = pa[(0) * gold_residue.slot_bytes .. (N) * gold_residue.slot_bytes];
 	const pb_n = pb[(0) * gold_residue.slot_bytes .. (N) * gold_residue.slot_bytes];
 	const tw_fwd_n = tw_fwd[(0) * gold_residue.slot_bytes .. (N / 2) * gold_residue.slot_bytes];
 	const tw_inv_n = tw_inv[(0) * gold_residue.slot_bytes .. (N / 2) * gold_residue.slot_bytes];
-	const sc_n = stockham_scratch[(0) * gold_residue.slot_bytes .. (N) * gold_residue.slot_bytes];
+	const sc_n = if (layout == .stockham) stockham_scratch[0 .. N * gold_residue.slot_bytes] else &.{};
 
 	// Precompute twiddles.
 	const omega_n = goldNthRootOfUnity(N);
 	const omega_n_inv = goldInvMod(omega_n);
-	gold_residue.write(tw_fwd_n, 0, 1);
-	gold_residue.write(tw_inv_n, 0, 1);
+	if (N > 1) {
+		gold_residue.write(tw_fwd_n, 0, 1);
+		gold_residue.write(tw_inv_n, 0, 1);
+	}
 	var j: usize = 1;
 	while (j < N / 2) : (j += 1) {
 		gold_residue.write(tw_fwd_n, j, goldMulMod(gold_residue.read(tw_fwd_n, j - 1), omega_n));
@@ -2953,11 +3184,15 @@ pub fn goldMulMagnitudesWithScratch(
 	}
 
 	// Forward NTT both; pointwise mul; inverse NTT; scale.
-	// Stockham auto-sort eliminates the explicit bit-reverse permutation.
-	goldNttStockham(pa_n, sc_n, tw_fwd_n);
-	goldNttStockham(pb_n, sc_n, tw_fwd_n);
+	if (layout == .stockham) {
+		goldNttStockham(pa_n, sc_n, tw_fwd_n);
+		goldNttStockham(pb_n, sc_n, tw_fwd_n);
+	} else {
+		goldNttForwardPaired(layout == .fused, pa_n, tw_fwd_n);
+		goldNttForwardPaired(layout == .fused, pb_n, tw_fwd_n);
+	}
 	for (0..N) |i| gold_residue.write(pa_n, i, goldMulMod(gold_residue.read(pa_n, i), gold_residue.read(pb_n, i)));
-	goldNttStockham(pa_n, sc_n, tw_inv_n);
+	if (layout == .stockham) goldNttStockham(pa_n, sc_n, tw_inv_n) else goldNttInversePaired(layout == .fused, pa_n, tw_inv_n);
 	const n_inv = goldInvMod(@intCast(N));
 
 	// Carry propagation: each digit holds a value up to ~2^43; emit 16 bits
