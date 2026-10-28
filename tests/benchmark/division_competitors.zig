@@ -93,8 +93,8 @@ test "B-Z uses a short carried remainder to avoid recursive allocation" {
 		var case = try Case.initSized(a,std.testing.allocator,width,index,2*width); defer case.deinit();
 		const q = try a.alloc(u8,width+3);
 		const r = try a.alloc(u8,width+2);
-		var allocations: [2]usize = undefined;
-		inline for (.{blip.tier3.divModBurnikelZieglerShortQuotient,blip.tier3.divModBurnikelZieglerShortCarry},0..) |divide,method| {
+		var allocations: [3]usize = undefined;
+		inline for (.{blip.tier3.divModBurnikelZieglerShortQuotient,blip.tier3.divModBurnikelZieglerShortCarry,blip.tier3.divModBurnikelZiegler},0..) |divide,method| {
 			@memset(q,0xa5); @memset(r,0xa5);
 			var counted = std.testing.FailingAllocator.init(std.testing.allocator,.{});
 			const got = try divide(case.dividend,case.dividend.len,case.divisor,width,q[1..width+2],r[1..width+1],counted.allocator());
@@ -113,6 +113,7 @@ test "B-Z uses a short carried remainder to avoid recursive allocation" {
 		if (width%2 == 0 and index == 0) {
 			try std.testing.expect(allocations[1] < allocations[0]);
 		} else try std.testing.expectEqual(allocations[0],allocations[1]);
+		try std.testing.expectEqual(allocations[1],allocations[2]);
 	};
 }
 

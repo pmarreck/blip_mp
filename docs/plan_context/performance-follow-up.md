@@ -1171,6 +1171,49 @@ samples and five processes per cohort. GMP supplies references outside timing;
 this campaign does not time GMP. SIMD remains deferred while the experiment
 tests whether significant-length metadata avoids unnecessary recursive work.
 
+### Short-carry results and selection
+
+Campaign `blip-mp-division-carry-20261028T191540Z` measured clean commit
+`f735b0ad8fb6509c79c5875325a7db61f57f9125` on the same Linux x86_64 host,
+with Zig 0.16.0 ReleaseFast. All 50 processes verified complete results without
+clock failures. All ten cohorts were `UNBASELINED`, each on its first attempt;
+no baseline was approved. The source digest remained
+`deaacb6e280411594afc7dd24369e8429639bb1a02dc468877f51557d100ce70`.
+The probe's SHA-256 was
+`b01accb89fb6a576b29a456e24f126ef9085433e1aa2233db6490f0147a79fbd`.
+
+Each cell is a median paired CPU ratio, candidate divided by fixed
+short-quotient B-Z, for **1-CPU / 12-CPU affinity**. Widths are magnitude bytes.
+Thirty paired samples contribute to each cell.
+
+| Divisor bytes | Dividend = divisor + 1 | Dividend = divisor + 7 | Dividend = divisor + 8 | Dividend = 2 × divisor | Dividend = 4 × divisor |
+|---:|---:|---:|---:|---:|---:|
+| 8,192 | 1.000 / 1.000 | 1.000 / 1.000 | 0.999 / 1.000 | 0.759 / 0.758 | 0.890 / 0.889 |
+| 12,288 | 1.001 / 1.000 | 1.000 / 1.001 | 0.999 / 0.999 | 0.773 / 0.771 | 0.897 / 0.897 |
+| 16,384 | 1.000 / 1.000 | 1.000 / 1.000 | 0.998 / 0.999 | 0.789 / 0.789 | 0.906 / 0.908 |
+| 16,385 | 1.000 / 1.000 | 1.000 / 1.000 | 1.000 / 1.000 | 0.999 / 0.997 | 1.003 / 0.998 |
+
+At the sampled even widths, balanced divisions save about 21–24% CPU time
+and long dividends save about 9–11%. Every process mean favors the candidate
+in those cells. Control medians remain within about 0.4% of parity. Individual
+control process ratios span 0.888–1.043, including an apparent gain on an
+unchanged odd-width path; small control differences are not another optimization.
+The [summary](../benchmarks/storage-aware/division-carry-summary.json) preserves
+all sample ranges, process means, selected components and verdicts.
+
+The default B-Z magnitude divider now selects the internal short-carry leaf;
+the explicit short-quotient entry remains fixed. Extending the resource test
+to the default first failed with 20 allocations instead of the candidate's 10.
+Public dispatch still uses its 99,999-byte threshold. This experiment times
+BLIP implementations only. Multiplying this gain into an older GMP ratio would
+not constitute a fresh GMP comparison. The short-quotient cutoff cliff and
+neighboring divisor alignments still need qualification before public dispatch
+can change.
+
+After selection, the complete suite passed in 89 seconds of mixed Nix
+preparation/check time, including the default allocation regression. The
+optimized production build and all-system evaluation passed.
+
 ### Exact-capacity remainder regression
 
 Reviewing the B-Z entry point exposed a separate single-byte-divisor bug. With

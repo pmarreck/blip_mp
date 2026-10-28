@@ -86,6 +86,13 @@ B-Z threshold therefore stays unchanged. All 120 processes across the two campai
 verified their results, with unbaselined/inconclusive timing verdicts. GMP was
 not timed in these campaigns.
 
+Using each carried remainder's significant length to choose a division leaf
+then saves [21–24% CPU on balanced divisions and 9–11% on long dividends](docs/plan_context/performance-follow-up.md#short-carry-results-and-selection)
+against that short-quotient B-Z implementation at sampled even widths.
+Control medians stay within about 0.4% of parity. All 50 processes verified their
+results; all cohorts remain unbaselined. This local shortcut leaves the public
+threshold unchanged and establishes no fresh comparison with GMP.
+
 ## Quick start
 
 The [verified immediate-add probe](docs/plan_context/performance-follow-up.md#verified-immediate-add-probe-october-27-2026)

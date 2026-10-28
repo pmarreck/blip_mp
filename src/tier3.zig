@@ -2333,7 +2333,7 @@ pub fn divModBurnikelZiegler(
 	r_out: []u8,
 	allocator: std.mem.Allocator,
 ) std.mem.Allocator.Error!struct { q_len: usize, r_len: usize } {
-	const got = try divModBurnikelZieglerImpl(.{.recurse_threshold=BZ_RECURSE_THRESHOLD,.leading_block=true,.short_quotient=true}, u, u_len_in, v, v_len, q_out, r_out, allocator);
+	const got = try divModBurnikelZieglerImpl(.{.recurse_threshold=BZ_RECURSE_THRESHOLD,.leading_block=true,.short_quotient=true,.short_carry=true}, u, u_len_in, v, v_len, q_out, r_out, allocator);
 	return .{ .q_len = got.q_len, .r_len = got.r_len };
 }
 
