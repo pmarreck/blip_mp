@@ -2294,8 +2294,9 @@ pub fn divModBurnikelZieglerByteFallback(u: []const u8, u_len: usize, v: []const
 /// BZ_TOPLEVEL_THRESHOLD AND even (so the recursive halving lands cleanly),
 /// runs the B-Z algorithm: normalize the divisor so its top bit is set,
 /// shift the dividend identically, pad the dividend to a multiple of n,
-/// then iterate top-block-to-bottom calling bzDiv2nByN with the carried
-/// remainder of the previous block. Otherwise uses chunk-reading Knuth for
+/// initialize the highest block with a comparison and at most one subtraction,
+/// then call bzDiv2nByN for each lower block with the carried remainder.
+/// Otherwise uses chunk-reading Knuth for
 /// divisors above eight bytes and byte Knuth for smaller divisors.
 ///
 /// Preconditions:
@@ -2311,7 +2312,7 @@ pub fn divModBurnikelZiegler(
 	r_out: []u8,
 	allocator: std.mem.Allocator,
 ) std.mem.Allocator.Error!struct { q_len: usize, r_len: usize } {
-	const got = try divModBurnikelZieglerImpl(true, BZ_RECURSE_THRESHOLD, false, u, u_len_in, v, v_len, q_out, r_out, allocator);
+	const got = try divModBurnikelZieglerImpl(true, BZ_RECURSE_THRESHOLD, true, u, u_len_in, v, v_len, q_out, r_out, allocator);
 	return .{ .q_len = got.q_len, .r_len = got.r_len };
 }
 

@@ -9,7 +9,7 @@ const Timing = struct { cpu_ns: f64, wall_ns: f64 };
 const Sample = struct { cpu_ns: [4]f64, wall_ns: [4]f64 };
 const Options = struct { sizes: [widths.len]usize, count: usize };
 
-test "B-Z leading block divides a normalized one-block value without recursive allocations" {
+test "selected B-Z divides a normalized one-block value without recursive allocations" {
 	// A normalized n-byte divisor is at least half the n-byte range. The
 	// largest n-byte dividend therefore has q=1 and needs one subtraction.
 	// Eight allocations cover the existing top-level byte buffers; denying
@@ -25,16 +25,18 @@ test "B-Z leading block divides a normalized one-block value without recursive a
 		try std.testing.expectError(error.OutOfMemory,blip.tier3.divModBurnikelZieglerCutoff128(u,width,v,width,q[1..2],r[1..width+1],control.allocator()));
 		try std.testing.expect(control.has_induced_failure);
 		try std.testing.expectEqual(control.allocated_bytes,control.freed_bytes);
-		var limited = std.testing.FailingAllocator.init(std.testing.allocator,.{.fail_index=8});
-		const got = try blip.tier3.divModBurnikelZieglerLeadingBlock(u,width,v,width,q[1..2],r[1..width+1],limited.allocator());
-		try std.testing.expectEqual(@as(usize,1),got.q_len);
-		try std.testing.expectEqual(width,got.r_len);
-		try std.testing.expectEqualSlices(u8,&.{0xa5,1,0xa5},q);
-		try std.testing.expectEqual(@as(u8,127),r[width]);
-		for (r[1..width]) |byte| try std.testing.expectEqual(@as(u8,255),byte);
-		try std.testing.expectEqual(@as(u8,0xa5),r[0]);
-		try std.testing.expectEqual(@as(u8,0xa5),r[width+1]);
-		try std.testing.expectEqual(limited.allocated_bytes,limited.freed_bytes);
+		inline for (.{blip.tier3.divModBurnikelZieglerLeadingBlock,blip.tier3.divModBurnikelZiegler}) |divide| {
+			var limited = std.testing.FailingAllocator.init(std.testing.allocator,.{.fail_index=8});
+			const got = try divide(u,width,v,width,q[1..2],r[1..width+1],limited.allocator());
+			try std.testing.expectEqual(@as(usize,1),got.q_len);
+			try std.testing.expectEqual(width,got.r_len);
+			try std.testing.expectEqualSlices(u8,&.{0xa5,1,0xa5},q);
+			try std.testing.expectEqual(@as(u8,127),r[width]);
+			for (r[1..width]) |byte| try std.testing.expectEqual(@as(u8,255),byte);
+			try std.testing.expectEqual(@as(u8,0xa5),r[0]);
+			try std.testing.expectEqual(@as(u8,0xa5),r[width+1]);
+			try std.testing.expectEqual(limited.allocated_bytes,limited.freed_bytes);
+		}
 	}
 }
 

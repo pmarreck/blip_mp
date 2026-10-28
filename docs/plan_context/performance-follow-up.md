@@ -947,10 +947,62 @@ signed B-Z entry with the candidate under `division-leading-block-paired-v1`,
 sharing the public probe's inputs, paired schedule and full-result checks.
 `profiling-division-leading.json` retains all three operand geometries and the
 odd-width fallback control. Run it through `./bm --verified-division --config
-profiling-division-leading.json`. Performance selection awaits measurements.
+profiling-division-leading.json`.
 
 The complete native suite passed in 89 seconds of mixed Nix preparation/check
 time. The optimized production build and all-system evaluation also passed.
+
+### Leading-block results and selection
+
+Campaign `blip-mp-division-leading-20261028T181111Z` measured commit
+`33673cf7e64645fb408350b86dd830f4d3a85415` with source digest
+`8edd7e8245d5385118f7cf0811a3c337f278044e5a011828f9f8d5607b53c4a2`
+unchanged. All 45 processes verified complete results. Both short-quotient
+cohorts remained `INCONCLUSIVE` after one variation retry. The balanced
+one-CPU cohort became `UNBASELINED` after its retry; the other three cohorts
+were `UNBASELINED` on their first attempts. No baseline was approved.
+
+The table gives median candidate/original B-Z CPU ratios across thirty paired
+samples per selected cohort. Each cell is **1-CPU / 12-CPU affinity**. Hardware,
+compiler, inputs, signs, normalization coverage and timed verification match
+the public-path campaign above; this experiment times two explicit BLIP paths.
+
+| Divisor bytes | Dividend = divisor + 1 byte | Dividend = 2 × divisor | Dividend = 4 × divisor |
+|---:|---:|---:|---:|
+| 8,192 | 0.584 / 0.574 | 0.827 / 0.826 | 0.920 / 0.918 |
+| 12,288 | 0.599 / 0.596 | 0.842 / 0.842 | 0.931 / 0.929 |
+| 16,384 | 0.583 / 0.584 | 0.852 / 0.852 | 0.937 / 0.938 |
+| 16,385 | 1.009 / 0.999 | 1.001 / 1.001 | 0.998 / 0.999 |
+
+At recursive widths, every process mean from both selected and diagnostic
+attempts favors the shortcut. Median CPU savings are about 40–43% for short
+quotients, 15–17% for balanced inputs and 6–8% for long dividends. The odd-width
+fallback is unchanged and its medians remain within 0.9% of parity. Its
+individual process ratios span 0.942–1.079, so these observations do not support
+a claim of a small fallback speedup. The
+[summary](../benchmarks/storage-aware/division-leading-summary.json) preserves
+all process ratios, selected components, sample ranges and verdicts. Complete
+external records use the campaign prefix and configured case-name suffixes.
+
+The consistent recursive gains support selecting the shortcut inside the
+default B-Z magnitude divider. The public integration threshold stays at
+99,999 bytes. The explicit signed `Mp.divModBurnikelZiegler` comparator retains
+the original cutoff-128 path; `Mp.divModBurnikelZieglerLeadingBlock` remains the
+selected candidate's direct entry. This keeps the paired benchmark meaningful
+after selection. The normalized one-block allocation test is extended to the
+default kernel and fails before that selection.
+
+The measured reduction does not resolve the earlier short-quotient regression
+against current public division. A matched comparison is needed before assigning
+its remaining ratio; multiplying medians from separate campaigns would not
+provide that measurement. The next bounded candidate is to use the existing
+Knuth leaf when the actual magnitude lengths prove the quotient fits one chunk,
+before allocating recursive work. GMP was not timed in this campaign.
+
+After selection, the complete native suite passed in 90 seconds of mixed Nix
+preparation/check time. The optimized production build and all-system evaluation
+passed. The fixed comparator and selected default both remain covered by the
+complete suite.
 
 ### Exact-capacity remainder regression
 

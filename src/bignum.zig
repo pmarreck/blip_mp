@@ -645,10 +645,11 @@ pub const Mp = struct {
 		try tier3DivModOp(q, rem, a, b);
 	}
 
-	/// Explicit byte-buffer Burnikel-Ziegler division with `divMod` semantics.
+	/// Fixed cutoff-128 B-Z comparison path, without the leading-block shortcut.
+	/// Preserves `divMod` semantics while ordinary dispatch can evolve.
 	pub fn divModBurnikelZiegler(q: *Mp, rem: *Mp, a: *const Mp, b: *const Mp) ArithError!void {
 		if (b.cached_sign == 0) return error.DivisionByZero;
-		try tier3DivModOpBZ(q,rem,a.payload(),b.payload());
+		try tier3DivModOpBZWith(tier3.divModBurnikelZieglerCutoff128,q,rem,a.payload(),b.payload());
 	}
 
 	/// Experimental B-Z leading-block shortcut with the same signed contract.

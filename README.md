@@ -69,6 +69,14 @@ division's time. These compare two BLIP paths; GMP supplies correctness answers
 outside timing. The six cohorts are unbaselined. Dispatch remains unchanged
 because divisor width alone cannot predict the benefit.
 
+Skipping B-Z's trivial highest block subsequently saves
+[40–43%, 15–17% and 6–8% CPU time](docs/plan_context/performance-follow-up.md#leading-block-results-and-selection)
+for short-quotient, balanced and long-dividend cases, respectively, against
+the preceding B-Z implementation. The odd-width fallback stays near parity.
+These gains support the local shortcut; they do not establish a new GMP win
+or a lower public dispatch threshold. All 45 processes verified their results;
+timing verdicts remain unbaselined or inconclusive.
+
 ## Quick start
 
 The [verified immediate-add probe](docs/plan_context/performance-follow-up.md#verified-immediate-add-probe-october-27-2026)
