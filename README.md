@@ -90,6 +90,8 @@ notes retain the unbaselined and inconclusive cohort verdicts.
 and fusion around transform-padding boundaries.
 Its first measurements saved 15–22% CPU time just above sampled padding jumps
 but lost elsewhere, so production continues to use fusion.
+`./bm --verified-hybrid` tests whether fusing complete subtrees recovers those
+losses while retaining truncation's padding-boundary gains.
 
 Requires [Nix](https://nixos.org/) (handles the Zig 0.16.0 toolchain and GMP build for benchmarks).
 

@@ -1,0 +1,94 @@
+{
+  "schema": "performance-project/v1",
+  "project": "blip_mp",
+  "history_url": "file:///var/lib/performance-profiling",
+  "identity": {
+    "runtime": "Zig-0.16.0",
+    "build_mode": "ReleaseFast",
+    "concurrency": 1
+  },
+  "cases": [
+    {
+      "name": "gold_hybrid_1core",
+      "definition": "gold-hybrid-products-v1",
+      "cores": 1,
+      "processes": 5,
+      "mode": "bm",
+      "metric": "cpu_ns",
+      "comparison": "absolute",
+      "command": [
+        "blip-mp-gold-probe",
+        "hybrid",
+        "{sizes}",
+        "2"
+      ],
+      "sizes": [
+        1024,
+        1025,
+        1537,
+        4096,
+        4097,
+        6145,
+        16384,
+        16385,
+        65535,
+        65536,
+        65537,
+        98305,
+        100000,
+        131071,
+        131072,
+        131073
+      ],
+      "bounds": [
+        0.1,
+        1000000000
+      ],
+      "policy": {
+        "max_cv": 0.1
+      },
+      "timeout_ms": 60000
+    },
+    {
+      "name": "gold_hybrid_12core",
+      "definition": "gold-hybrid-products-v1",
+      "cores": 12,
+      "processes": 5,
+      "mode": "bm",
+      "metric": "cpu_ns",
+      "comparison": "absolute",
+      "command": [
+        "blip-mp-gold-probe",
+        "hybrid",
+        "{sizes}",
+        "2"
+      ],
+      "sizes": [
+        1024,
+        1025,
+        1537,
+        4096,
+        4097,
+        6145,
+        16384,
+        16385,
+        65535,
+        65536,
+        65537,
+        98305,
+        100000,
+        131071,
+        131072,
+        131073
+      ],
+      "bounds": [
+        0.1,
+        1000000000
+      ],
+      "policy": {
+        "max_cv": 0.1
+      },
+      "timeout_ms": 60000
+    }
+  ]
+}

@@ -2,9 +2,10 @@
 const std = @import("std");
 const blip = @import("blip_mp");
 const fft = blip.fft;
-const Layout = enum { stockham, paired, fused, truncated };
-const Mode = enum { product, passes, truncated };
+const Layout = enum { stockham, paired, fused, truncated, hybrid };
+const Mode = enum { product, passes, truncated, hybrid };
 fn layouts(mode: Mode) [3]Layout {
+	if (mode == .hybrid) return .{ .fused, .truncated, .hybrid };
 	return if (mode == .truncated) .{ .stockham, .fused, .truncated } else .{ .stockham, .paired, .fused };
 }
 const Options = struct { mode: Mode, sizes: [16]usize, count: usize, iterations: usize };
@@ -47,7 +48,7 @@ pub fn main(init: std.process.Init) !void {
 	const report = .{
 		.schema = "performance-measurement/v1", .correct = true, .build_mode = "ReleaseFast",
 		.compiler = @import("builtin").zig_version_string,
-		.method = if (options.mode == .truncated) "gold-truncated-products-v1" else "gold-paired-layouts-v1", .mode = @tagName(options.mode),
+		.method = switch (options.mode) { .hybrid => "gold-hybrid-products-v1", .truncated => "gold-truncated-products-v1", else => "gold-paired-layouts-v1" }, .mode = @tagName(options.mode),
 		.cpu_clock = "CLOCK_PROCESS_CPUTIME_ID", .wall_clock = "CLOCK_MONOTONIC",
 		.seed_usage = "fixed 0x601D_B3AC; identical inputs across layouts; engine seed does not alter inputs",
 		.normalization = "rotating ABCCBA batches; primary samples average all layouts per operation; components preserve individual means; no subtraction",
@@ -163,12 +164,14 @@ const Fixture = struct {
 		inline for (std.enums.values(Layout)) |method| {
 			if (layout == method) {
 				if (self.mode != .passes) {
-					const len = if (method == .truncated)
+					const len = if (method == .hybrid)
+						fft.goldMulMagnitudesTruncatedFused(self.a, self.b, self.out, self.pa, self.pb, self.tw_fwd, self.tw_inv)
+					else if (method == .truncated)
 						fft.goldMulMagnitudesTruncated(self.a, self.b, self.out, self.pa, self.pb, self.tw_fwd, self.tw_inv)
 					else fft.goldMulMagnitudesWithLayout(@enumFromInt(@intFromEnum(method)), self.a, self.b, self.out, self.pa, self.pb, self.tw_fwd, self.tw_inv, if (method == .stockham) self.scratch else &.{});
 					if (!std.mem.eql(u8, self.expected, self.out[0..len])) return error.IncorrectWork;
 				} else {
-					if (method == .truncated) return error.InvalidArguments;
+					if (method == .truncated or method == .hybrid) return error.InvalidArguments;
 					@memcpy(self.pa, self.a);
 					if (method == .stockham) {
 						fft.goldNttStockham(self.pa, self.scratch, self.tw_fwd);
@@ -206,6 +209,7 @@ test "Goldilocks probe classifies modes sizes and bounded iteration counts" {
 	try std.testing.expectEqualSlices(bool, &.{true, false, false, true, false, true}, &accepted);
 	for (values) |size| _ = try parse(&.{"product", size, "1"});
 	for (values) |size| _ = try parse(&.{"truncated", size, "1"});
+	for (values) |size| _ = try parse(&.{"hybrid", size, "1"});
 	try std.testing.expectError(error.InvalidArguments, parse(&.{"unknown", "64", "1"}));
 	try std.testing.expectError(error.InvalidArguments, parse(&.{"product", "64,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,80", "1"}));
 	try std.testing.expectError(error.InvalidArguments, parse(&.{}));

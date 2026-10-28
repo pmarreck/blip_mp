@@ -36,6 +36,7 @@ annotate=[
 	docs/plan_context/roadmap-reconciliation.md = Current dispositions and evidence for unchecked historical roadmap tasks
 	profiling-division.json = Verified division workloads with separate 1/12 CPU cohorts
 	profiling-goldilocks.json = Paired Goldilocks product and transform-pass timing cohorts
+	profiling-hybrid.json = Fused, recursive truncated and fused-subtree product comparison cohorts
 	profiling-inverse.json = Inverse algorithm measurements for 1/12 CPU cohorts
 	profiling-linux-counters.json = Interleaved add diagnostic cases with Linux hardware counters
 	profiling-multiplication.json = Asymmetric multiplication boundary, ratio and allocation measurement cohorts

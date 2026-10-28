@@ -139,3 +139,35 @@ The successful campaign waited roughly six minutes for admission. An earlier
 launch completed measurement but saved no records because a trailing separator
 in the supplied run identifier produced an invalid history ID. The corrected
 launch retained the same source/settings; it is not a selected timing retry.
+
+## Fused complete subtrees
+
+The next candidate keeps the same partial-region recurrence. When a forward
+subtree has all inputs and outputs present, or an inverse subtree requests all
+outputs, it calls the fused kernel. Strided twiddle reads share the original
+canonical-BLIP table without copying or creating a native-word array. The full
+transform control is compiled separately with unit stride, so it does not pay
+for the new dynamic stride multiplication.
+
+Empty candidate transforms and products first failed the independent oracles.
+Both recursive and fused-subtree variants now run through the complete small
+DFT/mixed-inverse corpus, totaling 92,736 cases. GMP packing/carry/canary controls
+include both variants, and the forced-backend integration corpus adds the new
+product at every existing Goldilocks size. Production dispatch is unchanged.
+
+`./bm --verified-hybrid` compares full fusion, recursive truncation and fused
+subtrees in the same rotating mirrored batches. Its separate history method is
+`gold-hybrid-products-v1`; original modes retain their labels and meaning. The
+same padding-boundary sizes are extended with 131071, 131072 and 131073 bytes
+to cover another jump above the production threshold. Each process has an
+explicit 60-second deadline for this expanded sweep. The new mode and shell
+route first failed their existing behavioral/CLI controls before implementation.
+
+The complete native suite passed with 13,183 GMP comparisons in 100 seconds of
+mixed Nix preparation/check time. The production build and all-system evaluation
+passed. The ReleaseFast probe had SHA-256
+`c3ff2b4e390efbe4a164b3aea18ccb45a1a50a23fac7be6e53a3bfe712360567`.
+The full fused forward/inverse functions retained their 1946/2178-byte sizes.
+Forward disassembly differed in the operands of a register move/multiply pair,
+so this is not a claim of identical machine bytes. SIMD work remains deferred
+while the combined scalar layout is measured.

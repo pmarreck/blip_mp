@@ -2873,11 +2873,16 @@ pub fn goldNttForwardPaired(comptime fused: bool, a: []u8, twiddles: []const u8)
 	const n = a.len / gold_residue.slot_bytes;
 	std.debug.assert(n != 0 and n & (n - 1) == 0 and a.len % gold_residue.slot_bytes == 0);
 	std.debug.assert(twiddles.len / gold_residue.slot_bytes >= n / 2);
+	goldNttForwardPairedInner(fused, false, a, twiddles, 1);
+}
+
+fn goldNttForwardPairedInner(comptime fused: bool, comptime strided: bool, a: []u8, twiddles: []const u8, stride: usize) void {
+	const n = a.len / gold_residue.slot_bytes;
 	var m = n;
 	while (m > 1) : (m >>= 1) {
 		if (fused and m >= 4) {
 			const quarter = m >> 2;
-			const step = n / m;
+			const step = (n / m) * (if (strided) stride else 1);
 			var base: usize = 0;
 			while (base < n) : (base += m) {
 				for (0..quarter) |j| {
@@ -2900,7 +2905,7 @@ pub fn goldNttForwardPaired(comptime fused: bool, a: []u8, twiddles: []const u8)
 			continue;
 		}
 		const half = m >> 1;
-		const step = n / m;
+		const step = (n / m) * (if (strided) stride else 1);
 		var base: usize = 0;
 		while (base < n) : (base += m) {
 			for (0..half) |j| {
@@ -2919,12 +2924,17 @@ pub fn goldNttInversePaired(comptime fused: bool, a: []u8, twiddles: []const u8)
 	const n = a.len / gold_residue.slot_bytes;
 	std.debug.assert(n != 0 and n & (n - 1) == 0 and a.len % gold_residue.slot_bytes == 0);
 	std.debug.assert(twiddles.len / gold_residue.slot_bytes >= n / 2);
+	goldNttInversePairedInner(fused, false, a, twiddles, 1);
+}
+
+fn goldNttInversePairedInner(comptime fused: bool, comptime strided: bool, a: []u8, twiddles: []const u8, stride: usize) void {
+	const n = a.len / gold_residue.slot_bytes;
 	var m: usize = 2;
 	while (m <= n) : (m <<= 1) {
 		if (fused and m <= n / 2) {
 			const quarter = m >> 1;
 			const width = m * 2;
-			const step = n / width;
+			const step = (n / width) * (if (strided) stride else 1);
 			var base: usize = 0;
 			while (base < n) : (base += width) {
 				for (0..quarter) |j| {
@@ -2947,7 +2957,7 @@ pub fn goldNttInversePaired(comptime fused: bool, a: []u8, twiddles: []const u8)
 			continue;
 		}
 		const half = m >> 1;
-		const step = n / m;
+		const step = (n / m) * (if (strided) stride else 1);
 		var base: usize = 0;
 		while (base < n) : (base += m) {
 			for (0..half) |j| {
@@ -3031,17 +3041,34 @@ test "paired Goldilocks transforms match a direct field DFT and canonical bytes"
 	}
 }
 
+/// Truncate partial regions and fuse complete transform subtrees.
+pub fn goldTftFused(a: []u8, twiddles: []const u8, active: usize, count: usize) void {
+	goldTftDispatch(true, a, twiddles, active, count);
+}
+
+pub fn goldItftFused(a: []u8, tw_fwd: []const u8, tw_inv: []const u8, count: usize) void {
+	goldItftDispatch(true, a, tw_fwd, tw_inv, count);
+}
+
 /// Zero suffix begins at `active`; produce the first `count` bit-reversed outputs.
 pub fn goldTft(a: []u8, twiddles: []const u8, active: usize, count: usize) void {
+	goldTftDispatch(false, a, twiddles, active, count);
+}
+
+fn goldTftDispatch(comptime fused: bool, a: []u8, twiddles: []const u8, active: usize, count: usize) void {
 	const n = a.len / gold_residue.slot_bytes;
 	std.debug.assert(n != 0 and n & (n - 1) == 0 and a.len % gold_residue.slot_bytes == 0);
 	std.debug.assert(active <= n and count <= n and twiddles.len / gold_residue.slot_bytes >= n / 2);
-	goldTftInner(a, twiddles, active, count, 1);
+	goldTftInner(fused, a, twiddles, active, count, 1);
 }
 
-fn goldTftInner(a: []u8, twiddles: []const u8, active: usize, count: usize, stride: usize) void {
+fn goldTftInner(comptime fused: bool, a: []u8, twiddles: []const u8, active: usize, count: usize, stride: usize) void {
 	const n = a.len / gold_residue.slot_bytes;
 	if (n == 1 or active == 0 or count == 0) return;
+	if (fused and active == n and count == n) {
+		goldNttForwardPairedInner(true, true, a, twiddles, stride);
+		return;
+	}
 	const half = n >> 1;
 	const child_active = @min(active, half);
 	for (0..child_active) |j| {
@@ -3051,22 +3078,30 @@ fn goldTftInner(a: []u8, twiddles: []const u8, active: usize, count: usize, stri
 		gold_residue.write(a, j, goldAddMod(x, y));
 	}
 	const split = half * gold_residue.slot_bytes;
-	goldTftInner(a[0..split], twiddles, child_active, @min(count, half), 2 * stride);
-	if (count > half) goldTftInner(a[split..], twiddles, child_active, count - half, 2 * stride);
+	goldTftInner(fused, a[0..split], twiddles, child_active, @min(count, half), 2 * stride);
+	if (count > half) goldTftInner(fused, a[split..], twiddles, child_active, count - half, 2 * stride);
 }
 
 /// First `count` entries are frequencies; the suffix contains known N*x values.
 /// Recover N*x throughout, preserving the known suffix.
 pub fn goldItft(a: []u8, tw_fwd: []const u8, tw_inv: []const u8, count: usize) void {
+	goldItftDispatch(false, a, tw_fwd, tw_inv, count);
+}
+
+fn goldItftDispatch(comptime fused: bool, a: []u8, tw_fwd: []const u8, tw_inv: []const u8, count: usize) void {
 	const n = a.len / gold_residue.slot_bytes;
 	std.debug.assert(n != 0 and n & (n - 1) == 0 and a.len % gold_residue.slot_bytes == 0);
 	std.debug.assert(count <= n and tw_fwd.len / gold_residue.slot_bytes >= n / 2 and tw_inv.len / gold_residue.slot_bytes >= n / 2);
-	goldItftInner(a, tw_fwd, tw_inv, count, 1);
+	goldItftInner(fused, a, tw_fwd, tw_inv, count, 1);
 }
 
-fn goldItftInner(a: []u8, tw_fwd: []const u8, tw_inv: []const u8, count: usize, stride: usize) void {
+fn goldItftInner(comptime fused: bool, a: []u8, tw_fwd: []const u8, tw_inv: []const u8, count: usize, stride: usize) void {
 	const n = a.len / gold_residue.slot_bytes;
 	if (n == 1 or count == 0) return;
+	if (fused and count == n) {
+		goldNttInversePairedInner(true, true, a, tw_inv, stride);
+		return;
+	}
 	const half = n >> 1;
 	const split = half * gold_residue.slot_bytes;
 	if (count <= half) {
@@ -3076,19 +3111,19 @@ fn goldItftInner(a: []u8, tw_fwd: []const u8, tw_inv: []const u8, count: usize, 
 			const halved = (sum >> 1) + (if (sum & 1 != 0) (GOLDILOCKS_P + 1) / 2 else @as(u64, 0));
 			gold_residue.write(a, j, halved);
 		}
-		goldItftInner(a[0..split], tw_fwd, tw_inv, count, 2 * stride);
+		goldItftInner(fused, a[0..split], tw_fwd, tw_inv, count, 2 * stride);
 		for (0..half) |j| {
 			const x = gold_residue.read(a, j);
 			gold_residue.write(a, j, goldSubMod(goldAddMod(x, x), gold_residue.read(a, j + half)));
 		}
 	} else {
-		goldItftInner(a[0..split], tw_fwd, tw_inv, half, 2 * stride);
+		goldItftInner(fused, a[0..split], tw_fwd, tw_inv, half, 2 * stride);
 		const right_count = count - half;
 		for (right_count..half) |j| {
 			const difference = goldSubMod(gold_residue.read(a, j), gold_residue.read(a, j + half));
 			gold_residue.write(a, j + half, goldMulMod(difference, gold_residue.read(tw_fwd, j * stride)));
 		}
-		goldItftInner(a[split..], tw_fwd, tw_inv, right_count, 2 * stride);
+		goldItftInner(fused, a[split..], tw_fwd, tw_inv, right_count, 2 * stride);
 		for (0..half) |j| {
 			const x = gold_residue.read(a, j);
 			const y = goldMulMod(gold_residue.read(a, j + half), gold_residue.read(tw_inv, j * stride));
@@ -3164,24 +3199,28 @@ test "truncated Goldilocks transforms cover all input output prefixes and mixed 
 			for (0..n + 1) |active| {
 				Oracle.dft(input, expected, active, root);
 				for (0..n + 1) |count| {
-					errdefer std.debug.print("TFT n={d} active={d} count={d} pattern={d}\n", .{ n, active, count, pattern });
-					@memset(guard, 0xa5);
-					for (0..n) |i| gold_residue.write(actual, i, if (i < active) gold_residue.read(input, i) else 0);
-					goldTft(actual, tw_fwd, active, count);
-					for (0..count) |i| try testing.expectEqualSlices(u8, gold_residue.encoded(expected, i), gold_residue.encoded(actual, i));
-					try testing.expectEqual(@as(u8, 0xa5), guard[0]);
-					try testing.expectEqual(@as(u8, 0xa5), guard[guard.len - 1]);
+					inline for (.{ false, true }) |fused| {
+						errdefer std.debug.print("TFT n={d} active={d} count={d} pattern={d} fused={any}\n", .{ n, active, count, pattern, fused });
+						@memset(guard, 0xa5);
+						for (0..n) |i| gold_residue.write(actual, i, if (i < active) gold_residue.read(input, i) else 0);
+						if (fused) goldTftFused(actual, tw_fwd, active, count) else goldTft(actual, tw_fwd, active, count);
+						for (0..count) |i| try testing.expectEqualSlices(u8, gold_residue.encoded(expected, i), gold_residue.encoded(actual, i));
+						try testing.expectEqual(@as(u8, 0xa5), guard[0]);
+						try testing.expectEqual(@as(u8, 0xa5), guard[guard.len - 1]);
+					}
 				}
 			}
 			Oracle.dft(input, expected, n, root);
 			for (0..n + 1) |count| {
-				errdefer std.debug.print("ITFT n={d} count={d} pattern={d}\n", .{ n, count, pattern });
-				@memset(guard, 0xa5);
-				for (0..n) |i| gold_residue.write(actual, i, gold_residue.read(if (i < count) expected else scaled, i));
-				goldItft(actual, tw_fwd, tw_inv, count);
-				for (0..n) |i| try testing.expectEqualSlices(u8, gold_residue.encoded(scaled, i), gold_residue.encoded(actual, i));
-				try testing.expectEqual(@as(u8, 0xa5), guard[0]);
-				try testing.expectEqual(@as(u8, 0xa5), guard[guard.len - 1]);
+				inline for (.{ false, true }) |fused| {
+					errdefer std.debug.print("ITFT n={d} count={d} pattern={d} fused={any}\n", .{ n, count, pattern, fused });
+					@memset(guard, 0xa5);
+					for (0..n) |i| gold_residue.write(actual, i, gold_residue.read(if (i < count) expected else scaled, i));
+					if (fused) goldItftFused(actual, tw_fwd, tw_inv, count) else goldItft(actual, tw_fwd, tw_inv, count);
+					for (0..n) |i| try testing.expectEqualSlices(u8, gold_residue.encoded(scaled, i), gold_residue.encoded(actual, i));
+					try testing.expectEqual(@as(u8, 0xa5), guard[0]);
+					try testing.expectEqual(@as(u8, 0xa5), guard[guard.len - 1]);
+				}
 			}
 		}
 	}
@@ -3206,12 +3245,16 @@ pub const GoldLayout = enum { stockham, paired, fused };
 /// N is the next power of two at least ceil(a.len/2)+ceil(b.len/2)-1.
 /// Data buffers need N encoded slots; each twiddle table needs N/2 slots.
 pub fn goldMulMagnitudesTruncated(a: []const u8, b: []const u8, out: []u8, pa: []u8, pb: []u8, tw_fwd: []u8, tw_inv: []u8) usize {
-	return goldMulMagnitudesImpl(.paired, true, a, b, out, pa, pb, tw_fwd, tw_inv, &.{});
+	return goldMulMagnitudesImpl(.paired, true, false, a, b, out, pa, pb, tw_fwd, tw_inv, &.{});
+}
+
+pub fn goldMulMagnitudesTruncatedFused(a: []const u8, b: []const u8, out: []u8, pa: []u8, pb: []u8, tw_fwd: []u8, tw_inv: []u8) usize {
+	return goldMulMagnitudesImpl(.paired, true, true, a, b, out, pa, pb, tw_fwd, tw_inv, &.{});
 }
 
 /// Experimental layout selection; paired layouts require no Stockham scratch.
 pub fn goldMulMagnitudesWithLayout(comptime layout: GoldLayout, a: []const u8, b: []const u8, out: []u8, pa: []u8, pb: []u8, tw_fwd: []u8, tw_inv: []u8, stockham_scratch: []u8) usize {
-	return goldMulMagnitudesImpl(layout, false, a, b, out, pa, pb, tw_fwd, tw_inv, stockham_scratch);
+	return goldMulMagnitudesImpl(layout, false, false, a, b, out, pa, pb, tw_fwd, tw_inv, stockham_scratch);
 }
 
 test "truncated Goldilocks products match GMP across packing and carry boundaries" {
@@ -3241,9 +3284,11 @@ test "truncated Goldilocks products match GMP across packing and carry boundarie
 				if (pattern == 2) a[a.len - 1] = 1;
 			}
 			const expected_len = try @import("gmp_test_support").product(a, b, expected);
-			inline for (0..4) |method| {
+			inline for (0..5) |method| {
 				@memset(result, 0xa5); @memset(storage, 0xa5);
-				const len = if (method == 3)
+				const len = if (method == 4)
+					goldMulMagnitudesTruncatedFused(a, b, result[1 .. result.len - 1], work[0..bytes], work[bytes .. 2 * bytes], work[2 * bytes ..][0..tw_bytes], work[2 * bytes + tw_bytes ..][0..tw_bytes])
+				else if (method == 3)
 					goldMulMagnitudesTruncated(a, b, result[1 .. result.len - 1], work[0..bytes], work[bytes .. 2 * bytes], work[2 * bytes ..][0..tw_bytes], work[2 * bytes + tw_bytes ..][0..tw_bytes])
 				else goldMulMagnitudesWithLayout(@enumFromInt(method), a, b, result[1 .. result.len - 1], work[0..bytes], work[bytes .. 2 * bytes], work[2 * bytes ..][0..tw_bytes], work[2 * bytes + tw_bytes ..][0..tw_bytes], if (method == 0) work[3 * bytes ..] else &.{});
 				try testing.expectEqualSlices(u8, expected[0..expected_len], result[1..][0..len]);
@@ -3262,6 +3307,9 @@ test "truncated Goldilocks products match GMP across packing and carry boundarie
 	var empty_out: [1]u8 = .{0xa5};
 	try testing.expectEqual(@as(usize, 0), goldMulMagnitudesTruncated(&.{}, &.{1}, &empty_out, &.{}, &.{}, &.{}, &.{}));
 	try testing.expectEqual(@as(usize, 0), goldMulMagnitudesTruncated(&.{1}, &.{}, &empty_out, &.{}, &.{}, &.{}, &.{}));
+	try testing.expectEqual(@as(u8, 0xa5), empty_out[0]);
+	try testing.expectEqual(@as(usize, 0), goldMulMagnitudesTruncatedFused(&.{}, &.{1}, &empty_out, &.{}, &.{}, &.{}, &.{}));
+	try testing.expectEqual(@as(usize, 0), goldMulMagnitudesTruncatedFused(&.{1}, &.{}, &empty_out, &.{}, &.{}, &.{}, &.{}));
 	try testing.expectEqual(@as(u8, 0xa5), empty_out[0]);
 }
 
@@ -3283,12 +3331,13 @@ pub fn goldMulMagnitudesWithScratch(
 	tw_inv: []u8,
 	stockham_scratch: []u8,
 ) usize {
-	return goldMulMagnitudesImpl(.stockham, false, a, b, out, pa, pb, tw_fwd, tw_inv, stockham_scratch);
+	return goldMulMagnitudesImpl(.stockham, false, false, a, b, out, pa, pb, tw_fwd, tw_inv, stockham_scratch);
 }
 
 fn goldMulMagnitudesImpl(
 	comptime layout: GoldLayout,
 	comptime truncated: bool,
+	comptime fused_truncated: bool,
 	a: []const u8,
 	b: []const u8,
 	out: []u8,
@@ -3360,8 +3409,8 @@ fn goldMulMagnitudesImpl(
 
 	// Forward NTT both; pointwise mul; inverse NTT; scale.
 	if (truncated) {
-		goldTft(pa_n, tw_fwd_n, da, coefficients);
-		goldTft(pb_n, tw_fwd_n, db, coefficients);
+		goldTftDispatch(fused_truncated, pa_n, tw_fwd_n, da, coefficients);
+		goldTftDispatch(fused_truncated, pb_n, tw_fwd_n, db, coefficients);
 	} else if (layout == .stockham) {
 		goldNttStockham(pa_n, sc_n, tw_fwd_n);
 		goldNttStockham(pb_n, sc_n, tw_fwd_n);
@@ -3373,7 +3422,7 @@ fn goldMulMagnitudesImpl(
 	if (truncated) {
 		// The inverse's remaining entries are known scaled coefficients, all zero.
 		gold_residue.clear(pa_n[coefficients * gold_residue.slot_bytes ..]);
-		goldItft(pa_n, tw_fwd_n, tw_inv_n, coefficients);
+		goldItftDispatch(fused_truncated, pa_n, tw_fwd_n, tw_inv_n, coefficients);
 	} else if (layout == .stockham) goldNttStockham(pa_n, sc_n, tw_inv_n) else goldNttInversePaired(layout == .fused, pa_n, tw_inv_n);
 	const n_inv = goldInvMod(@intCast(N));
 
