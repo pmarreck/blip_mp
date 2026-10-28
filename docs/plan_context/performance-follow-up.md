@@ -1310,6 +1310,56 @@ still govern the shared paired sampler. The complete suite passed in 86 seconds
 of mixed Nix preparation/check time; production build and all-system evaluation
 passed. SIMD remains deferred while these measurements resolve algorithm choice.
 
+### Quotient-geometry crossover results
+
+Campaign `blip-mp-division-geometry-20261028T194115Z` measured clean commit
+`2dfa5799a7112315da788fc75e9af3afb78a7dcb` on the same Linux x86_64 host
+with Zig 0.16.0 ReleaseFast. All 35 processes verified their results; all six
+cohorts were `UNBASELINED`. The 16,384-byte/12-CPU cohort needed its single
+variation retry. No baseline was approved. The source digest stayed
+`c6dfd803ff30d1625dd8cf80526b7e42069b6f67540af7e521a599b688679ea8`;
+the probe SHA-256 was
+`ae221bd40d43dfc12671cd8b9df6ccebafac0ae7dfdc759ba7aa099eeb22747c`.
+
+Cells are median paired CPU ratios, selected B-Z divided by Knuth, for
+**1-CPU / 12-CPU affinity**. Each selected cohort supplies thirty paired
+samples per cell. The gap is dividend magnitude bytes minus divisor magnitude
+bytes, not the actual quotient width. A dash lies outside the declared domain.
+
+| Extra dividend bytes | 4,096-byte divisor | 8,192-byte divisor | 16,384-byte divisor |
+|---:|---:|---:|---:|
+| 1 | 1.000 / 1.001 | 1.000 / 1.000 | 1.001 / 1.000 |
+| 7 | 1.001 / 1.001 | 1.000 / 1.000 | 1.001 / 1.000 |
+| 8 | 17.96 / 17.95 | 21.08 / 21.11 | 24.54 / 24.57 |
+| 16 | 16.75 / 16.78 | 19.62 / 19.62 | 22.88 / 22.85 |
+| 32 | 14.73 / 14.75 | 17.25 / 17.26 | 20.05 / 20.05 |
+| 64 | 11.99 / 11.98 | 13.98 / 13.97 | 16.20 / 16.20 |
+| 128 | 8.81 / 8.83 | 10.22 / 10.22 | 11.85 / 11.85 |
+| 256 | 5.90 / 5.92 | 6.86 / 6.86 | 7.86 / 7.86 |
+| 512 | 3.68 / 3.68 | 4.23 / 4.24 | 4.82 / 4.82 |
+| 1,024 | 2.21 / 2.21 | 2.52 / 2.52 | 2.84 / 2.84 |
+| 2,048 | 1.419 / 1.419 | 1.477 / 1.478 | 1.644 / 1.645 |
+| 4,096 | 0.967 / 0.965 | 0.979 / 0.979 | 0.970 / 0.969 |
+| 8,192 | — | 0.684 / 0.684 | 0.667 / 0.669 |
+| 16,384 | — | — | 0.483 / 0.483 |
+
+Every process mean, including retry diagnostics, favors Knuth at each sampled
+gap from 8 through 2,048 bytes. The existing one-chunk fallback keeps gaps 1
+and 7 near parity. At 4,096 extra bytes the methods are close; one 8,192-byte
+divisor process reverses the small median advantage. Larger gaps at the two
+larger divisor widths favor B-Z in every process. The
+[summary](../benchmarks/storage-aware/division-geometry-summary.json) preserves
+selected component means, sample ranges, all process means and verdicts. The 32-case paired method
+differs from the 64-case four-way GMP probe, so their small crossover differences
+are not evidence of another code change. GMP was not timed here.
+
+These data motivate an experimental outer fallback through a 2,048-byte gap
+for divisors at least 4,096 bytes wide. That is a conservative sampled bound,
+not an optimum or a proof about unmeasured widths. Keep the current entry fixed,
+qualify the new boundary and adjacent divisor alignments, and measure the
+candidate before selecting it. The internal short-carry leaf and public
+dispatch threshold remain unchanged by this measurement.
+
 ### Exact-capacity remainder regression
 
 Reviewing the B-Z entry point exposed a separate single-byte-divisor bug. With

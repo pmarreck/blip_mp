@@ -35,6 +35,7 @@ annotate=[
 	docs/benchmarks/storage-aware/division-competitors-summary.json = Matched public BLIP, Knuth, B-Z and GMP CPU ratios with cohort verdicts
 	docs/benchmarks/storage-aware/division-cutoff-summary.json = Paired recursive division cutoff ratios, controls and cohort verdicts
 	docs/benchmarks/storage-aware/division-fallback-summary.json = Paired chunk versus byte division fallback ratios and cohort verdicts
+	docs/benchmarks/storage-aware/division-geometry-summary.json = Knuth and selected B-Z ratios across independent dividend gaps
 	docs/benchmarks/storage-aware/division-leading-summary.json = Paired signed B-Z leading-block ratios, controls and timing verdicts
 	docs/benchmarks/storage-aware/division-paired-summary.json = Identical-input Burnikel-Ziegler versus Knuth baseline ratios and verdicts
 	docs/benchmarks/storage-aware/division-public-summary.json = Paired signed division CPU ratios across three operand geometries

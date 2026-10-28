@@ -93,6 +93,12 @@ Control medians stay within about 0.4% of parity. All 50 processes verified thei
 results; all cohorts remain unbaselined. This local shortcut leaves the public
 threshold unchanged and establishes no fresh comparison with GMP.
 
+The [quotient-geometry sweep](docs/plan_context/performance-follow-up.md#quotient-geometry-crossover-results)
+finds that selected B-Z still takes 1.42–1.64× Knuth's CPU time with a 2,048-byte
+dividend gap at the sampled large aligned widths. A 4,096-byte gap puts the
+methods near parity. All 35 processes verified their results; the six cohorts
+remain unbaselined. A wider fallback is the next experiment, not yet selected.
+
 ## Quick start
 
 The [verified immediate-add probe](docs/plan_context/performance-follow-up.md#verified-immediate-add-probe-october-27-2026)
