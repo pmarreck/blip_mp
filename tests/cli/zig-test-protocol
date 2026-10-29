@@ -1,0 +1,20 @@
+#!/usr/bin/env luajit
+local M=dofile(arg[1])
+local function read(path)
+	local f=assert(io.open(path,"rb")); local data=f:read("*a"); f:close(); return data
+end
+local mode=arg[2]
+if mode=="query" then
+	io.write(string.char(4,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0))
+elseif mode=="requests" then
+	local md=M.metadata(read(arg[3])); local workers=assert(tonumber(arg[4]))
+	assert(#md.names>0,"empty test inventory")
+	for worker=0,workers-1 do
+		local f=assert(io.open(arg[5]..worker,"wb"))
+		f:write(M.requests(#md.names,workers,worker)); f:close()
+	end
+elseif mode=="check" then
+	local md=M.metadata(read(arg[3])); local workers=assert(tonumber(arg[4])); local outputs={}
+	for worker=0,workers-1 do outputs[#outputs+1]=read(arg[5]..worker) end
+	print(M.check(md,outputs))
+else error("unknown mode") end

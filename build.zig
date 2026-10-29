@@ -170,7 +170,12 @@ pub fn build(b: *std.Build) void {
 	if (gmp_lib_path) |path| division_module.addLibraryPath(.{ .cwd_relative = path });
 	division_module.linkSystemLibrary("gmp", .{});
 	const division_tests = b.addTest(.{ .root_module = division_module });
-	const run_division_tests = b.addRunArtifact(division_tests);
+	const run_division_tests = if (b.option([]const u8, "division-test-runner", "Run division correctness tests with a prepared parallel runner")) |runner| blk: {
+		const run = b.addSystemCommand(&.{ runner, "4" });
+		run.addArtifactArg(division_tests);
+		run.step.name = "run division tests in four processes";
+		break :blk run;
+	} else b.addRunArtifact(division_tests);
 	b.step("division-probe-test", "Check division probe oracles").dependOn(&run_division_tests.step);
 	test_step.dependOn(&run_division_tests.step);
 	const division_probe = b.addExecutable(.{ .name = "blip-mp-division-probe", .root_module = division_module });

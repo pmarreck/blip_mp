@@ -21,6 +21,31 @@
 					root = ./.;
 					fileset = import ./nix/source-files.nix { lib = pkgs.lib; root = ./.; };
 				};
+				zigTestRunner = pkgs.runCommand "${pname}-zig-test-runner" {
+					nativeBuildInputs = [ pkgs.makeWrapper ];
+				} ''
+					mkdir -p "$out/bin"
+					makeWrapper ${pkgs.coreutils}/bin/timeout "$out/bin/run-zig-tests" \
+						--add-flags '--kill-after=2s 120s ${pkgs.bash}/bin/bash ${./tests/cli/run-zig-tests}' \
+						--set BLIP_TEST_LUAJIT ${pkgs.luajit}/bin/luajit \
+						--set BLIP_TEST_PROTOCOL_CLI ${./tests/cli/zig-test-protocol} \
+						--set BLIP_TEST_PROTOCOL_LIB ${./tests/support/zig_test_protocol.lua} \
+						--prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.coreutils ]}
+				'';
+				zigTestFixtures = pkgs.stdenv.mkDerivation {
+					pname = "${pname}-zig-test-runner-fixtures";
+					inherit version nativeBuildInputs;
+					src = ./tests/fixtures/zig-runner;
+					dontConfigure = true;
+					dontInstall = true;
+					buildPhase = ''
+						${commonBuild}
+						mkdir -p "$out/bin"
+						for kind in pass fail skip leak log crash empty; do
+							zig test "$kind.zig" -O ReleaseSafe --test-no-exec -femit-bin="$out/bin/$kind"
+						done
+					'';
+				};
 
 				nativeBuildInputs = [ zig ]
 					++ pkgs.lib.optionals isDarwin [
@@ -160,6 +185,31 @@
 
 				checks = {
 					build = self.packages.${system}.default;
+					zig-test-runner = pkgs.runCommand "${pname}-zig-test-runner-controls" {} ''
+						ulimit -c 0
+						${pkgs.luajit}/bin/luajit ${./tests/unit/zig_test_protocol.lua} ${./tests/support/zig_test_protocol.lua}
+						for workers in 1 2 3 4; do
+							if ! ${zigTestRunner}/bin/run-zig-tests "$workers" ${zigTestFixtures}/bin/pass > stdout 2> stderr; then
+								cat stderr >&2; exit 1
+							fi
+							printf '6 tests passed (%d processes).\n' "$workers" > expected
+							cmp expected stdout
+							test ! -s stderr
+						done
+						for kind in fail skip leak log crash empty; do
+							if ${zigTestRunner}/bin/run-zig-tests 4 ${zigTestFixtures}/bin/"$kind" > stdout 2> stderr; then
+								echo "Runner accepted $kind control" >&2; exit 1
+							fi
+							test ! -s stdout
+							test -s stderr
+						done
+						for workers in -2 -1 0 5 6 7 8 x 01 1.0 1x ""; do
+							if ${zigTestRunner}/bin/run-zig-tests "$workers" ${zigTestFixtures}/bin/pass > stdout 2> stderr; then exit 1; fi
+							test ! -s stdout
+							test -s stderr
+						done
+						mkdir -p "$out"
+					'';
 					source-files = pkgs.runCommand "${pname}-source-files-tests" {
 						nativeBuildInputs = [ pkgs.nix pkgs.jq ];
 					} ''
@@ -314,7 +364,7 @@
 						pname = "${pname}-division-probe-tests";
 						buildPhase = ''
 							${commonBuild}
-							zig build division-probe-test -Doptimize=ReleaseSafe -Dgmp-lib-path=${pkgs.gmp}/lib
+							zig build division-probe-test --summary all -Doptimize=ReleaseSafe -Dgmp-lib-path=${pkgs.gmp}/lib -Ddivision-test-runner=${zigTestRunner}/bin/run-zig-tests
 						'';
 					};
 					multiplication-probe = self.checks.${system}.probe.overrideAttrs {
@@ -687,7 +737,7 @@
 							${commonBuild}
 							# Keep overlap and bounds checks in the complete correctness suite.
 							failures=0
-							if timeout 600 zig build test --summary all -Doptimize=ReleaseSafe -Dgmp-lib-path=${pkgs.gmp}/lib; then
+							if timeout 600 zig build test --summary all -Doptimize=ReleaseSafe -Dgmp-lib-path=${pkgs.gmp}/lib -Ddivision-test-runner=${zigTestRunner}/bin/run-zig-tests; then
 								echo "Unit tests passed"
 							else
 								failures=$((failures + 1))

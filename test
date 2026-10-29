@@ -10,6 +10,7 @@ printf 'Preparing and checking ReleaseSafe units, C API, GMP comparisons and CLI
 if nix build --no-link --keep-going --print-build-logs \
 	".#checks.$system.test" \
 	".#checks.$system.source-files" \
+	".#checks.$system.zig-test-runner" \
 	".#checks.$system.integration" \
 	".#checks.$system.build-driver" \
 	".#checks.$system.probe-cli" \

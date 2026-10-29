@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+# Run the complete Zig 0.16 test inventory in independent processes.
+# The Nix wrapper supplies the interpreter, protocol adapter and timeout.
+set -u
+if [ "$#" -ne 2 ]; then
+	printf 'Usage: run-zig-tests WORKERS TEST_EXECUTABLE\n' >&2
+	exit 2
+fi
+workers=$1
+binary=$2
+case "$workers" in 1|2|3|4) ;; *) printf 'Expected 1–4 workers\n' >&2; exit 2 ;; esac
+if [ ! -x "$binary" ]; then printf 'Test executable is unavailable\n' >&2; exit 2; fi
+scratch=$(mktemp -d "${TMPDIR:?}/zig-tests.XXXXXXXX") || exit 1
+protocol() { "$BLIP_TEST_LUAJIT" "$BLIP_TEST_PROTOCOL_CLI" "$BLIP_TEST_PROTOCOL_LIB" "$@"; }
+pids=()
+cleanup() {
+	status=$?
+	trap - EXIT
+	for pid in "${pids[@]}"; do if kill "$pid" 2>/dev/null; then :; fi; done
+	for pid in "${pids[@]}"; do if wait "$pid" 2>/dev/null; then :; fi; done
+	# The enclosing Nix sandbox owns scratch, including failure evidence.
+	exit "$status"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+protocol query > "$scratch/query" || exit 1
+if ! "$binary" --listen=- --seed=0 < "$scratch/query" > "$scratch/metadata" 2> "$scratch/query-stderr"; then
+	printf 'Test inventory query failed\n' >&2
+	cat "$scratch/query-stderr" >&2
+	exit 1
+fi
+if [ -s "$scratch/query-stderr" ]; then cat "$scratch/query-stderr" >&2; exit 1; fi
+protocol requests "$scratch/metadata" "$workers" "$scratch/request-" || exit 1
+for ((worker=0; worker<workers; worker++)); do
+	"$binary" --listen=- --seed=0 < "$scratch/request-$worker" > "$scratch/result-$worker" 2> "$scratch/stderr-$worker" &
+	pids+=("$!")
+done
+failed=0
+for index in "${!pids[@]}"; do
+	if ! wait "${pids[$index]}"; then failed=1; fi
+	unset 'pids[index]'
+done
+for ((worker=0; worker<workers; worker++)); do
+	if [ -s "$scratch/stderr-$worker" ]; then cat "$scratch/stderr-$worker" >&2; failed=1; fi
+done
+if [ "$failed" -ne 0 ]; then printf 'A test process failed or wrote diagnostics\n' >&2; exit 1; fi
+count=$(protocol check "$scratch/metadata" "$workers" "$scratch/result-") || exit 1
+printf '%d tests passed (%d processes).\n' "$count" "$workers"

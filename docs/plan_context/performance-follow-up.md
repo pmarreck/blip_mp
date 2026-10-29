@@ -2508,6 +2508,62 @@ integration checks remain in the complete entry point, with their execution
 breakdown still unmeasured. Correctness passes; the division-runner execution
 latency needs profiling without weakening its checks.
 
+#### Division correctness execution
+
+A sandboxed trace of the unchanged 70-test division executable identified six
+large arithmetic matrices as the dominant work, including padding boundaries,
+signed aliasing and corrupt-reference rejection. Together these took about
+11.8 seconds of the 13.8-second traced run. Tracing added overhead relative to
+the ordinary ten-second run; these durations are attribution evidence only.
+The matrices remain intact.
+
+A prepared-artifact pilot at arithmetic source `df388c5` ran the same compiled
+ReleaseSafe executable with one or four processes. Each process used Zig
+0.16.0's existing test-server protocol. Test indices were partitioned modulo
+the worker count, and the controller required identical inventories and exactly
+one successful result per test. Both ABBA pairs passed all 70 tests:
+
+| Allowed CPUs | One process, seconds | Four processes, seconds |
+|---|---:|---:|
+| 1 | 10.082, 10.132 | 10.128, 10.158 |
+| 12 | 10.137, 10.091 | 3.912, 3.908 |
+
+These are monotonic wall times for the prepared runner, including inventory
+discovery and result validation, with compilation excluded. Each run used a
+fresh isolated sandbox under shared resource admission on Linux x86_64.
+Parallel execution reduces latency when CPU capacity is available; it does not
+reduce arithmetic work or improve single-CPU latency. This bounded diagnostic
+does not establish a historical performance baseline or a whole-suite budget
+pass.
+
+The Nix correctness checks now select four processes for this runner. Ordinary
+Zig invocations retain the default runner unless `-Ddivision-test-runner` is
+provided. The adapter accepts only the pinned 0.16.0 protocol and rejects
+unknown messages, inventory differences, missing/duplicate/misassigned results,
+failed/skipped/fuzzed tests, log errors and leaks. An empty inventory is an
+error. Expected-panic tests are currently unsupported and explicitly rejected.
+An outer 120-second deadline prevents a stalled server from hanging the check.
+
+The pure protocol controls exhaust partitions for 0–128 tests and 1–8 workers,
+then inject incomplete and malformed results. Independent compiled Zig fixtures
+exercise passing, failing, skipped, leaking, logging, crashing and empty suites.
+The protocol placeholder and runner placeholder each failed their controls
+before implementation. Fixture compilation has its own Nix output so changing
+the adapter does not recompile these fixtures. Both `./test` and the exact-commit
+CI manifest include the runner controls. The first fixture preparation took
+109 seconds; that is compilation cost, not test execution.
+
+The integrated complete suite passed in 86 seconds of total Nix preparation
+and checking. Its fresh division step passed all 70 tests in a rounded four
+seconds after 26 seconds of compilation. Zig separately reported 574 passing
+tests in the seven default runners, retaining 644 total tests. The main runner
+took four seconds after 48 seconds of compilation; the C smoke test took 3 ms
+after 24 seconds compiling the C library and 595 ms compiling the adapter.
+The unit/C-API build phase took 83 seconds. Production build and all-system
+evaluation passed. Only Linux x86_64 executed these tests; the other platforms
+were evaluated. Complete-suite execution time remains distinct from these
+per-runner durations and the mixed preparation/check total.
+
 ### Tiny division clock follow-up
 
 The first complete guarded-padding suite failed on a non-advancing process CPU
