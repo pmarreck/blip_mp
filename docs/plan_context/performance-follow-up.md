@@ -2564,6 +2564,44 @@ evaluation passed. Only Linux x86_64 executed these tests; the other platforms
 were evaluated. Complete-suite execution time remains distinct from these
 per-runner durations and the mixed preparation/check total.
 
+### Goldilocks crossover comparison
+
+The next bounded comparison uses identical balanced unsigned magnitudes for
+the selected Goldilocks layout, forced recursive Toom-3 and GMP. It measures
+complete magnitude kernels, not the signed `Mp.mul` API. Sizes surround the
+99,999-byte dispatch boundary and transform-length boundaries; the smallest
+case provides a control well below the current FFT entry point.
+
+All three methods write bytes and compare the entire product with a prepared
+GMP reference on every timed call. FFT packing, twiddle setup and carry output
+are included. GMP inputs are imported before timing; GMP multiplication and
+byte export are included. Scratch and fixture allocation are prepared, output
+storage is reused, and cold allocation is unmeasured. Six rotating ABCCBA
+samples retain separate component CPU and monotonic-wall times. These boundaries
+must accompany any result; a kernel crossover alone cannot qualify public
+signed dispatch or prove a storage-representation advantage.
+
+Existing scalar/vector transform code and GMP's assembly remain enabled.
+Instruction changes are deferred until this comparison identifies whether the
+current algorithm choice is justified. No threshold changes are part of this
+measurement adapter.
+
+Run `./bm --verified-goldilocks --config profiling-gold-crossover.json` for
+16,384, 65,536, 99,998, 99,999, 100,000, 131,072, 131,073 and 262,144 bytes per
+operand. Each of the 1- and 12-CPU cohorts uses five processes, six balanced
+samples and eight multiplications per batch. Each size uses one deterministic
+dense operand pair; this is a crossover diagnostic, not a representative corpus
+for selecting public dispatch. The method is `gold-toom-gmp-crossover-v1`.
+
+The new comparison test failed before the mode existed. All three competitors
+then passed poisoned-output and corrupted-reference controls. Existing mode-wide
+fixture and allocation-failure tests now include the crossover; GMP's internal
+allocator is outside Zig allocation-failure instrumentation. The CLI checks
+the method names, component sample arrays, aggregate normalization and full
+result verification. The complete native suite passed in 98 seconds of mixed
+Nix preparation/check time, including 645 Zig tests. Production build and
+all-system evaluation passed; no arithmetic threshold changed.
+
 ### Tiny division clock follow-up
 
 The first complete guarded-padding suite failed on a non-advancing process CPU

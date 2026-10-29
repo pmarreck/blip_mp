@@ -704,16 +704,18 @@
 							test ! -s stdout
 							test ! -s stderr
 						done
-						for mode in product passes truncated hybrid centered centered_fast; do
-							${self.packages.${system}.gold-probe}/bin/blip-mp-gold-probe "$mode" 1024,2048 8 > output.json 2> stderr
+						for mode in product passes truncated hybrid centered centered_fast crossover; do
+							sizes=1024,2048
+							if [ "$mode" = crossover ]; then sizes=16384,32768; fi
+							${self.packages.${system}.gold-probe}/bin/blip-mp-gold-probe "$mode" "$sizes" 8 > output.json 2> stderr
 							test ! -s stderr
 							jq -e --arg mode "$mode" '
 								.schema == "performance-measurement/v1" and .correct == true and
 								.build_mode == "ReleaseFast" and .mode == $mode and
-								.method == (if $mode == "centered_fast" then "gold-centered-common-header-v1" elif $mode == "centered" then "gold-centered-products-v1" elif $mode == "hybrid" then "gold-hybrid-products-v1" elif $mode == "truncated" then "gold-truncated-products-v1" else "gold-paired-layouts-v1" end) and
-								[.rows[].size] == [1024,2048] and [.rows[].transform_length] == [1024,2048] and
+								.method == (if $mode == "crossover" then "gold-toom-gmp-crossover-v1" elif $mode == "centered_fast" then "gold-centered-common-header-v1" elif $mode == "centered" then "gold-centered-products-v1" elif $mode == "hybrid" then "gold-hybrid-products-v1" elif $mode == "truncated" then "gold-truncated-products-v1" else "gold-paired-layouts-v1" end) and
+								[.rows[].size] == (if $mode == "crossover" then [16384,32768] else [1024,2048] end) and [.rows[].transform_length] == [.rows[].size] and
 								all(.rows[]; . as $row | .iterations == 8 and
-									[.components[].layout] == (if $mode == "centered_fast" then ["fused","centered","centered_fast"] elif $mode == "centered" then ["paired","fused","centered"] elif $mode == "hybrid" then ["fused","truncated","hybrid"] elif $mode == "truncated" then ["stockham","fused","truncated"] else ["stockham","paired","fused"] end) and
+									[.components[].layout] == (if $mode == "crossover" then ["selected_fft","toom","gmp"] elif $mode == "centered_fast" then ["fused","centered","centered_fast"] elif $mode == "centered" then ["paired","fused","centered"] elif $mode == "hybrid" then ["fused","truncated","hybrid"] elif $mode == "truncated" then ["stockham","fused","truncated"] else ["stockham","paired","fused"] end) and
 									all(.samples[]; length == 6 and all(.[]; . > 0)) and
 									all(.components[]; (.cpu_ns|length) == 6 and (.wall_ns|length) == 6 and all(.cpu_ns[], .wall_ns[]; . > 0)) and
 									all(range(6); . as $i |

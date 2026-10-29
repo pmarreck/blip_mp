@@ -96,6 +96,7 @@ annotate=[
 	profiling-division-single-variable.json = Variable small-divisor kernel versus GMP across payload and alignment boundaries
 	profiling-division-wide-quotient.json = Paired wider quotient fallback with floor, gap and neighboring-alignment controls
 	profiling-division.json = Verified division workloads with separate 1/12 CPU cohorts
+	profiling-gold-crossover.json = Matched Goldilocks Toom and GMP magnitude-kernel measurement cohorts
 	profiling-goldilocks.json = Paired Goldilocks product and transform-pass timing cohorts
 	profiling-hybrid-boundary.json = Fused-subtree crossover sweep near seven-eighths transform occupancy
 	profiling-hybrid.json = Fused, recursive truncated and fused-subtree product comparison cohorts

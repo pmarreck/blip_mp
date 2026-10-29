@@ -2,9 +2,11 @@
 const std = @import("std");
 const blip = @import("blip_mp");
 const fft = blip.fft;
-const Layout = enum { stockham, paired, fused, truncated, hybrid, centered, centered_fast };
-const Mode = enum { product, passes, truncated, hybrid, centered, centered_fast };
+const gmp = @import("gmp.zig");
+const Layout = enum { stockham, paired, fused, truncated, hybrid, centered, centered_fast, selected_fft, toom, gmp };
+const Mode = enum { product, passes, truncated, hybrid, centered, centered_fast, crossover };
 fn layouts(mode: Mode) [3]Layout {
+	if (mode == .crossover) return .{ .selected_fft, .toom, .gmp };
 	if (mode == .centered_fast) return .{ .fused, .centered, .centered_fast };
 	if (mode == .centered) return .{ .paired, .fused, .centered };
 	if (mode == .hybrid) return .{ .fused, .truncated, .hybrid };
@@ -50,12 +52,13 @@ pub fn main(init: std.process.Init) !void {
 	const report = .{
 		.schema = "performance-measurement/v1", .correct = true, .build_mode = "ReleaseFast",
 		.compiler = @import("builtin").zig_version_string,
-		.method = switch (options.mode) { .centered_fast => "gold-centered-common-header-v1", .centered => "gold-centered-products-v1", .hybrid => "gold-hybrid-products-v1", .truncated => "gold-truncated-products-v1", else => "gold-paired-layouts-v1" }, .mode = @tagName(options.mode),
+		.method = switch (options.mode) { .crossover => "gold-toom-gmp-crossover-v1", .centered_fast => "gold-centered-common-header-v1", .centered => "gold-centered-products-v1", .hybrid => "gold-hybrid-products-v1", .truncated => "gold-truncated-products-v1", else => "gold-paired-layouts-v1" }, .mode = @tagName(options.mode),
+		.gmp_version = std.mem.span(gmp.__gmp_version),
 		.cpu_clock = "CLOCK_PROCESS_CPUTIME_ID", .wall_clock = "CLOCK_MONOTONIC",
 		.seed_usage = "fixed 0x601D_B3AC; identical inputs across layouts; engine seed does not alter inputs",
 		.normalization = "rotating ABCCBA batches; primary samples average all layouts per operation; components preserve individual means; no subtraction",
-		.operation = if (options.mode != .passes) "complete product with packing, twiddle preparation, carry output and GMP-derived byte comparison" else "forward/inverse pair, unscaled, including input restore and complete canonical-residue comparison",
-		.allocator_coverage = "c_allocator arena; fixture and scratch allocation outside timing, reused across all layouts",
+		.operation = if (options.mode == .crossover) "balanced unsigned magnitude kernels: selected Goldilocks layout, recursive Toom-3, GMP multiplication plus byte export; complete byte comparison every call; GMP import outside timing; not signed Mp.mul" else if (options.mode != .passes) "complete product with packing, twiddle preparation, carry output and GMP-derived byte comparison" else "forward/inverse pair, unscaled, including input restore and complete canonical-residue comparison",
+		.allocator_coverage = "c_allocator arena; fixture and scratch allocation outside timing, reused across all layouts; GMP internal allocation not instrumented; cold allocation unmeasured",
 		.warmup_per_layout = 1, .rows = rows[0..options.count],
 	};
 	const json = try std.json.Stringify.valueAlloc(init.arena.allocator(), report, .{});
@@ -159,6 +162,8 @@ const Fixture = struct {
 	a: []u8, b: []u8, out: []u8,
 	pa: []u8, pb: []u8, tw_fwd: []u8, tw_inv: []u8, scratch: []u8,
 	centered: []u8,
+	toom_scratch: []u8,
+	gmp_values: ?[3]gmp.Z,
 	expected: []u8,
 	fn init(parent: std.mem.Allocator, mode: Mode, size: usize) !Fixture {
 		if (!validSize(mode, size)) return error.InvalidArguments;
@@ -203,11 +208,42 @@ const Fixture = struct {
 				fft.gold_residue.write(expected, i, @intCast((@as(u128, value) * n) % fft.GOLDILOCKS_P));
 			}
 		}
-		return .{ .arena = arena, .mode = mode, .n = n, .a = a, .b = b, .out = out, .expected = expected, .centered = centered,
+		const toom_scratch = try allocator.alloc(u8, if (mode == .crossover) blip.tier3.toom3ScratchNeed(size) else 0);
+		var gmp_values: ?[3]gmp.Z = null;
+		if (mode == .crossover) {
+			gmp_values = .{ undefined, undefined, undefined };
+			for (&gmp_values.?) |*value| gmp.__gmpz_init(value);
+			gmp.__gmpz_import(&gmp_values.?[0], a.len, -1, 1, 0, 0, a.ptr);
+			gmp.__gmpz_import(&gmp_values.?[1], b.len, -1, 1, 0, 0, b.ptr);
+		}
+		return .{ .arena = arena, .mode = mode, .n = n, .a = a, .b = b, .out = out, .expected = expected, .centered = centered, .toom_scratch = toom_scratch, .gmp_values = gmp_values,
 			.pa = pa, .pb = work[bytes .. 2 * bytes], .tw_fwd = tw_fwd, .tw_inv = tw_inv, .scratch = work[3 * bytes ..] };
 	}
 	fn run(self: *@This(), layout: Layout) !void {
+		if (layout == .selected_fft or layout == .toom or layout == .gmp) {
+			if (self.mode != .crossover) return error.InvalidArguments;
+			var len: usize = 0;
+			switch (layout) {
+				.selected_fft => len = if (blip.tier3.goldUseTruncated(self.a.len, self.n))
+					fft.goldMulMagnitudesTruncatedFused(self.a, self.b, self.out, self.pa, self.pb, self.tw_fwd, self.tw_inv)
+					else fft.goldMulMagnitudesWithLayout(.fused, self.a, self.b, self.out, self.pa, self.pb, self.tw_fwd, self.tw_inv, &.{}),
+				.toom => {
+					blip.tier3.mulToom3(self.a, self.b, self.out, self.toom_scratch);
+					len = std.mem.trimEnd(u8, self.out, &.{0}).len;
+				},
+				.gmp => {
+					const values = &self.gmp_values.?;
+					gmp.__gmpz_mul(&values[2], &values[0], &values[1]);
+					_ = gmp.__gmpz_export(self.out.ptr, &len, -1, 1, 0, 0, &values[2]);
+					@memset(self.out[len..], 0);
+				},
+				else => unreachable,
+			}
+			if (!std.mem.eql(u8, self.expected, self.out[0..len])) return error.IncorrectWork;
+			return;
+		}
 		inline for (std.enums.values(Layout)) |method| {
+			if (comptime method == .selected_fft or method == .toom or method == .gmp) continue;
 			if (layout == method) {
 				if (self.mode != .passes) {
 					if ((method == .centered or method == .centered_fast) and self.mode != .centered and self.mode != .centered_fast) return error.InvalidArguments;
@@ -239,8 +275,30 @@ const Fixture = struct {
 		}
 		unreachable;
 	}
-	fn deinit(self: *@This()) void { self.arena.deinit(); }
+	fn deinit(self: *@This()) void {
+		if (self.gmp_values) |*values| for (values) |*value| gmp.__gmpz_clear(value);
+		self.arena.deinit();
+	}
 };
+
+test "Goldilocks crossover compares selected FFT Toom and GMP with complete verification" {
+	const options = try parse(&.{"crossover", "64,99998,99999,100000,131072,131073,262144", "2"});
+	for (layouts(options.mode), [_][]const u8{"selected_fft", "toom", "gmp"}) |method, name| {
+		try std.testing.expectEqualStrings(name, @tagName(method));
+	}
+	for ([_]usize{64,65,128,257}) |size| {
+		var fixture = try Fixture.init(std.testing.allocator, options.mode, size);
+		defer fixture.deinit();
+		for (layouts(options.mode)) |method| {
+			@memset(fixture.out, 0xa5);
+			try fixture.run(method);
+			try std.testing.expectEqualSlices(u8, fixture.expected, std.mem.trimEnd(u8, fixture.out, &.{0}));
+			fixture.expected[0] ^= 1;
+			try std.testing.expectError(error.IncorrectWork, fixture.run(method));
+			fixture.expected[0] ^= 1;
+		}
+	}
+}
 
 test "Goldilocks centered comparison has explicit storage controls" {
 	const options = try parse(&.{"centered", "1024,4096", "8"});

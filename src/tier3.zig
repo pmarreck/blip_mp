@@ -125,7 +125,7 @@ pub fn releaseGoldFftScratch() void {
 /// The fused layout comparison does not establish a new Toom/GMP crossover.
 pub const GOLD_FFT_THRESHOLD: usize = 99999;
 
-fn goldUseTruncated(payload_len: usize, transform_len: usize) bool {
+pub fn goldUseTruncated(payload_len: usize, transform_len: usize) bool {
 	// Qualified at two transform lengths; retain full fusion above that range.
 	// Seven-eighths occupancy keeps a margin before the measured crossover.
 	if (payload_len < GOLD_FFT_THRESHOLD or transform_len > 262144) return false;
