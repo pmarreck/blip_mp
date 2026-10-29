@@ -64,8 +64,10 @@ without importing the sibling project's archive and compression dependencies.
 
 Use canonical signed two's-complement BLIP encodings with the minimum payload
 width and an immediate form for small nonnegative values. Document the signed
-interpretation explicitly; interoperability with strict unsigned-BLIP producers
-remains an unresolved extension.
+interpretation explicitly. BLIP itself leaves signedness to the application;
+unsigned import/export adapters would serve consumers that choose unsigned
+payload interpretation. Their need and API remain an open extension question,
+not a requirement for conformance with BLIP's signed interpretation.
 
 Eliminate all stored fixed-width limb arrays, including division scratch and
 FFT intermediates. BDFN reaffirmed this requirement on September 27, 2026,
@@ -113,9 +115,10 @@ not guarantees for future builds.
 
 ## Open decisions and document authority
 
-The license remains undecided between MIT and Apache-2.0; choose before release.
-Strict unsigned-BLIP wire interoperability also needs a defined contract before
-implementation.
+The project uses the [MIT license](LICENSE), selected October 29, 2026.
+Optional unsigned-BLIP import/export adapters still need a consumer requirement
+and defined contract before implementation. Signedness is application context,
+not a separate strictness level in the BLIP format.
 
 This document consolidates the original overview and the decisions recorded in
 the [legacy roadmap](docs/plan_context/legacy-roadmap.md), especially M3, M14,

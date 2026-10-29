@@ -3,6 +3,7 @@ ver=1.2
 annotate=[
 	.mechatron-prime/targets = Exact-commit native Linux CI build and ReleaseSafe test targets
 	INTENT.md = Project purpose, scope and evidence required for success
+	LICENSE = MIT license and copyright notice
 	TERMINOLOGY.md = BLIP arithmetic and byte-storage terminology
 	docs/BLIP_ALGORITHM_TYPES.md = Sibling BLIP sentinel and contextual integer type investigation
 	docs/OPTIMIZATION_RESEARCH.md = Primary-source algorithm research and testable BLIP optimization proposals

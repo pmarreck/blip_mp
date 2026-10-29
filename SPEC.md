@@ -203,9 +203,9 @@ The "wins big" bar is **at least 50% faster** to be worth the effort. Anything l
 - GMP `mpn_*` low-level API: <https://gmplib.org/manual/Low_002dlevel-Functions>
 - Prior art for small-bignum optimization: FLINT's `fmpz_t` (single-limb fast path with promotion to mpz on overflow). FLINT proves the concept works; blip_mp would generalize it from "single limb" to "L≤8 BLIP".
 
-## License intent
+## License
 
-MIT or Apache-2.0 (TBD), to permit linkage with both libgmp (LGPLv3) and downstream commercial use.
+[MIT](LICENSE), selected October 29, 2026.
 
 ---
 

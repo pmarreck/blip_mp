@@ -380,9 +380,9 @@ algorithm set with GMP and examines SIMD, recursive Toom, asymmetric products,
 truncated Montgomery work and BLIP-aware FFT layouts. Candidate experiments are
 marked as untested. Execution status lives in [PLAN.md](PLAN.md).
 
-## License intent
+## License
 
-MIT or Apache-2.0 (TBD before tagging a release). Both permit linkage with libgmp (LGPLv3) and downstream commercial use.
+[MIT](LICENSE).
 
 ---
 

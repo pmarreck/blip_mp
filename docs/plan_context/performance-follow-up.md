@@ -2458,6 +2458,25 @@ pass the complete suite in 87 seconds of mixed Nix preparation/check time
 evaluation. The arithmetic source matches the pre-dispatch qualification at
 `ca614f5a3f6a55af065efe7a7e8325aca417f050`.
 
+#### Selective dispatch clarification, October 29
+
+The rejected public-dispatch trials already restricted reciprocal arithmetic
+to dividend magnitudes of at least 64 bytes and divisor magnitudes of at most
+eight bytes. At the sampled eligible widths through 4,097 bytes, the selected
+cases improved; the 4,096-byte signed candidate saved about 47–48% CPU versus
+the previous public entry. These finite measurements do not prove a win at
+every larger width or for every input distribution.
+
+The regressions occurred in other cases that bypassed reciprocal arithmetic.
+Assembly exposed differences in helper inlining and scratch-frame setup, but
+does not establish their individual contributions to the measured slowdown.
+Narrowing the operand guard alone therefore does not resolve the observed
+problem. A further automatic-dispatch experiment should preserve the existing
+small-value paths and isolate the new large-value helper, then repeat both
+selected and unselected controls. This is a proposed experiment, not a measured
+fix. Callers with known workloads can already select the experimental
+`Mp.divModSmallReciprocal` entry explicitly; the normal public entry is unchanged.
+
 ### Build feedback follow-up
 
 Repeated full checks take roughly 90–120 seconds of mixed preparation and

@@ -105,6 +105,7 @@
 
 				packages.default = pkgs.stdenv.mkDerivation {
 					inherit pname version;
+					meta.license = pkgs.lib.licenses.mit;
 					src = buildSource;
 					inherit nativeBuildInputs buildInputs;
 					dontConfigure = true;
@@ -115,6 +116,7 @@
 						zig build --prefix "$out" -Doptimize=ReleaseFast \
 							-Dgmp-include-path=${pkgs.gmp.dev}/include \
 							-Dgmp-lib-path=${pkgs.gmp}/lib
+						install -Dm644 ${./LICENSE} "$out/share/licenses/blip_mp/LICENSE"
 					'';
 				};
 				packages.inverse-probe = self.packages.${system}.add-probe.overrideAttrs {

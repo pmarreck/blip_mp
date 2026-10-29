@@ -18,3 +18,22 @@
 
 The limb/chunk distinction follows BDFN (Benevolent Dictator For Now)'s May 16 terminology decision recorded
 in the [legacy roadmap](docs/plan_context/legacy-roadmap.md#terminology-note-added-2026-05-16).
+
+## Signedness and optional interoperability
+
+The sibling [BLIP specification](../BLIP/BLIP_SPEC.md#signedness) leaves payload
+signedness to the application. `blip_mp` chooses signed two's complement.
+The bytes alone do not identify the intended interpretation:
+
+| Encoded bytes (hex) | Unsigned interpretation | Signed interpretation |
+| --- | ---: | ---: |
+| `81 FF` | 255 | -1 |
+| `82 FF 00` | 255 | 255 |
+
+Positive 255 therefore needs two payload bytes in this library's canonical
+signed representation. An unsigned consumer can represent it in one payload
+byte. Import/export adapters could convert between those conventions while
+preserving the mathematical value; their need and error contract remain open.
+Earlier references to "strict unsigned-BLIP" or "strict-spec BLIP producers"
+describe this optional integration question imprecisely. Signed interpretation
+is explicitly supported by BLIP and does not require a format extension.
