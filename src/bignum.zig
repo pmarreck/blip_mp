@@ -651,7 +651,8 @@ pub const Mp = struct {
 				return;
 			}
 		}
-		try tier3DivModOp(reciprocal, q, rem, a, b);
+		if (reciprocal) return @call(.always_inline, tier3DivModOp, .{true, q, rem, a, b});
+		try tier3DivModOp(false, q, rem, a, b);
 	}
 
 	/// Explicit small-divisor reciprocal path with ordinary signed semantics.

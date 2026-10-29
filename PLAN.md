@@ -4,12 +4,12 @@ Purpose: [INTENT.md](INTENT.md). The [legacy roadmap](docs/plan_context/legacy-r
 
 ## Current bounded milestone
 
-- [x] Qualify the experimental signed reciprocal entry with the 64-byte magnitude guard; failing-first sign, zero, promotion, classifier, native/GMP, alias and allocation-failure checks pass, plus the complete suite, build and evaluation (context: docs/plan_context/performance-follow-up.md#signed-reciprocal-qualification; done 2026-10-28 19:47 EDT; this commit).
 - [x] Qualify paired signed reciprocal/public and reciprocal/GMP probes; parser and CLI fail before implementation, matching BLIP call boundaries confirmed in assembly, full suite/build/evaluation pass (context: docs/plan_context/performance-follow-up.md#signed-reciprocal-timing-probe; done 2026-10-28 19:56 EDT; this commit).
 - [x] Measure signed reciprocal/public and reciprocal/GMP probes; Answer: candidate saves 47–48% CPU versus current BLIP at 4,096-byte dividends but takes 1.92–1.94× GMP CPU; all 110 processes correct, thirteen cohorts unbaselined and three inconclusive, default unchanged (context: docs/plan_context/performance-follow-up.md#signed-reciprocal-results; done 2026-10-28 20:03 EDT; this commit).
 - [x] Qualify the 64-byte small-divisor guard in actual public dispatch with an explicit fixed entry and nine-byte divisor control; failing-first controls, full suite, production build and all-system evaluation pass (context: docs/plan_context/performance-follow-up.md#public-small-divisor-selection-experiment; done 2026-10-28 20:14 EDT; this commit).
-- [ ] Resolve the initial public selection's 3–7% short-input regression with nine-byte divisors; measure the explicit-inlining variant before retaining public dispatch, preserving the 47–48% long-dividend gain and direct GMP gap (context: docs/plan_context/performance-follow-up.md#initial-dispatch-measurements).
-- [ ] Narrow Nix artifact source closures and separate compilation from test-execution timing after the current arithmetic experiment; preserve complete required coverage and isolated controls (context: docs/plan_context/performance-follow-up.md#build-feedback-follow-up).
+- [ ] Measure selected-only scratch inlining after wrapper-only inlining moved the control regressions; retain public dispatch only with justified target gains and reported control costs (context: docs/plan_context/performance-follow-up.md#initial-dispatch-measurements).
+- [x] Narrow Nix compilation sources and expose compilation/test-step durations; source-set control fails before implementation, documentation leaves source/derivation paths unchanged, full suite/build/evaluation pass (context: docs/plan_context/performance-follow-up.md#compilation-source-boundary; done 2026-10-28 20:38 EDT; this commit).
+- [ ] Profile the division-probe correctness runner's ten-second execution and reduce avoidable work while preserving all required controls; retain separate compilation and execution evidence (context: docs/plan_context/performance-follow-up.md#compilation-source-boundary).
 
 ## Follow-up and existing backlog
 

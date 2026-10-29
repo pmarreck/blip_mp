@@ -2394,7 +2394,31 @@ Its public entry performs immediate-value checks before tail-calling the larger
 arithmetic helper; public and fixed benchmark call boundaries remain distinct.
 Probe SHA-256 is
 `247f8380caab982f2bc1ab7d8f1815fc5dd27e3c7556652a1cc95b32a5fcb6fb`.
-Its performance is pending the next frozen-source comparison.
+Campaign `blip-mp-inline-20261029T002721Z` measured this variant at commit
+`2b2f910bfdfe9dbe65d481d550eb5e18971ac35f`.
+All 125 processes verified their results; five cohorts retried once, seventeen
+finished unbaselined and three inconclusive (8-byte public/GMP and 9-byte GMP
+comparisons at 12 CPUs). Source digest
+`5593aea11a0520538e065b457e737c753010072771ac3f5f4f574636ee05634d`
+remained stable. No baseline is accepted. The
+[wrapper-inlining summary](../benchmarks/storage-aware/division-single-inline-summary.json)
+retains all 260 cells.
+
+The nine-byte divisor control improves to paired medians of 0.969–1.013,
+but 16/17-byte dividends with smaller divisors now regress by 3–10% in several
+cells. At 4,096-byte dividends the selected path still saves 46–47% versus the
+fixed entry and takes 1.963–2.079 times GMP's CPU. Thus wrapper inlining alone
+does not remove the unselected-path problem. The next variant also inlines the
+scratch/conversion helper that the compiler outlined after this change. That
+forced inlining applies only to the selected path; the fixed comparison keeps
+its previous source-level call behavior.
+
+The selected-only variant passes the complete suite in 91 seconds of mixed Nix
+preparation/check time, plus the production build and all-system evaluation.
+Assembly confirms the separate public/fixed calls without the selected scratch
+helper's outlined boundary. Probe SHA-256 is
+`830a12bd02bddcb6768e1b3eab573978895e472742430ffb8bed57160110953a`.
+Performance remains pending a frozen-source run.
 
 ### Build feedback follow-up
 
@@ -2410,6 +2434,41 @@ against each artifact's actual inputs and verify that all required tests remain
 reachable. Preserve Nix as the canonical build path and use disposable fixture
 trees for any source-boundary tests. Do not substitute cached verdicts for fresh
 test-execution measurements.
+
+#### Compilation source boundary
+
+Compilation sources now contain `build.zig`, `build.zig.zon`, `src`, `tests`,
+`include` and `cli`, selected through one Nix file set. Reports, profiling
+configurations and other root files no longer affect these source inputs.
+The Zig package manifest also includes `cli`, which its build graph requires.
+
+The source-set check constructs a disposable tree inside a Nix derivation. It
+compares the complete selected set with an independent expected set, covering
+nested/new source files, documentation, root configurations, caches, backup
+filenames and a similarly named directory. An all-files placeholder failed by
+including six excluded files; the explicit source set passes. The check is
+included in both `./test` and the exact-commit CI targets. Evaluation uses the
+pinned Nixpkgs library and a dummy store; fixture writes remain in the sandbox.
+
+The required unit/probe and C-API checks now request Zig's complete build-step
+summary. This exposes compilation and test-run durations separately while
+`./test` retains total Nix preparation/check time. Cached results must still be
+reported as cached, and concurrent step durations must not be summed as elapsed
+time. A fresh source-bounded complete suite passed in 91 seconds, with an
+87-second unit/C-API build phase. Production build and all-system evaluation
+passed. A documentation edit left both the filtered source and division-probe
+derivation paths unchanged.
+
+Zig reports 644 passing tests across eight runners. The main 514-test runner
+took about four seconds after a 50-second compilation. The 70-test division
+runner took about ten seconds after a 29-second compilation, already exceeding
+the five-second execution budget on its own. Other runners took 5–468 ms each.
+The C smoke executable ran in 3 ms after a 25-second C-library compilation and
+618 ms C-test compilation. These are rounded step durations; overlapping steps
+do not establish a summed end-to-end execution duration. Required CLI and GMP
+integration checks remain in the complete entry point, with their execution
+breakdown still unmeasured. Correctness passes; the division-runner execution
+latency needs profiling without weakening its checks.
 
 ### Tiny division clock follow-up
 

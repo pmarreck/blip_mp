@@ -17,6 +17,10 @@
 				version = "0.0.1";
 				isDarwin = pkgs.stdenv.hostPlatform.isDarwin;
 				zig = pkgs.zig_0_16;
+				buildSource = pkgs.lib.fileset.toSource {
+					root = ./.;
+					fileset = import ./nix/source-files.nix { lib = pkgs.lib; root = ./.; };
+				};
 
 				nativeBuildInputs = [ zig ]
 					++ pkgs.lib.optionals isDarwin [
@@ -65,7 +69,7 @@
 				packages.add-probe = pkgs.stdenv.mkDerivation {
 					pname = "${pname}-add-probe";
 					inherit version nativeBuildInputs;
-					src = self;
+					src = buildSource;
 					dontConfigure = true;
 					dontInstall = true;
 					buildPhase = ''
@@ -76,7 +80,7 @@
 
 				packages.default = pkgs.stdenv.mkDerivation {
 					inherit pname version;
-					src = self;
+					src = buildSource;
 					inherit nativeBuildInputs buildInputs;
 					dontConfigure = true;
 					dontInstall = true;
@@ -138,7 +142,7 @@
 				packages.bench = pkgs.stdenv.mkDerivation {
 					pname = "${pname}-bench";
 					inherit version;
-					src = self;
+					src = buildSource;
 					nativeBuildInputs = nativeBuildInputs;
 					buildInputs = buildInputs ++ [ gmp-noasm ];
 					dontConfigure = true;
@@ -156,6 +160,37 @@
 
 				checks = {
 					build = self.packages.${system}.default;
+					source-files = pkgs.runCommand "${pname}-source-files-tests" {
+						nativeBuildInputs = [ pkgs.nix pkgs.jq ];
+					} ''
+						# All fixture writes stay inside this derivation's sandbox.
+						mkdir -p fixture/src/nested fixture/tests/unit fixture/include fixture/cli \
+							fixture/docs fixture/src-other fixture/.zig-cache
+						for file in build.zig build.zig.zon src/core.zig src/nested/new.zig \
+							tests/unit/new.zig include/api.h cli/main.c README.md profiling.json \
+							docs/report.json src-other/decoy.zig .zig-cache/object.o build.zig.bak; do
+							printf '%s\n' fixture > "fixture/$file"
+						done
+						if ! nix-instantiate --store dummy:// --eval --strict --json \
+							--argstr root "$PWD/fixture" --expr '
+							{ root }:
+							let
+								lib = import ${nixpkgs}/lib;
+								files = import ${./nix/source-files.nix} { inherit lib; root = /. + root; };
+							in map (path: lib.removePrefix (root + "/") (toString path)) (lib.fileset.toList files)
+							' > selected.json 2> stderr; then
+							cat stderr >&2
+							exit 1
+						fi
+						test ! -s stderr
+						if ! jq -e 'sort == (["build.zig","build.zig.zon","src/core.zig","src/nested/new.zig",
+							"tests/unit/new.zig","include/api.h","cli/main.c"] | sort)' selected.json > /dev/null; then
+							echo "Unexpected compilation source set:" >&2
+							cat selected.json >&2
+							exit 1
+						fi
+						mkdir -p "$out"
+					'';
 					build-driver = pkgs.runCommand "${pname}-build-driver-tests" {} ''
 						mkdir bin
 						cat > bin/nix <<-'STUB'
@@ -213,7 +248,7 @@
 					probe = pkgs.stdenv.mkDerivation {
 						pname = "${pname}-probe-tests";
 						inherit version nativeBuildInputs;
-						src = self;
+						src = buildSource;
 						dontConfigure = true;
 						buildPhase = ''
 							${commonBuild}
@@ -644,7 +679,7 @@
 					test = pkgs.stdenv.mkDerivation {
 						pname = "${pname}-tests";
 						inherit version;
-						src = self;
+						src = buildSource;
 						inherit nativeBuildInputs buildInputs;
 						dontConfigure = true;
 						dontFixup = true;
@@ -652,12 +687,12 @@
 							${commonBuild}
 							# Keep overlap and bounds checks in the complete correctness suite.
 							failures=0
-							if timeout 600 zig build test -Doptimize=ReleaseSafe -Dgmp-lib-path=${pkgs.gmp}/lib; then
+							if timeout 600 zig build test --summary all -Doptimize=ReleaseSafe -Dgmp-lib-path=${pkgs.gmp}/lib; then
 								echo "Unit tests passed"
 							else
 								failures=$((failures + 1))
 							fi
-							if zig build c-smoke-run -Doptimize=ReleaseSafe; then
+							if zig build c-smoke-run --summary all -Doptimize=ReleaseSafe; then
 								echo "C API tests passed"
 							else
 								failures=$((failures + 1))
