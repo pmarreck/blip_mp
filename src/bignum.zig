@@ -627,6 +627,11 @@ pub const Mp = struct {
 	/// to think about that, but the inline-i64 fast path snapshots both
 	/// operand values before writing).
 	pub fn divMod(q: *Mp, rem: *Mp, a: *const Mp, b: *const Mp) ArithError!void {
+		return divModWithReciprocal(true, q, rem, a, b);
+	}
+
+	/// Fixed comparison entry preserving division before reciprocal selection.
+	pub fn divModBeforeReciprocal(q: *Mp, rem: *Mp, a: *const Mp, b: *const Mp) ArithError!void {
 		return divModWithReciprocal(false, q, rem, a, b);
 	}
 
@@ -649,7 +654,7 @@ pub const Mp = struct {
 		try tier3DivModOp(reciprocal, q, rem, a, b);
 	}
 
-	/// Experimental small-divisor reciprocal path with ordinary signed semantics.
+	/// Explicit small-divisor reciprocal path with ordinary signed semantics.
 	pub fn divModSmallReciprocal(q: *Mp, rem: *Mp, a: *const Mp, b: *const Mp) ArithError!void {
 		return divModWithReciprocal(true, q, rem, a, b);
 	}

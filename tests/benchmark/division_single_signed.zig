@@ -4,7 +4,7 @@ const blip = @import("blip_mp");
 const Mp = blip.Mp;
 const gmp = @import("gmp.zig");
 const Base = @import("division_single.zig").Pool;
-const Method = enum { current, reciprocal, gmp };
+const Method = enum { current, reciprocal, fixed, gmp };
 const widths = [_]usize{8,9,16,17,63,64,65,256,257,1024,1025,4096,4097};
 const Comparison = enum { public, gmp };
 const Options = struct { comparison: Comparison, divisor_bytes: usize, sizes: [widths.len]usize, count: usize };
@@ -13,7 +13,7 @@ fn parse(args: []const []const u8) !Options {
 	if (args.len!=3) return error.InvalidArguments;
 	const comparison = std.meta.stringToEnum(Comparison,args[0]) orelse return error.InvalidArguments;
 	const divisor = std.fmt.parseInt(usize,args[1],10) catch return error.InvalidArguments;
-	if (std.mem.indexOfScalar(usize,&.{1,2,4,8},divisor)==null) return error.InvalidArguments;
+	if (std.mem.indexOfScalar(usize,&.{1,2,4,8,9},divisor)==null) return error.InvalidArguments;
 	var options: Options = .{.comparison=comparison,.divisor_bytes=divisor,.sizes=undefined,.count=0};
 	var parts = std.mem.splitScalar(u8,args[2],',');
 	while (parts.next()) |part| {
@@ -38,7 +38,7 @@ pub fn run(init: std.process.Init, args: []const []const u8) !void {
 	const options = try parse(args);
 	const count = 32;
 	const repeats = 512;
-	const methods: [2]Method = if (options.comparison==.public) .{.current,.reciprocal} else .{.gmp,.reciprocal};
+	const methods: [2]Method = if (options.comparison==.public) .{.fixed,.current} else .{.gmp,.current};
 	const Component = struct { method: []const u8, cpu_ns: [6]f64, wall_ns: [6]f64 };
 	const Row = struct {
 		size: usize, fixture_count: usize = count, iterations: usize = count*repeats, warmup_cases: usize = 2*count,
@@ -61,11 +61,11 @@ pub fn run(init: std.process.Init, args: []const []const u8) !void {
 	const report = .{
 		.schema="performance-measurement/v1",.correct=true,.build_mode="ReleaseFast",
 		.compiler=@import("builtin").zig_version_string,.gmp_version=std.mem.span(gmp.__gmp_version),
-		.method=if (options.comparison==.public) "division-single-signed-public-paired-v1" else "division-single-signed-gmp-paired-v1",
+		.method=if (options.comparison==.public) "division-single-selected-public-paired-v1" else "division-single-selected-gmp-paired-v1",
 		.divisor_bytes=options.divisor_bytes,.divisor_min_bits=8*options.divisor_bytes-7,.divisor_max_bits=8*options.divisor_bytes,
 		.cpu_clock="CLOCK_PROCESS_CPUTIME_ID",.wall_clock="CLOCK_MONOTONIC",
 		.seed_usage="0xB2D151A5 + divisor_bytes*257 + index; eight normalization shifts in each of four sign combinations; engine seed does not alter inputs",
-		.operation="signed truncated quotient and remainder; variable 1/2/4/8-byte divisor magnitude; size is dividend magnitude bytes; reciprocal entry retains original kernel below 64 bytes",
+		.operation="public signed truncated quotient and remainder; variable 1/2/4/8/9-byte divisor magnitude; size is dividend magnitude bytes; reciprocal selected at 64 dividend bytes for divisors up to 8 bytes; 9-byte divisors retain original path",
 		.normalization="six ABBA/BAAB half-pool samples; 512 repeats per fixture; primary averages two methods; no subtraction",
 		.verification="GMP references outside timing, native signed oracle in tests; complete canonical BLIP or GMP quotient/remainder comparison on every call",
 		.allocator_coverage="prepared signed inputs, reused outputs and warmed scratch; both BLIP entries called without inlining; BLIP conversion, arithmetic allocation and encoding included; GMP uses preconverted mpz inputs; full comparisons included; cold allocation unmeasured",
@@ -77,7 +77,7 @@ pub fn run(init: std.process.Init, args: []const []const u8) !void {
 }
 
 test "signed small-divisor parser classifies comparisons and complete width sets" {
-	const divisor_widths = [_]usize{1,2,4,8};
+	const divisor_widths = [_]usize{1,2,4,8,9};
 	const dividend_widths = [_]usize{8,9,16,17,63,64,65,256,257,1024,1025,4096,4097};
 	for (std.enums.values(Comparison)) |comparison| for (0..10) |divisor| for (0..4100) |width| {
 		var db: [24]u8 = undefined; var wb: [24]u8 = undefined;
@@ -124,6 +124,7 @@ const Pool = struct {
 	pub fn run(self: *@This(), method: Method, index: usize) !void {
 		const case = &self.base.cases[index];
 		switch (method) {
+			.fixed => try @call(.never_inline,Mp.divModBeforeReciprocal,.{&self.q,&self.r,&case.a,&case.b}),
 			.current => try @call(.never_inline,Mp.divMod,.{&self.q,&self.r,&case.a,&case.b}),
 			.reciprocal => try @call(.never_inline,Mp.divModSmallReciprocal,.{&self.q,&self.r,&case.a,&case.b}),
 			.gmp => return self.base.run(.gmp,index),
@@ -146,7 +147,7 @@ fn asSigned(value: *const Mp) i256 {
 }
 
 test "signed small-divisor fixtures agree with native signed division in every sign and normalization" {
-	for ([_]usize{1,2,4,8}) |divisor| for ([_]usize{8,16}) |width| {
+	for ([_]usize{1,2,4,8,9}) |divisor| for ([_]usize{8,16}) |width| {
 		var pool = try Pool.init(std.testing.allocator,divisor,width,32); defer pool.deinit();
 		for (pool.base.cases,0..) |*case,index| {
 			const a = asSigned(&case.a); const b = asSigned(&case.b);
@@ -169,7 +170,7 @@ test "signed reciprocal preserves GMP results and input-output aliases across it
 				var b = Mp.init(std.testing.allocator); defer b.deinit();
 				try a.setBytes(case.a.bytes()); try b.setBytes(case.b.bytes());
 				const q = if (swap) &b else &a; const r = if (swap) &a else &b;
-				try Mp.divModSmallReciprocal(q,r,&a,&b);
+				try Mp.divMod(q,r,&a,&b);
 				try std.testing.expectEqualSlices(u8,case.mq.bytes(),q.bytes());
 				try std.testing.expectEqualSlices(u8,case.mr.bytes(),r.bytes());
 			}
@@ -199,7 +200,7 @@ test "signed reciprocal releases partial construction and cold scratch on alloca
 		fn run(allocator: std.mem.Allocator, width: usize, count: usize) !void {
 			blip.tier3.releaseDivScratch();
 			var pool = try Pool.init(allocator,8,width,count); defer pool.deinit();
-			try pool.run(.reciprocal,count-1);
+			try pool.run(.current,count-1);
 		}
 	};
 	try std.testing.checkAllAllocationFailures(std.testing.allocator,Check.run,.{@as(usize,257),@as(usize,25)});

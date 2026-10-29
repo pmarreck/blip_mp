@@ -2327,6 +2327,33 @@ testing the conservative 64-byte guard in the real public entry while retaining
 an explicit fixed comparison entry, then measuring that actual dispatch before
 claiming a shipped public speedup. Other platforms remain unmeasured.
 
+### Public small-divisor selection experiment
+
+The public `Mp.divMod` entry now exercises the qualified reciprocal guard:
+dividend magnitudes of at least 64 bytes and divisor magnitudes of at most
+8 bytes. `Mp.divModBeforeReciprocal` preserves the previous entry for paired
+comparison. Larger-divisor dispatch, including the 99,999-byte B-Z threshold,
+is unchanged. This selection still needs its actual-public-entry timing run
+before retention is decided.
+
+The signed probe now compares the actual public entry against either the fixed
+entry or GMP. Its methods advance to `division-single-selected-public-paired-v1`
+and `division-single-selected-gmp-paired-v1`, with `current` always the second
+component. Nine-byte divisors add an unselected larger-divisor control. All
+previous dividend sizes, sign combinations, work counts, call boundaries and
+full-result comparisons remain. The configuration has twenty cohorts.
+
+The parser's expanded width classifier, fixed-entry oracle checks and CLI
+method/component checks failed before implementation. Native signed references
+also cover the new nine-byte divisor, including dividends smaller than the
+divisor. Alias and allocation-failure checks exercise the actual public entry.
+
+The complete suite passed in 102 seconds of mixed Nix preparation/check time;
+the unit/C-API build phase took 100 seconds. Production build and all-system
+evaluation passed. Assembly confirms separate public/fixed calls and the
+64-byte guard before the reciprocal call. Probe SHA-256 is
+`fbc42146e4b450d91501945a675442f2e7c57a3c9a3d1133145ae05ce6a27fe4`.
+
 ### Build feedback follow-up
 
 Repeated full checks take roughly 90–120 seconds of mixed preparation and
