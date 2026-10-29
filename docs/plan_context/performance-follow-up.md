@@ -2281,6 +2281,52 @@ The complete suite passed in 87 seconds of mixed Nix preparation/check time,
 including an 85-second unit/C-API build phase. Production build and all-system
 evaluation passed.
 
+### Signed reciprocal results
+
+The signed candidate preserves much of the kernel gain, while GMP remains
+faster. At 4,096-byte dividends, the candidate saves 47–48% CPU relative to
+current public BLIP division and takes 1.92–1.94 times GMP's CPU time. At
+64 bytes it saves 14–20% against current BLIP; at 256 bytes, 37–39%.
+
+| Divisor bytes | 64-byte dividend: candidate / current BLIP | 4,096-byte dividend: candidate / current BLIP | 4,096-byte dividend: candidate / GMP |
+|---:|---:|---:|---:|
+| 1 | 0.853 / 0.849 | 0.522 / 0.522 | 1.933 / 1.936 |
+| 2 | 0.856 / 0.857* | 0.523 / 0.524* | 1.935 / 1.936 |
+| 4 | 0.829 / 0.829 | 0.525 / 0.525 | 1.936 / 1.935 |
+| 8 | 0.798 / 0.798* | 0.530 / 0.530* | 1.923 / 1.921* |
+
+Cells give paired medians for 1-CPU / 12-CPU affinity cohorts. Starred
+cohorts remain inconclusive after their permitted variation retry. Across
+all sampled lengths of at least 64 bytes, every process mean, including
+diagnostic attempts, favors the candidate over current BLIP. The weakest
+such process ratio is 0.980. The unselected 63-byte control stays close to
+parity at the median (0.987–1.001). Smaller control differences are not
+attributed to reciprocal arithmetic, which those inputs never select.
+
+The direct GMP comparison favors GMP at every sampled size: candidate/GMP
+paired medians range from 1.73 to 3.13. The earlier unsigned raw-kernel wins
+at 8/9 bytes therefore do not establish a signed public-API win. BLIP sign
+conversion, allocation and canonical encoding remain inside these timings;
+GMP starts with preconverted signed inputs. The two adapters have different
+costs, and the reported ratios include them.
+
+Campaign `blip-mp-signed-20261028T235632Z` measured commit
+`ca614f5a3f6a55af065efe7a7e8325aca417f050`. All 110 processes verified their
+full results. Six cohorts retried once; thirteen finished unbaselined and
+three inconclusive (public comparison for 2- and 8-byte divisors at 12 CPUs,
+and GMP comparison for 8-byte divisors at 12 CPUs). No baseline is accepted.
+The [sanitized summary](../benchmarks/storage-aware/division-single-signed-summary.json)
+retains all 208 size/cohort cells and diagnostic process ratios.
+
+The platform remains Linux x86_64, Threadripper 3990X, Zig 0.16.0 ReleaseFast
+and GMP 6.3.0. Executable SHA-256 is
+`c1ff3c9dd8a020424a12bd67b6345d5e45e53360a0894bbd63b85071b2617654`;
+source digest `b463e99a80f3db8bf5213aa9173a2ff87c8d73a3fad241e2c3a3bfc045d3fdae`
+remained stable. Public dispatch is still unchanged. These results justify
+testing the conservative 64-byte guard in the real public entry while retaining
+an explicit fixed comparison entry, then measuring that actual dispatch before
+claiming a shipped public speedup. Other platforms remain unmeasured.
+
 ### Build feedback follow-up
 
 Repeated full checks take roughly 90–120 seconds of mixed preparation and

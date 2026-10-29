@@ -76,11 +76,13 @@ and 8 bytes. All 50 processes are correct; seven cohorts are unbaselined and
 one remains inconclusive after its variation retry. These timings include
 different adapter costs and do not establish a signed public-API win.
 
-The subsequent [reciprocal experiment](docs/plan_context/performance-follow-up.md#reciprocal-small-divisor-results)
-saves 20–27% CPU at 64-byte dividends and 51–52% at 4,096 bytes relative to
-the current BLIP byte kernel. Many 8–17-byte cases regress. All 65 processes
-are correct; six cohorts are unbaselined and two remain inconclusive. The
-candidate stays experimental, with public dispatch unchanged.
+The [raw reciprocal experiment](docs/plan_context/performance-follow-up.md#reciprocal-small-divisor-results)
+improves longer inputs but regresses many short cases. A subsequent
+[signed candidate](docs/plan_context/performance-follow-up.md#signed-reciprocal-results)
+retains the old kernel below 64 magnitude bytes. At 4,096-byte dividends it
+saves 47–48% CPU versus current public BLIP division, while still taking
+1.92–1.94× GMP's CPU time. All 110 processes are correct; thirteen cohorts
+are unbaselined and three remain inconclusive. Public dispatch is unchanged.
 
 A separate [signed public-path comparison](docs/plan_context/performance-follow-up.md#signed-public-division-results-october-28-2026)
 finds B-Z saving 21–28% CPU time at 12,288/16,384-byte divisors with twice-width
