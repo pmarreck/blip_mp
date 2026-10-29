@@ -445,11 +445,11 @@
 							test ! -s stderr
 							jq -e --arg comparison "$comparison" --argjson divisor "$divisor" '
 								.schema=="performance-measurement/v1" and .correct==true and .build_mode=="ReleaseFast" and
-								.method==("division-single-selected-"+$comparison+"-paired-v1") and .divisor_bytes==$divisor and
+									.method==("division-single-signed-"+$comparison+"-paired-v2") and .divisor_bytes==$divisor and
 								[.rows[].size]==[8,63,64,65] and .gmp_version=="6.3.0" and
 								all(.rows[]; . as $row |
 									.fixture_count==32 and .iterations==16384 and .warmup_cases==64 and
-									[.components[].method]==[(if $comparison=="public" then "fixed" else "gmp" end),"current"] and
+									[.components[].method]==[(if $comparison=="public" then "current" else "gmp" end),"reciprocal"] and
 									all(.samples[]; length==6 and all(.[];.>0)) and
 									all(.components[]; (.cpu_ns|length)==6 and (.wall_ns|length)==6 and all(.cpu_ns[],.wall_ns[];.>0)) and
 									all(range(6); . as $i | (($row.samples.cpu_ns[$i]-([$row.components[].cpu_ns[$i]]|add/2))|fabs)<0.001 and (($row.samples.wall_ns[$i]-([$row.components[].wall_ns[$i]]|add/2))|fabs)<0.001))

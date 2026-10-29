@@ -53,6 +53,7 @@ annotate=[
 	docs/benchmarks/storage-aware/division-single-dispatch-initial-summary.json = Initial public reciprocal dispatch measurements, including unselected-divisor regressions
 	docs/benchmarks/storage-aware/division-single-inline-summary.json = Public wrapper inlining results, including short-dividend regressions
 	docs/benchmarks/storage-aware/division-single-reciprocal-summary.json = Reciprocal versus fixed small-divisor ratios, including short-input regressions
+	docs/benchmarks/storage-aware/division-single-selected-inline-summary.json = Selected-only inlining measurements and rejected short-input regressions
 	docs/benchmarks/storage-aware/division-single-signed-summary.json = Signed reciprocal versus public BLIP and GMP with all process ratios
 	docs/benchmarks/storage-aware/division-single-variable-summary.json = Variable small-divisor byte kernel versus GMP with all-process CPU ratios
 	docs/benchmarks/storage-aware/division-wide-quotient-summary.json = Paired wider quotient fallback results and neighboring-width regressions

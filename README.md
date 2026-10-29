@@ -83,6 +83,9 @@ retains the old kernel below 64 magnitude bytes. At 4,096-byte dividends it
 saves 47–48% CPU versus current public BLIP division, while still taking
 1.92–1.94× GMP's CPU time. All 110 processes are correct; thirteen cohorts
 are unbaselined and three remain inconclusive. Public dispatch is unchanged.
+Three [public-dispatch trials](docs/plan_context/performance-follow-up.md#public-dispatch-decision)
+kept the long-input gains but regressed some unselected short inputs by 3–16%.
+Those dispatch changes were rejected; the reciprocal entry remains experimental.
 
 A separate [signed public-path comparison](docs/plan_context/performance-follow-up.md#signed-public-division-results-october-28-2026)
 finds B-Z saving 21–28% CPU time at 12,288/16,384-byte divisors with twice-width

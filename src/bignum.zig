@@ -627,15 +627,10 @@ pub const Mp = struct {
 	/// to think about that, but the inline-i64 fast path snapshots both
 	/// operand values before writing).
 	pub fn divMod(q: *Mp, rem: *Mp, a: *const Mp, b: *const Mp) ArithError!void {
-		return divModWithReciprocal(true, q, rem, a, b);
-	}
-
-	/// Fixed comparison entry preserving division before reciprocal selection.
-	pub fn divModBeforeReciprocal(q: *Mp, rem: *Mp, a: *const Mp, b: *const Mp) ArithError!void {
 		return divModWithReciprocal(false, q, rem, a, b);
 	}
 
-	inline fn divModWithReciprocal(comptime reciprocal: bool, q: *Mp, rem: *Mp, a: *const Mp, b: *const Mp) ArithError!void {
+	fn divModWithReciprocal(comptime reciprocal: bool, q: *Mp, rem: *Mp, a: *const Mp, b: *const Mp) ArithError!void {
 		// Reject division by zero up front (cheap with cached sign).
 		if (b.cached_sign == 0) return error.DivisionByZero;
 
@@ -651,11 +646,10 @@ pub const Mp = struct {
 				return;
 			}
 		}
-		if (reciprocal) return @call(.always_inline, tier3DivModOp, .{true, q, rem, a, b});
-		try tier3DivModOp(false, q, rem, a, b);
+		try tier3DivModOp(reciprocal, q, rem, a, b);
 	}
 
-	/// Explicit small-divisor reciprocal path with ordinary signed semantics.
+	/// Experimental small-divisor reciprocal path with ordinary signed semantics.
 	pub fn divModSmallReciprocal(q: *Mp, rem: *Mp, a: *const Mp, b: *const Mp) ArithError!void {
 		return divModWithReciprocal(true, q, rem, a, b);
 	}

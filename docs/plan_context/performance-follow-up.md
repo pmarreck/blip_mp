@@ -2329,12 +2329,12 @@ claiming a shipped public speedup. Other platforms remain unmeasured.
 
 ### Public small-divisor selection experiment
 
-The public `Mp.divMod` entry now exercises the qualified reciprocal guard:
+This experiment switched `Mp.divMod` to the qualified reciprocal guard:
 dividend magnitudes of at least 64 bytes and divisor magnitudes of at most
 8 bytes. `Mp.divModBeforeReciprocal` preserves the previous entry for paired
 comparison. Larger-divisor dispatch, including the 99,999-byte B-Z threshold,
-is unchanged. This selection still needs its actual-public-entry timing run
-before retention is decided.
+was unchanged. The selection was subsequently rejected after the control
+measurements below; the public default is restored to its preceding behavior.
 
 The signed probe now compares the actual public entry against either the fixed
 entry or GMP. Its methods advance to `division-single-selected-public-paired-v1`
@@ -2418,7 +2418,45 @@ preparation/check time, plus the production build and all-system evaluation.
 Assembly confirms the separate public/fixed calls without the selected scratch
 helper's outlined boundary. Probe SHA-256 is
 `830a12bd02bddcb6768e1b3eab573978895e472742430ffb8bed57160110953a`.
-Performance remains pending a frozen-source run.
+The following frozen-source run rejected this variant too.
+
+#### Public dispatch decision
+
+Campaign `blip-mp-flat-20261029T003916Z` measured selected-only scratch inlining
+at commit `58bd46b472f2c9b11f5c350d976dd42a267194f1`. All 135
+processes verified their results. Seven cohorts retried once; fourteen finished
+unbaselined and six inconclusive. The inconclusive cohorts were all at 12 CPUs:
+GMP comparisons for 1/2/4/9-byte divisors and fixed comparisons for 2/9-byte
+divisors. No baseline is accepted. Source digest
+`1090faca0f2b035c6940ea7bed175af7e72d3568ddb750eb2663d672f0aac754`
+remained stable; the probe hash matches the selected-only qualification above.
+The [selected-only summary](../benchmarks/storage-aware/division-single-selected-inline-summary.json)
+retains all 260 cells, including diagnostic process ratios.
+
+Every process mean at selected lengths of at least 64 bytes favors the reciprocal
+path (ratios 0.514–0.981). At 4,096 bytes, the public/GMP paired medians are
+1.922–1.934. However, several unselected short-dividend cells regress by 4–16%
+against the fixed entry. Nine-byte divisor controls range from 0.998 to 1.042.
+The repeated control regressions prevent retaining these public-dispatch trials.
+
+The public default and its helper code are restored exactly to their preceding
+arithmetic source. The explicit `Mp.divModSmallReciprocal` candidate remains
+available for experimentation. The redundant fixed entry and explicit-inlining
+changes are removed. This preserves the earlier division improvements while
+declining this additional dispatch change. The candidate's long-dividend gains
+do not establish an across-the-board public improvement or a GMP win.
+
+The reusable signed probe returns to candidate/public and candidate/GMP pairs,
+retaining nine-byte divisors as a control. Methods advance to
+`division-single-signed-public-paired-v2` and
+`division-single-signed-gmp-paired-v2` to distinguish this expanded domain.
+Alias and allocation-failure checks continue to exercise the experimental entry.
+
+The restored public implementation, expanded candidate probe and CLI bindings
+pass the complete suite in 87 seconds of mixed Nix preparation/check time
+(84-second unit/C-API build phase), the production build and all-system
+evaluation. The arithmetic source matches the pre-dispatch qualification at
+`ca614f5a3f6a55af065efe7a7e8325aca417f050`.
 
 ### Build feedback follow-up
 
