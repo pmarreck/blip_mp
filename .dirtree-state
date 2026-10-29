@@ -131,4 +131,15 @@ annotate=[
 	tests/benchmark/powm.zig = Verified retained-workload modular exponentiation timing and controls
 	tests/benchmark/shifted_residues.zig = Interleaved comparison of three canonical BLIP residue representations
 	tests/benchmark/storage_aware.zig = Seeded full-product FFT and Toom CPU/wall comparisons
+	tests/cli/run-zig-tests = Zig 0.16 parallel test protocol and complete-result validation
+	tests/cli/zig-test-protocol = Zig 0.16 parallel test protocol and complete-result validation
+	tests/fixtures/zig-runner/crash.zig = Independent Zig test-runner crash control
+	tests/fixtures/zig-runner/empty.zig = Independent Zig test-runner empty control
+	tests/fixtures/zig-runner/fail.zig = Independent Zig test-runner fail control
+	tests/fixtures/zig-runner/leak.zig = Independent Zig test-runner leak control
+	tests/fixtures/zig-runner/log.zig = Independent Zig test-runner log control
+	tests/fixtures/zig-runner/pass.zig = Independent Zig test-runner pass control
+	tests/fixtures/zig-runner/skip.zig = Independent Zig test-runner skip control
+	tests/support/zig_test_protocol.lua = Zig 0.16 parallel test protocol and complete-result validation
+	tests/unit/zig_test_protocol.lua = Zig 0.16 parallel test protocol and complete-result validation
 ]
