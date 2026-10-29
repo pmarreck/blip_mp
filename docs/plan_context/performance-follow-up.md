@@ -2354,6 +2354,48 @@ evaluation passed. Assembly confirms separate public/fixed calls and the
 64-byte guard before the reciprocal call. Probe SHA-256 is
 `fbc42146e4b450d91501945a675442f2e7c57a3c9a3d1133145ae05ce6a27fe4`.
 
+#### Initial dispatch measurements
+
+Campaign `blip-mp-selected-20261029T001429Z` measured commit
+`1e4401a660f941b3a7522d5ea2f8038496a6e505`. At 4,096-byte dividends with
+1/2/4/8-byte divisors, actual public division uses 0.520–0.528 times the old
+entry's CPU and 1.918–1.928 times GMP's. Every process mean for selected sizes,
+including diagnostics, favors the new path (ratios 0.511–0.929).
+
+The nine-byte divisor control exposes a regression outside reciprocal
+arithmetic. Public/fixed paired medians are 1.060/1.062 at nine-byte dividends
+and 1.068/1.069 at 63-byte dividends (1-CPU/12-CPU affinity). These are about
+8 and 15 ns per call, respectively. At 4,096-byte dividends the control is
+near parity. Below-cutoff dividends with smaller divisors have paired medians
+0.960–1.012. The dispatch change is held for investigation of the larger-divisor
+regression.
+
+Assembly shows the selected public entry tail-jumping into an outlined shared
+helper, while the fixed entry has its helper inlined. The selected helper also
+sets up its scratch frame before its immediate-value checks. The first follow-up
+forces this small source-level wrapper to inline, preserving the benchmark's
+explicit call boundaries. This is a code-generation hypothesis, not an established
+explanation for the timing difference.
+
+All 140 processes verified their results. Eight cohorts retried once; sixteen
+finished unbaselined and four inconclusive (both comparisons for two- and
+eight-byte divisors at 12 CPUs). No baseline is accepted. The
+[initial dispatch summary](../benchmarks/storage-aware/division-single-dispatch-initial-summary.json)
+retains all 260 cells and diagnostic process ratios. The executable hash is
+unchanged from the qualification above; source digest
+`97e14d1a9e6c9fa85423aab0d56f9937a42d025ec69f9784b24a89eb2cfe1b67`
+remained stable. Platform, compiler, GMP and measurement work match the preceding
+signed campaign. Shared admission delayed preparation by roughly three minutes;
+queue and compilation time are outside the recorded probe samples.
+
+The explicit-inlining variant passes the complete suite (103 seconds mixed,
+99-second unit/C-API build phase), production build and all-system evaluation.
+Its public entry performs immediate-value checks before tail-calling the larger
+arithmetic helper; public and fixed benchmark call boundaries remain distinct.
+Probe SHA-256 is
+`247f8380caab982f2bc1ab7d8f1815fc5dd27e3c7556652a1cc95b32a5fcb6fb`.
+Its performance is pending the next frozen-source comparison.
+
 ### Build feedback follow-up
 
 Repeated full checks take roughly 90–120 seconds of mixed preparation and

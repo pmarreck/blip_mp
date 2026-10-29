@@ -635,7 +635,7 @@ pub const Mp = struct {
 		return divModWithReciprocal(false, q, rem, a, b);
 	}
 
-	fn divModWithReciprocal(comptime reciprocal: bool, q: *Mp, rem: *Mp, a: *const Mp, b: *const Mp) ArithError!void {
+	inline fn divModWithReciprocal(comptime reciprocal: bool, q: *Mp, rem: *Mp, a: *const Mp, b: *const Mp) ArithError!void {
 		// Reject division by zero up front (cheap with cached sign).
 		if (b.cached_sign == 0) return error.DivisionByZero;
 
