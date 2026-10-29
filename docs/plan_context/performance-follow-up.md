@@ -2602,6 +2602,54 @@ result verification. The complete native suite passed in 98 seconds of mixed
 Nix preparation/check time, including 645 Zig tests. Production build and
 all-system evaluation passed; no arithmetic threshold changed.
 
+#### Goldilocks crossover results
+
+Campaign `blip-mp-gold-crossover-20261029T013825Z` measured commit
+`e5e115d52444b488e48b681b076c6b97faf756bb` on Linux x86_64, Threadripper 3990X,
+Zig 0.16.0 ReleaseFast and GMP 6.3.0. All fifteen processes, including the
+one-CPU cohort's single variation retry, verified every product. Both final
+cohorts are `UNBASELINED`; no baseline was approved. Admission waited roughly
+one minute, outside timing. The [summary](../benchmarks/goldilocks/crossover-summary.json)
+retains all paired sample ranges and process-mean ratios, including the first
+attempt's diagnostic processes.
+
+| Operand bytes | FFT/Toom CPU, 1 / 12 CPUs | FFT/GMP CPU, 1 / 12 CPUs | Toom/GMP CPU, 1 / 12 CPUs |
+|---:|---:|---:|---:|
+| 16,384 | 1.532 / 1.532 | 6.409 / 6.382 | 4.180 / 4.169 |
+| 65,536 | 0.837 / 0.837 | 6.006 / 6.000 | 7.169 / 7.165 |
+| 99,998 | 1.196 / 1.196 | 8.395 / 8.415 | 7.018 / 7.028 |
+| 99,999 | 1.015 / 1.015 | 7.139 / 7.140 | 7.033 / 7.025 |
+| 100,000 | 1.016 / 1.015 | 7.121 / 7.133 | 7.012 / 7.023 |
+| 131,072 | 0.789 / 0.788 | 6.358 / 6.362 | 8.078 / 8.083 |
+| 131,073 | 0.988 / 0.987 | 7.808 / 7.817 | 7.908 / 7.922 |
+| 262,144 | 0.503 / 0.503 | 5.827 / 5.817 | 11.577 / 11.585 |
+
+Each ratio is the median of thirty paired CPU sample ratios in the final
+cohort. Lower than one favors the numerator. GMP includes multiplication,
+byte export and complete comparison; its input import is outside timing.
+All methods reuse prepared storage. These are unsigned magnitude-kernel
+comparisons, not signed API or cold-allocation results.
+
+FFT wins are size dependent: about 16% less CPU than Toom at 65,536 bytes,
+21% less at 131,072 and 50% less at 262,144. Every process mean, including
+diagnostics, favored FFT at those three sizes. At 16,384 and 99,998 bytes,
+every process favored Toom. The 99,999- and 131,073-byte comparisons crossed
+one in diagnostic processes; their small median differences do not justify
+dispatch changes. The selected truncation starts at 99,999 bytes and the
+transform doubles above 131,072, so a single monotonic crossover would miss
+these size effects.
+
+The encoded-residue FFT is viable against this library's Toom at some large
+sizes, but still takes 5.8–8.4 times the measured GMP path's CPU. Public
+thresholds remain unchanged. Selecting a new public range would need a varied
+signed corpus, allocation accounting and neighboring-size controls; this
+single-pair diagnostic does not supply that evidence.
+
+Source SHA-256 remained
+`2c02e7cd5403c4c66e9bc1d5307c43d28de77911d620589bd70474455a66f353`.
+The executable SHA-256 was
+`0b27b9fc8b17c680d5761c56791d14d50029f3a9fa1d5a50d79659f71c6b3d14`.
+
 ### Tiny division clock follow-up
 
 The first complete guarded-padding suite failed on a non-advancing process CPU

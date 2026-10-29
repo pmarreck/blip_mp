@@ -52,6 +52,14 @@ Silicon and Zen 4 measurements remain historical records; they are not results
 for this revision. GMP without assembly is a separate comparison and does not
 by itself isolate BLIP's storage costs from algorithm or compiler differences.
 
+The October 28 [Goldilocks crossover diagnostic](docs/plan_context/performance-follow-up.md#goldilocks-crossover-results)
+finds the selected encoded-residue FFT using 16–50% less CPU than recursive
+Toom at 65,536, 131,072 and 262,144 bytes per operand, but losing at other
+sampled sizes. It still takes 5.8–8.4× GMP multiplication plus byte export.
+All fifteen processes verified their products; both cohorts are unbaselined.
+This compares reused unsigned magnitude kernels on one fixed pair per size,
+not signed public calls. Public thresholds remain unchanged.
+
 The October 28 [broad matched division comparison](docs/plan_context/performance-follow-up.md#gmp-refresh-after-bounded-quotient-selection)
 finds public BLIP division taking 2.2–11.2× ordinary GMP's CPU time across
 8–16,384-byte divisors with dividends twice as wide. The earlier 6–19× fallback

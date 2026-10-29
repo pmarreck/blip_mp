@@ -21,6 +21,7 @@ annotate=[
 	docs/benchmarks/goldilocks/TRUNCATED.md = Truncated Goldilocks recurrence, independent controls and measurements
 	docs/benchmarks/goldilocks/centered-fast-summary.json = Common-header centered Goldilocks ratios against both controls and cohort verdicts
 	docs/benchmarks/goldilocks/centered-summary.json = Paired centered-versus-positive Goldilocks timing ratios and verdicts
+	docs/benchmarks/goldilocks/crossover-summary.json = Paired Goldilocks Toom and GMP timings with all-attempt process ratios
 	docs/benchmarks/goldilocks/hybrid-boundary-summary.jsonl = Paired fused-subtree occupancy crossover measurements and cohort verdicts
 	docs/benchmarks/goldilocks/hybrid-summary.jsonl = Fused-subtree versus full and recursive transform observations
 	docs/benchmarks/goldilocks/layout-summary.jsonl = Paired Goldilocks layout CPU and wall timing summaries
