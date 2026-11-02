@@ -95,6 +95,14 @@ Three [public-dispatch trials](docs/plan_context/performance-follow-up.md#public
 kept the long-input gains but regressed some unselected short inputs by 3–16%.
 Those dispatch changes were rejected; the reciprocal entry remains experimental.
 
+The November 2 [dispatch-isolation experiments](docs/benchmarks/storage-aware/DISPATCH_ISOLATION.md#results-and-decision)
+move large scratch buffers out of the small-value entry. Both candidates retain
+41–47% CPU savings at 4,096-byte dividends with small divisors, while taking
+1.90–1.99× GMP's CPU time. Some bypassed inputs still have higher paired
+medians by a few nanoseconds. All 225 processes verified results; ten cohorts
+are unbaselined and fourteen remain inconclusive after their variation retry.
+Public dispatch remains unchanged.
+
 A separate [signed public-path comparison](docs/plan_context/performance-follow-up.md#signed-public-division-results-october-28-2026)
 finds B-Z saving 21–28% CPU time at 12,288/16,384-byte divisors with twice-width
 dividends, and 18–44% across sampled recursive widths with four-times-width

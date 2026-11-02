@@ -81,6 +81,66 @@ there is no new packed-arithmetic claim. The primary question is whether
 dispatch and compiler layout retain the known arithmetic gains without
 penalizing bypassed paths.
 
+## Results and decision
+
+Campaign `blip-mp-isolation-20261102T184821Z` measured source
+`b1f8575a8098b7eaffb1826227fc64afb6269826` on Linux x86_64, Threadripper
+3990X, Zig 0.16.0 ReleaseFast and GMP 6.3.0. All 225 processes, including the
+single permitted retries, verified every result. Ten cohorts finished
+`UNBASELINED`; fourteen remained `INCONCLUSIVE`. No epoch was approved.
+Measurements were recorded at 18:49:02–19:01:51 UTC. These verdicts qualify
+the timing conclusions; correctness passed throughout.
+
+Each ratio below is the median of thirty paired CPU sample ratios from the
+final five-process attempt. A dagger marks an inconclusive cohort. The
+[candidate summary](division-isolation-summary.jsonl) preserves all 312 cells,
+sample ranges, process-mean ratios and diagnostic attempts. The
+[reference summary](division-isolation-before-summary.jsonl) preserves the
+78 cells from `blip-mp-isolation-before-20261102T183444Z`.
+
+| Candidate | Dividend / divisor bytes | Candidate/public CPU, 1 / 12 CPUs | Candidate/GMP CPU, 1 / 12 CPUs |
+|---|---:|---:|---:|
+| Isolated | 4,096 / 1 | 0.530† / 0.579† | 1.902† / 1.978 |
+| Isolated | 4,096 / 8 | 0.584† / 0.587 | 1.911† / 1.910† |
+| Thin | 4,096 / 1 | 0.563 / 0.528† | 1.989† / 1.973† |
+| Thin | 4,096 / 8 | 0.539 / 0.566† | 1.916 / 1.903 |
+
+Both candidates retain about 41–47% lower CPU time than the retained public
+entry at these 4,096-byte dividends. Every process mean, including diagnostics,
+favored a candidate in these cells; the full process-mean range was
+0.516–0.746 times public CPU. Both still take 1.90–1.99 times GMP's CPU.
+These calls include the signed BLIP adapter costs described above.
+
+Bypassed inputs still prevent a clean automatic-dispatch conclusion:
+
+| Candidate | Dividend / divisor bytes | Candidate/public CPU, 1 / 12 CPUs | Paired CPU difference, ns, 1 / 12 CPUs |
+|---|---:|---:|---:|
+| Isolated | 8 / 1 | 1.011† / 0.998† | +0.74 / -0.15 |
+| Isolated | 8 / 9 | 1.016 / 1.055† | +1.54 / +6.37 |
+| Thin | 8 / 1 | 1.027 / 1.046† | +1.94 / +2.34 |
+| Thin | 8 / 8 | 1.037 / 1.048† | +2.28 / +3.69 |
+
+For the thin 8-byte-dividend/1-byte-divisor control at 12-CPU affinity, all
+ten process means across both attempts were higher than the public reference.
+The isolated control results cross parity between processes and cohorts, so
+their small differences cannot establish either absence or persistence of a
+regression. Neither candidate justifies changing automatic public dispatch.
+The explicit experimental entries remain available for known workloads; their
+large-input gains do not establish an improvement for every call site.
+
+Call isolation achieved the intended code layout, but it did not establish
+regression-free selection. The next dispatch study would need to resolve the
+remaining small-call costs and noise rather than assume the operand guard
+alone is sufficient. No further retry or baseline approval was taken here.
+
+Source SHA-256 remained
+`bd901c5e96f3d0039a7548a817790f1c6c580cc4bc600652193c48ccce4b99aa`.
+The executable SHA-256 was
+`09fcb692f9afe19e31b47fd54779c06831acd0a1d04743a7f3d2587f5d8ed9d4`.
+Reproduce with `./bm --verified-division --config profiling-division-isolation.json`;
+use `profiling-division-isolation-before.json` at its recorded source revision
+for the frozen reference. Historical approval remains a separate owner decision.
+
 ## Signedness
 
 BLIP leaves signedness to application context. This library chooses signed

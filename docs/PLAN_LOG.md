@@ -137,3 +137,4 @@ Completed PLAN.md items retired by plan-retire, oldest retirement first.
 ## Retired 2026-11-02
 
 - [x] [Follow-up and existing backlog] Choose MIT or Apache-2.0 before release; Answer: MIT, explicitly selected October 29, 2026 (done 2026-10-29 11:27 EDT; this commit).
+- [x] [Current bounded milestone] Can reciprocal division be selected only for winning cases? Answer: The tested guard already selected dividend magnitudes ≥64 bytes and divisors ≤8 bytes; selected cases improved, but unselected paths regressed with changed code generation; the explicit experimental entry remains available and automatic dispatch needs isolation and remeasurement (context: docs/plan_context/performance-follow-up.md#selective-dispatch-clarification-october-29; done 2026-10-29 11:32 EDT; this commit).

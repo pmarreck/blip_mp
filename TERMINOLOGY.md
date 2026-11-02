@@ -37,3 +37,10 @@ preserving the mathematical value; their need and error contract remain open.
 Earlier references to "strict unsigned-BLIP" or "strict-spec BLIP producers"
 describe this optional integration question imprecisely. Signed interpretation
 is explicitly supported by BLIP and does not require a format extension.
+
+This library fixes that interpretation at design time and caches sign metadata.
+The representation can still cost space: positive 2^183 uses 25 encoded bytes
+and heap storage, while negative 2^183 uses 24 and stays inline. The
+[signedness investigation](docs/benchmarks/storage-aware/DISPATCH_ISOLATION.md#signedness)
+checks this and other boundaries. Changing who specifies signedness would not
+by itself remove sign padding or conversions to an unsigned arithmetic kernel.
