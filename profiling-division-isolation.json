@@ -1,0 +1,948 @@
+{
+	"schema": "performance-project/v1",
+	"project": "blip_mp",
+	"history_url": "file:///var/lib/performance-profiling",
+	"identity": {
+		"runtime": "Zig-0.16.0/GMP-6.3.0",
+		"build_mode": "ReleaseFast",
+		"concurrency": 1
+	},
+	"cases": [
+		{
+			"name": "division_single_isolated_public_1b_1core",
+			"definition": "division-single-isolated-public-paired-v1-1b",
+			"cores": 1,
+			"processes": 5,
+			"mode": "bm",
+			"metric": "cpu_ns",
+			"comparison": "absolute",
+			"command": [
+				"blip-mp-division-probe",
+				"single-signed",
+				"isolated",
+				"1",
+				"{sizes}"
+			],
+			"sizes": [
+				8,
+				9,
+				16,
+				17,
+				63,
+				64,
+				65,
+				256,
+				257,
+				1024,
+				1025,
+				4096,
+				4097
+			],
+			"bounds": [
+				0.1,
+				1000000000
+			],
+			"policy": {
+				"max_cv": 0.1
+			},
+			"timeout_ms": 120000
+		},
+		{
+			"name": "division_single_isolated_public_1b_12core",
+			"definition": "division-single-isolated-public-paired-v1-1b",
+			"cores": 12,
+			"processes": 5,
+			"mode": "bm",
+			"metric": "cpu_ns",
+			"comparison": "absolute",
+			"command": [
+				"blip-mp-division-probe",
+				"single-signed",
+				"isolated",
+				"1",
+				"{sizes}"
+			],
+			"sizes": [
+				8,
+				9,
+				16,
+				17,
+				63,
+				64,
+				65,
+				256,
+				257,
+				1024,
+				1025,
+				4096,
+				4097
+			],
+			"bounds": [
+				0.1,
+				1000000000
+			],
+			"policy": {
+				"max_cv": 0.1
+			},
+			"timeout_ms": 120000
+		},
+		{
+			"name": "division_single_isolated_gmp_1b_1core",
+			"definition": "division-single-isolated-gmp-paired-v1-1b",
+			"cores": 1,
+			"processes": 5,
+			"mode": "bm",
+			"metric": "cpu_ns",
+			"comparison": "absolute",
+			"command": [
+				"blip-mp-division-probe",
+				"single-signed",
+				"isolated_gmp",
+				"1",
+				"{sizes}"
+			],
+			"sizes": [
+				8,
+				9,
+				16,
+				17,
+				63,
+				64,
+				65,
+				256,
+				257,
+				1024,
+				1025,
+				4096,
+				4097
+			],
+			"bounds": [
+				0.1,
+				1000000000
+			],
+			"policy": {
+				"max_cv": 0.1
+			},
+			"timeout_ms": 120000
+		},
+		{
+			"name": "division_single_isolated_gmp_1b_12core",
+			"definition": "division-single-isolated-gmp-paired-v1-1b",
+			"cores": 12,
+			"processes": 5,
+			"mode": "bm",
+			"metric": "cpu_ns",
+			"comparison": "absolute",
+			"command": [
+				"blip-mp-division-probe",
+				"single-signed",
+				"isolated_gmp",
+				"1",
+				"{sizes}"
+			],
+			"sizes": [
+				8,
+				9,
+				16,
+				17,
+				63,
+				64,
+				65,
+				256,
+				257,
+				1024,
+				1025,
+				4096,
+				4097
+			],
+			"bounds": [
+				0.1,
+				1000000000
+			],
+			"policy": {
+				"max_cv": 0.1
+			},
+			"timeout_ms": 120000
+		},
+		{
+			"name": "division_single_isolated_public_8b_1core",
+			"definition": "division-single-isolated-public-paired-v1-8b",
+			"cores": 1,
+			"processes": 5,
+			"mode": "bm",
+			"metric": "cpu_ns",
+			"comparison": "absolute",
+			"command": [
+				"blip-mp-division-probe",
+				"single-signed",
+				"isolated",
+				"8",
+				"{sizes}"
+			],
+			"sizes": [
+				8,
+				9,
+				16,
+				17,
+				63,
+				64,
+				65,
+				256,
+				257,
+				1024,
+				1025,
+				4096,
+				4097
+			],
+			"bounds": [
+				0.1,
+				1000000000
+			],
+			"policy": {
+				"max_cv": 0.1
+			},
+			"timeout_ms": 120000
+		},
+		{
+			"name": "division_single_isolated_public_8b_12core",
+			"definition": "division-single-isolated-public-paired-v1-8b",
+			"cores": 12,
+			"processes": 5,
+			"mode": "bm",
+			"metric": "cpu_ns",
+			"comparison": "absolute",
+			"command": [
+				"blip-mp-division-probe",
+				"single-signed",
+				"isolated",
+				"8",
+				"{sizes}"
+			],
+			"sizes": [
+				8,
+				9,
+				16,
+				17,
+				63,
+				64,
+				65,
+				256,
+				257,
+				1024,
+				1025,
+				4096,
+				4097
+			],
+			"bounds": [
+				0.1,
+				1000000000
+			],
+			"policy": {
+				"max_cv": 0.1
+			},
+			"timeout_ms": 120000
+		},
+		{
+			"name": "division_single_isolated_gmp_8b_1core",
+			"definition": "division-single-isolated-gmp-paired-v1-8b",
+			"cores": 1,
+			"processes": 5,
+			"mode": "bm",
+			"metric": "cpu_ns",
+			"comparison": "absolute",
+			"command": [
+				"blip-mp-division-probe",
+				"single-signed",
+				"isolated_gmp",
+				"8",
+				"{sizes}"
+			],
+			"sizes": [
+				8,
+				9,
+				16,
+				17,
+				63,
+				64,
+				65,
+				256,
+				257,
+				1024,
+				1025,
+				4096,
+				4097
+			],
+			"bounds": [
+				0.1,
+				1000000000
+			],
+			"policy": {
+				"max_cv": 0.1
+			},
+			"timeout_ms": 120000
+		},
+		{
+			"name": "division_single_isolated_gmp_8b_12core",
+			"definition": "division-single-isolated-gmp-paired-v1-8b",
+			"cores": 12,
+			"processes": 5,
+			"mode": "bm",
+			"metric": "cpu_ns",
+			"comparison": "absolute",
+			"command": [
+				"blip-mp-division-probe",
+				"single-signed",
+				"isolated_gmp",
+				"8",
+				"{sizes}"
+			],
+			"sizes": [
+				8,
+				9,
+				16,
+				17,
+				63,
+				64,
+				65,
+				256,
+				257,
+				1024,
+				1025,
+				4096,
+				4097
+			],
+			"bounds": [
+				0.1,
+				1000000000
+			],
+			"policy": {
+				"max_cv": 0.1
+			},
+			"timeout_ms": 120000
+		},
+		{
+			"name": "division_single_isolated_public_9b_1core",
+			"definition": "division-single-isolated-public-paired-v1-9b",
+			"cores": 1,
+			"processes": 5,
+			"mode": "bm",
+			"metric": "cpu_ns",
+			"comparison": "absolute",
+			"command": [
+				"blip-mp-division-probe",
+				"single-signed",
+				"isolated",
+				"9",
+				"{sizes}"
+			],
+			"sizes": [
+				8,
+				9,
+				16,
+				17,
+				63,
+				64,
+				65,
+				256,
+				257,
+				1024,
+				1025,
+				4096,
+				4097
+			],
+			"bounds": [
+				0.1,
+				1000000000
+			],
+			"policy": {
+				"max_cv": 0.1
+			},
+			"timeout_ms": 120000
+		},
+		{
+			"name": "division_single_isolated_public_9b_12core",
+			"definition": "division-single-isolated-public-paired-v1-9b",
+			"cores": 12,
+			"processes": 5,
+			"mode": "bm",
+			"metric": "cpu_ns",
+			"comparison": "absolute",
+			"command": [
+				"blip-mp-division-probe",
+				"single-signed",
+				"isolated",
+				"9",
+				"{sizes}"
+			],
+			"sizes": [
+				8,
+				9,
+				16,
+				17,
+				63,
+				64,
+				65,
+				256,
+				257,
+				1024,
+				1025,
+				4096,
+				4097
+			],
+			"bounds": [
+				0.1,
+				1000000000
+			],
+			"policy": {
+				"max_cv": 0.1
+			},
+			"timeout_ms": 120000
+		},
+		{
+			"name": "division_single_isolated_gmp_9b_1core",
+			"definition": "division-single-isolated-gmp-paired-v1-9b",
+			"cores": 1,
+			"processes": 5,
+			"mode": "bm",
+			"metric": "cpu_ns",
+			"comparison": "absolute",
+			"command": [
+				"blip-mp-division-probe",
+				"single-signed",
+				"isolated_gmp",
+				"9",
+				"{sizes}"
+			],
+			"sizes": [
+				8,
+				9,
+				16,
+				17,
+				63,
+				64,
+				65,
+				256,
+				257,
+				1024,
+				1025,
+				4096,
+				4097
+			],
+			"bounds": [
+				0.1,
+				1000000000
+			],
+			"policy": {
+				"max_cv": 0.1
+			},
+			"timeout_ms": 120000
+		},
+		{
+			"name": "division_single_isolated_gmp_9b_12core",
+			"definition": "division-single-isolated-gmp-paired-v1-9b",
+			"cores": 12,
+			"processes": 5,
+			"mode": "bm",
+			"metric": "cpu_ns",
+			"comparison": "absolute",
+			"command": [
+				"blip-mp-division-probe",
+				"single-signed",
+				"isolated_gmp",
+				"9",
+				"{sizes}"
+			],
+			"sizes": [
+				8,
+				9,
+				16,
+				17,
+				63,
+				64,
+				65,
+				256,
+				257,
+				1024,
+				1025,
+				4096,
+				4097
+			],
+			"bounds": [
+				0.1,
+				1000000000
+			],
+			"policy": {
+				"max_cv": 0.1
+			},
+			"timeout_ms": 120000
+		},
+		{
+			"name": "division_single_thin_public_1b_1core",
+			"definition": "division-single-thin-public-paired-v1-1b",
+			"cores": 1,
+			"processes": 5,
+			"mode": "bm",
+			"metric": "cpu_ns",
+			"comparison": "absolute",
+			"command": [
+				"blip-mp-division-probe",
+				"single-signed",
+				"thin",
+				"1",
+				"{sizes}"
+			],
+			"sizes": [
+				8,
+				9,
+				16,
+				17,
+				63,
+				64,
+				65,
+				256,
+				257,
+				1024,
+				1025,
+				4096,
+				4097
+			],
+			"bounds": [
+				0.1,
+				1000000000
+			],
+			"policy": {
+				"max_cv": 0.1
+			},
+			"timeout_ms": 120000
+		},
+		{
+			"name": "division_single_thin_public_1b_12core",
+			"definition": "division-single-thin-public-paired-v1-1b",
+			"cores": 12,
+			"processes": 5,
+			"mode": "bm",
+			"metric": "cpu_ns",
+			"comparison": "absolute",
+			"command": [
+				"blip-mp-division-probe",
+				"single-signed",
+				"thin",
+				"1",
+				"{sizes}"
+			],
+			"sizes": [
+				8,
+				9,
+				16,
+				17,
+				63,
+				64,
+				65,
+				256,
+				257,
+				1024,
+				1025,
+				4096,
+				4097
+			],
+			"bounds": [
+				0.1,
+				1000000000
+			],
+			"policy": {
+				"max_cv": 0.1
+			},
+			"timeout_ms": 120000
+		},
+		{
+			"name": "division_single_thin_gmp_1b_1core",
+			"definition": "division-single-thin-gmp-paired-v1-1b",
+			"cores": 1,
+			"processes": 5,
+			"mode": "bm",
+			"metric": "cpu_ns",
+			"comparison": "absolute",
+			"command": [
+				"blip-mp-division-probe",
+				"single-signed",
+				"thin_gmp",
+				"1",
+				"{sizes}"
+			],
+			"sizes": [
+				8,
+				9,
+				16,
+				17,
+				63,
+				64,
+				65,
+				256,
+				257,
+				1024,
+				1025,
+				4096,
+				4097
+			],
+			"bounds": [
+				0.1,
+				1000000000
+			],
+			"policy": {
+				"max_cv": 0.1
+			},
+			"timeout_ms": 120000
+		},
+		{
+			"name": "division_single_thin_gmp_1b_12core",
+			"definition": "division-single-thin-gmp-paired-v1-1b",
+			"cores": 12,
+			"processes": 5,
+			"mode": "bm",
+			"metric": "cpu_ns",
+			"comparison": "absolute",
+			"command": [
+				"blip-mp-division-probe",
+				"single-signed",
+				"thin_gmp",
+				"1",
+				"{sizes}"
+			],
+			"sizes": [
+				8,
+				9,
+				16,
+				17,
+				63,
+				64,
+				65,
+				256,
+				257,
+				1024,
+				1025,
+				4096,
+				4097
+			],
+			"bounds": [
+				0.1,
+				1000000000
+			],
+			"policy": {
+				"max_cv": 0.1
+			},
+			"timeout_ms": 120000
+		},
+		{
+			"name": "division_single_thin_public_8b_1core",
+			"definition": "division-single-thin-public-paired-v1-8b",
+			"cores": 1,
+			"processes": 5,
+			"mode": "bm",
+			"metric": "cpu_ns",
+			"comparison": "absolute",
+			"command": [
+				"blip-mp-division-probe",
+				"single-signed",
+				"thin",
+				"8",
+				"{sizes}"
+			],
+			"sizes": [
+				8,
+				9,
+				16,
+				17,
+				63,
+				64,
+				65,
+				256,
+				257,
+				1024,
+				1025,
+				4096,
+				4097
+			],
+			"bounds": [
+				0.1,
+				1000000000
+			],
+			"policy": {
+				"max_cv": 0.1
+			},
+			"timeout_ms": 120000
+		},
+		{
+			"name": "division_single_thin_public_8b_12core",
+			"definition": "division-single-thin-public-paired-v1-8b",
+			"cores": 12,
+			"processes": 5,
+			"mode": "bm",
+			"metric": "cpu_ns",
+			"comparison": "absolute",
+			"command": [
+				"blip-mp-division-probe",
+				"single-signed",
+				"thin",
+				"8",
+				"{sizes}"
+			],
+			"sizes": [
+				8,
+				9,
+				16,
+				17,
+				63,
+				64,
+				65,
+				256,
+				257,
+				1024,
+				1025,
+				4096,
+				4097
+			],
+			"bounds": [
+				0.1,
+				1000000000
+			],
+			"policy": {
+				"max_cv": 0.1
+			},
+			"timeout_ms": 120000
+		},
+		{
+			"name": "division_single_thin_gmp_8b_1core",
+			"definition": "division-single-thin-gmp-paired-v1-8b",
+			"cores": 1,
+			"processes": 5,
+			"mode": "bm",
+			"metric": "cpu_ns",
+			"comparison": "absolute",
+			"command": [
+				"blip-mp-division-probe",
+				"single-signed",
+				"thin_gmp",
+				"8",
+				"{sizes}"
+			],
+			"sizes": [
+				8,
+				9,
+				16,
+				17,
+				63,
+				64,
+				65,
+				256,
+				257,
+				1024,
+				1025,
+				4096,
+				4097
+			],
+			"bounds": [
+				0.1,
+				1000000000
+			],
+			"policy": {
+				"max_cv": 0.1
+			},
+			"timeout_ms": 120000
+		},
+		{
+			"name": "division_single_thin_gmp_8b_12core",
+			"definition": "division-single-thin-gmp-paired-v1-8b",
+			"cores": 12,
+			"processes": 5,
+			"mode": "bm",
+			"metric": "cpu_ns",
+			"comparison": "absolute",
+			"command": [
+				"blip-mp-division-probe",
+				"single-signed",
+				"thin_gmp",
+				"8",
+				"{sizes}"
+			],
+			"sizes": [
+				8,
+				9,
+				16,
+				17,
+				63,
+				64,
+				65,
+				256,
+				257,
+				1024,
+				1025,
+				4096,
+				4097
+			],
+			"bounds": [
+				0.1,
+				1000000000
+			],
+			"policy": {
+				"max_cv": 0.1
+			},
+			"timeout_ms": 120000
+		},
+		{
+			"name": "division_single_thin_public_9b_1core",
+			"definition": "division-single-thin-public-paired-v1-9b",
+			"cores": 1,
+			"processes": 5,
+			"mode": "bm",
+			"metric": "cpu_ns",
+			"comparison": "absolute",
+			"command": [
+				"blip-mp-division-probe",
+				"single-signed",
+				"thin",
+				"9",
+				"{sizes}"
+			],
+			"sizes": [
+				8,
+				9,
+				16,
+				17,
+				63,
+				64,
+				65,
+				256,
+				257,
+				1024,
+				1025,
+				4096,
+				4097
+			],
+			"bounds": [
+				0.1,
+				1000000000
+			],
+			"policy": {
+				"max_cv": 0.1
+			},
+			"timeout_ms": 120000
+		},
+		{
+			"name": "division_single_thin_public_9b_12core",
+			"definition": "division-single-thin-public-paired-v1-9b",
+			"cores": 12,
+			"processes": 5,
+			"mode": "bm",
+			"metric": "cpu_ns",
+			"comparison": "absolute",
+			"command": [
+				"blip-mp-division-probe",
+				"single-signed",
+				"thin",
+				"9",
+				"{sizes}"
+			],
+			"sizes": [
+				8,
+				9,
+				16,
+				17,
+				63,
+				64,
+				65,
+				256,
+				257,
+				1024,
+				1025,
+				4096,
+				4097
+			],
+			"bounds": [
+				0.1,
+				1000000000
+			],
+			"policy": {
+				"max_cv": 0.1
+			},
+			"timeout_ms": 120000
+		},
+		{
+			"name": "division_single_thin_gmp_9b_1core",
+			"definition": "division-single-thin-gmp-paired-v1-9b",
+			"cores": 1,
+			"processes": 5,
+			"mode": "bm",
+			"metric": "cpu_ns",
+			"comparison": "absolute",
+			"command": [
+				"blip-mp-division-probe",
+				"single-signed",
+				"thin_gmp",
+				"9",
+				"{sizes}"
+			],
+			"sizes": [
+				8,
+				9,
+				16,
+				17,
+				63,
+				64,
+				65,
+				256,
+				257,
+				1024,
+				1025,
+				4096,
+				4097
+			],
+			"bounds": [
+				0.1,
+				1000000000
+			],
+			"policy": {
+				"max_cv": 0.1
+			},
+			"timeout_ms": 120000
+		},
+		{
+			"name": "division_single_thin_gmp_9b_12core",
+			"definition": "division-single-thin-gmp-paired-v1-9b",
+			"cores": 12,
+			"processes": 5,
+			"mode": "bm",
+			"metric": "cpu_ns",
+			"comparison": "absolute",
+			"command": [
+				"blip-mp-division-probe",
+				"single-signed",
+				"thin_gmp",
+				"9",
+				"{sizes}"
+			],
+			"sizes": [
+				8,
+				9,
+				16,
+				17,
+				63,
+				64,
+				65,
+				256,
+				257,
+				1024,
+				1025,
+				4096,
+				4097
+			],
+			"bounds": [
+				0.1,
+				1000000000
+			],
+			"policy": {
+				"max_cv": 0.1
+			},
+			"timeout_ms": 120000
+		}
+	]
+}

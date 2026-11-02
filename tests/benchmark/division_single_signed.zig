@@ -4,9 +4,23 @@ const blip = @import("blip_mp");
 const Mp = blip.Mp;
 const gmp = @import("gmp.zig");
 const Base = @import("division_single.zig").Pool;
-const Method = enum { current, reciprocal, gmp };
+const Method = enum { current, reciprocal, gmp, isolated, thin };
 const widths = [_]usize{8,9,16,17,63,64,65,256,257,1024,1025,4096,4097};
-const Comparison = enum { public, gmp };
+const Comparison = enum { public, gmp, isolated, isolated_gmp, thin, thin_gmp };
+fn comparisonMethods(comparison: Comparison) [2]Method {
+	return switch (comparison) {
+		.public => .{.current,.reciprocal}, .gmp => .{.gmp,.reciprocal},
+		.isolated => .{.current,.isolated}, .isolated_gmp => .{.gmp,.isolated},
+		.thin => .{.current,.thin}, .thin_gmp => .{.gmp,.thin},
+	};
+}
+fn definition(comparison: Comparison) []const u8 {
+	return switch (comparison) {
+		.public => "division-single-signed-public-paired-v2", .gmp => "division-single-signed-gmp-paired-v2",
+		.isolated => "division-single-isolated-public-paired-v1", .isolated_gmp => "division-single-isolated-gmp-paired-v1",
+		.thin => "division-single-thin-public-paired-v1", .thin_gmp => "division-single-thin-gmp-paired-v1",
+	};
+}
 const Options = struct { comparison: Comparison, divisor_bytes: usize, sizes: [widths.len]usize, count: usize };
 
 fn parse(args: []const []const u8) !Options {
@@ -38,7 +52,7 @@ pub fn run(init: std.process.Init, args: []const []const u8) !void {
 	const options = try parse(args);
 	const count = 32;
 	const repeats = 512;
-	const methods: [2]Method = if (options.comparison==.public) .{.current,.reciprocal} else .{.gmp,.reciprocal};
+	const methods = comparisonMethods(options.comparison);
 	const Component = struct { method: []const u8, cpu_ns: [6]f64, wall_ns: [6]f64 };
 	const Row = struct {
 		size: usize, fixture_count: usize = count, iterations: usize = count*repeats, warmup_cases: usize = 2*count,
@@ -61,11 +75,12 @@ pub fn run(init: std.process.Init, args: []const []const u8) !void {
 	const report = .{
 		.schema="performance-measurement/v1",.correct=true,.build_mode="ReleaseFast",
 		.compiler=@import("builtin").zig_version_string,.gmp_version=std.mem.span(gmp.__gmp_version),
-		.method=if (options.comparison==.public) "division-single-signed-public-paired-v2" else "division-single-signed-gmp-paired-v2",
+		.method=definition(options.comparison),
 		.divisor_bytes=options.divisor_bytes,.divisor_min_bits=8*options.divisor_bytes-7,.divisor_max_bits=8*options.divisor_bytes,
 		.cpu_clock="CLOCK_PROCESS_CPUTIME_ID",.wall_clock="CLOCK_MONOTONIC",
 		.seed_usage="0xB2D151A5 + divisor_bytes*257 + index; eight normalization shifts in each of four sign combinations; engine seed does not alter inputs",
 		.operation="signed truncated quotient and remainder; variable 1/2/4/8/9-byte divisor magnitude; size is dividend magnitude bytes; experimental reciprocal entry selects at 64 dividend bytes for divisors up to 8 bytes; public dispatch unchanged; 9-byte divisors retain original path",
+		.dispatch_experiment=@tagName(options.comparison),
 		.normalization="six ABBA/BAAB half-pool samples; 512 repeats per fixture; primary averages two methods; no subtraction",
 		.verification="GMP references outside timing, native signed oracle in tests; complete canonical BLIP or GMP quotient/remainder comparison on every call",
 		.allocator_coverage="prepared signed inputs, reused outputs and warmed scratch; both BLIP entries called without inlining; BLIP conversion, arithmetic allocation and encoding included; GMP uses preconverted mpz inputs; full comparisons included; cold allocation unmeasured",
@@ -74,6 +89,15 @@ pub fn run(init: std.process.Init, args: []const []const u8) !void {
 	const json = try std.json.Stringify.valueAlloc(init.arena.allocator(),report,.{});
 	try std.Io.File.stdout().writeStreamingAll(init.io,json);
 	try std.Io.File.stdout().writeStreamingAll(init.io,"\n");
+}
+
+test "signed comparison methods keep the intended reference and candidate" {
+	const expected = [_][2]Method{.{.current,.reciprocal},.{.gmp,.reciprocal},.{.current,.isolated},.{.gmp,.isolated},.{.current,.thin},.{.gmp,.thin}};
+	const definitions = [_][]const u8{"division-single-signed-public-paired-v2","division-single-signed-gmp-paired-v2","division-single-isolated-public-paired-v1","division-single-isolated-gmp-paired-v1","division-single-thin-public-paired-v1","division-single-thin-gmp-paired-v1"};
+	for (std.enums.values(Comparison),expected,definitions) |comparison,methods,name| {
+		try std.testing.expectEqualSlices(Method,&methods,&comparisonMethods(comparison));
+		try std.testing.expectEqualStrings(name,definition(comparison));
+	}
 }
 
 test "signed small-divisor parser classifies comparisons and complete width sets" {
@@ -126,6 +150,8 @@ const Pool = struct {
 		switch (method) {
 			.current => try @call(.never_inline,Mp.divMod,.{&self.q,&self.r,&case.a,&case.b}),
 			.reciprocal => try @call(.never_inline,Mp.divModSmallReciprocal,.{&self.q,&self.r,&case.a,&case.b}),
+			.isolated => try @call(.never_inline,Mp.divModSmallReciprocalIsolated,.{&self.q,&self.r,&case.a,&case.b}),
+			.thin => try @call(.never_inline,Mp.divModSmallReciprocalThin,.{&self.q,&self.r,&case.a,&case.b}),
 			.gmp => return self.base.run(.gmp,index),
 		}
 		if (!std.mem.eql(u8,self.q.bytes(),case.mq.bytes()) or !std.mem.eql(u8,self.r.bytes(),case.mr.bytes())) return error.IncorrectWork;
@@ -143,6 +169,56 @@ fn asSigned(value: *const Mp) i256 {
 	var bytes: [32]u8 = @splat(if (payload[payload.len-1]&0x80!=0) 255 else 0);
 	@memcpy(bytes[0..payload.len],payload);
 	return std.mem.readInt(i256,&bytes,.little);
+}
+
+test "isolated division candidates produce fresh complete results across selection boundaries" {
+	for ([_]Method{.isolated,.thin}) |method| for ([_]usize{1,8,9}) |divisor| for ([_]usize{8,9,16,17,63,64,65,4097}) |width| {
+		var pool = try Pool.init(std.testing.allocator,divisor,width,32); defer pool.deinit();
+		for (0..32) |index| {
+			try pool.q.setI64(17); try pool.r.setI64(19);
+			try pool.run(method,index);
+		}
+	};
+}
+
+test "isolated division candidates preserve zero and minimum-integer promotion" {
+	var a = Mp.init(std.testing.allocator); defer a.deinit();
+	var b = Mp.init(std.testing.allocator); defer b.deinit();
+	var q = Mp.init(std.testing.allocator); defer q.deinit();
+	var r = Mp.init(std.testing.allocator); defer r.deinit();
+	defer blip.tier3.releaseDivScratch();
+	inline for (.{Mp.divModSmallReciprocalIsolated,Mp.divModSmallReciprocalThin}) |divide| {
+		try a.setI64(0); try b.setI64(0);
+		try std.testing.expectError(error.DivisionByZero,divide(&q,&r,&a,&b));
+		try b.setI64(1); try divide(&q,&r,&a,&b);
+		try std.testing.expectEqualSlices(u8,&.{0},q.bytes());
+		try std.testing.expectEqualSlices(u8,&.{0},r.bytes());
+		try a.setI64(std.math.minInt(i64)); try b.setI64(-1);
+		try divide(&q,&r,&a,&b);
+		try std.testing.expectEqual(@as(i256,1)<<63,asSigned(&q));
+		try std.testing.expectEqualSlices(u8,&.{0},r.bytes());
+	}
+}
+
+test "signed padding costs at native inline and length-header boundaries" {
+	var one = Mp.init(std.testing.allocator); defer one.deinit(); try one.setI64(1);
+	var zero = Mp.init(std.testing.allocator); defer zero.deinit(); try zero.setI64(0);
+	var positive = Mp.init(std.testing.allocator); defer positive.deinit();
+	var negative = Mp.init(std.testing.allocator); defer negative.deinit();
+	const powers = [_]usize{7,15,63,183,247};
+	const positive_lengths = [_]usize{3,4,10,25,34};
+	const negative_lengths = [_]usize{2,3,9,24,32};
+	for (powers,positive_lengths,negative_lengths) |bits,positive_len,negative_len| {
+		try blip.bitwise.shl(&positive,&one,bits);
+		try negative.sub(&zero,&positive);
+		const native = @as(i256,1)<<@intCast(bits);
+		try std.testing.expectEqual(native,asSigned(&positive));
+		try std.testing.expectEqual(-native,asSigned(&negative));
+		try std.testing.expectEqual(positive_len,positive.bytes().len);
+		try std.testing.expectEqual(negative_len,negative.bytes().len);
+		try std.testing.expectEqual(positive_len<=24,positive.isInline());
+		try std.testing.expectEqual(negative_len<=24,negative.isInline());
+	}
 }
 
 test "signed small-divisor fixtures agree with native signed division in every sign and normalization" {
@@ -164,15 +240,15 @@ test "signed reciprocal preserves GMP results and input-output aliases across it
 		var pool = try Pool.init(std.testing.allocator,divisor,width,32); defer pool.deinit();
 		for (pool.base.cases,0..) |*case,index| {
 			for (std.enums.values(Method)) |method| try pool.run(method,index);
-			for ([_]bool{false,true}) |swap| {
+			inline for (.{Mp.divModSmallReciprocal,Mp.divModSmallReciprocalIsolated,Mp.divModSmallReciprocalThin}) |divide| for ([_]bool{false,true}) |swap| {
 				var a = Mp.init(std.testing.allocator); defer a.deinit();
 				var b = Mp.init(std.testing.allocator); defer b.deinit();
 				try a.setBytes(case.a.bytes()); try b.setBytes(case.b.bytes());
 				const q = if (swap) &b else &a; const r = if (swap) &a else &b;
-				try Mp.divModSmallReciprocal(q,r,&a,&b);
+				try divide(q,r,&a,&b);
 				try std.testing.expectEqualSlices(u8,case.mq.bytes(),q.bytes());
 				try std.testing.expectEqualSlices(u8,case.mr.bytes(),r.bytes());
-			}
+			};
 		}
 	};
 }
@@ -199,7 +275,7 @@ test "signed reciprocal releases partial construction and cold scratch on alloca
 		fn run(allocator: std.mem.Allocator, width: usize, count: usize) !void {
 			blip.tier3.releaseDivScratch();
 			var pool = try Pool.init(allocator,8,width,count); defer pool.deinit();
-			try pool.run(.reciprocal,count-1);
+			for ([_]Method{.reciprocal,.isolated,.thin}) |method| try pool.run(method,count-1);
 		}
 	};
 	try std.testing.checkAllAllocationFailures(std.testing.allocator,Check.run,.{@as(usize,257),@as(usize,25)});

@@ -654,6 +654,31 @@ pub const Mp = struct {
 		return divModWithReciprocal(true, q, rem, a, b);
 	}
 
+	/// Experimental call isolation; qualified separately from public dispatch.
+	pub fn divModSmallReciprocalIsolated(q: *Mp, rem: *Mp, a: *const Mp, b: *const Mp) ArithError!void {
+		if (b.cached_sign == 0) return error.DivisionByZero;
+		if (a.inline_len <= 9 and b.inline_len <= 9) {
+			const av = decodeInlineSmall(a);
+			const bv = decodeInlineSmall(b);
+			if (!(av == std.math.minInt(i64) and bv == -1)) {
+				try q.setI64(@divTrunc(av, bv));
+				try rem.setI64(@rem(av, bv));
+				return;
+			}
+		}
+		return @call(.never_inline, tier3DivModOp, .{ true, q, rem, a, b });
+	}
+
+	/// Experimental outer guard with delegation to the existing public entry.
+	pub fn divModSmallReciprocalThin(q: *Mp, rem: *Mp, a: *const Mp, b: *const Mp) ArithError!void {
+		if (b.cached_sign == 0) return error.DivisionByZero;
+		// These payload bounds can admit a sign-padding byte; the magnitude
+		// kernel applies the exact length guard after extracting magnitudes.
+		if (a.cached_pay_len < 64 or b.cached_pay_len > 9)
+			return @call(.never_inline, divMod, .{ q, rem, a, b });
+		return @call(.never_inline, tier3DivModOp, .{ true, q, rem, a, b });
+	}
+
 	/// Fixed cutoff-128 B-Z comparison path, without the leading-block shortcut.
 	/// Preserves `divMod` semantics while ordinary dispatch can evolve.
 	pub fn divModBurnikelZiegler(q: *Mp, rem: *Mp, a: *const Mp, b: *const Mp) ArithError!void {
