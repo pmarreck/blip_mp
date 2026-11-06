@@ -9,9 +9,13 @@ that encoding, keeping BLIP bytes as the canonical integer storage and working
 directly on their payloads.
 
 BLIP puts length information in the header and leaves the payload bytes intact.
-This allows arithmetic to read contiguous chunks without stripping continuation
-bits from each payload byte. The encoding is defined in the sibling project's
-[BLIP_SPEC.md](../BLIP/BLIP_SPEC.md).
+Its original `LI` means "large integer," but the framing also supports arbitrary
+byte payloads. Byte-order metadata belongs to this framing; numeric type and
+the interpretation of sign belong to the payload convention. Floats and other
+numeric formats can therefore retain their own sign encodings. This library
+uses the framing for integers and reads contiguous chunks without stripping
+continuation bits from each payload byte. The encoding is defined in
+[../BLIP/BLIP_SPEC.md](../BLIP/BLIP_SPEC.md).
 
 Test whether this variable-length storage can reduce allocation, memory and
 serialization costs while matching or beating GMP in arithmetic performance.
@@ -66,8 +70,10 @@ Use canonical signed two's-complement BLIP encodings with the minimum payload
 width and an immediate form for small nonnegative values. Document the signed
 interpretation explicitly. BLIP itself leaves signedness to the application;
 unsigned import/export adapters would serve consumers that choose unsigned
-payload interpretation. Their need and API remain an open extension question,
-not a requirement for conformance with BLIP's signed interpretation.
+payload interpretation. Their need and API remain an open extension question.
+This library's convention does not require a sign flag or signedness split in
+BLIP's base framing specification. Optional payload-convention documents can
+share that framing without reducing the current 0–127 immediate range.
 
 Eliminate all stored fixed-width limb arrays, including division scratch and
 FFT intermediates. BDFN reaffirmed this requirement on September 27, 2026,

@@ -3,10 +3,14 @@
 [![Mechatron Prime CI](https://img.shields.io/endpoint?url=https%3A%2F%2Fthelio-nixos.tail66c90.ts.net%2Fbadges%2Fblip_mp.json&style=for-the-badge)](https://thelio-nixos.tail66c90.ts.net/mechatron-prime/)
 
 A pure-Zig arbitrary-precision arithmetic library built on BDFN (Benevolent Dictator For Now)'s
-[BLIP integer encoding](https://github.com/pmarreck/BLIP). Values use canonical,
+[BLIP encoding](https://github.com/pmarreck/BLIP). Values use canonical,
 variable-length signed BLIP bytes. Small values stay inline; larger values use
 heap storage. GMP is used for testing and benchmarks, with no runtime dependency
 in the library.
+
+BLIP supplies length framing and byte-order metadata while leaving payload type
+and sign representation to its consumer. This library chooses signed integer
+semantics; that choice does not require a sign field in BLIP's base framing.
 
 Project purpose and constraints: [INTENT.md](INTENT.md).
 
