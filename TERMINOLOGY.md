@@ -2,7 +2,7 @@
 
 | Term | Meaning |
 | --- | --- |
-| BLIP | A length-prefix encoding whose `LI` means "large integer." Its framing also serves arbitrary byte payloads, with payload length and byte-order metadata. The external specification is [../BLIP/BLIP_SPEC.md](../BLIP/BLIP_SPEC.md). This library applies a signed two's-complement interpretation. |
+| BLIP | Binary Large Integer Prefix, a length-prefix encoding with payload length and byte-order metadata. Its framing also serves arbitrary byte payloads. The external specification is [../BLIP/BLIP_SPEC.md](../BLIP/BLIP_SPEC.md). This library applies a signed two's-complement interpretation. |
 | Payload length (`L`) | Number of payload bytes after the header. `L=0` denotes the immediate form; `L=1..8` is the original tier-1 range. |
 | Canonical form | The minimum-width signed encoding for a value, using the immediate form where possible. Overlong sentinel encodings are excluded from ordinary integer values. |
 | Shifted field representative | Store `r+p` for residue `r` modulo `p`. This is the same field element with a different integer representative. Its BLIP encoding remains minimum-width for that integer; field zero is stored as the integer `p`. |
@@ -20,9 +20,6 @@ The limb/chunk distinction follows BDFN (Benevolent Dictator For Now)'s May 16 t
 in the [legacy roadmap](docs/plan_context/legacy-roadmap.md#terminology-note-added-2026-05-16).
 
 ## Signedness and optional interoperability
-
-The `LI` terminology follows the November 6 intent clarification rather than
-the older "Byte Length Integer Prefix" expansion in the sibling documents.
 
 Signed and unsigned integer conventions can be documented separately while
 sharing the same framing. That does not require distinct base formats or

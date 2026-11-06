@@ -8,9 +8,9 @@ as their representation. `blip_mp` builds an independent arithmetic library on
 that encoding, keeping BLIP bytes as the canonical integer storage and working
 directly on their payloads.
 
-BLIP puts length information in the header and leaves the payload bytes intact.
-Its original `LI` means "large integer," but the framing also supports arbitrary
-byte payloads. Byte-order metadata belongs to this framing; numeric type and
+BLIP (Binary Large Integer Prefix) puts length information in the header and
+leaves the payload bytes intact. Its framing also supports arbitrary byte
+payloads. Byte-order metadata belongs to this framing; numeric type and
 the interpretation of sign belong to the payload convention. Floats and other
 numeric formats can therefore retain their own sign encodings. This library
 uses the framing for integers and reads contiguous chunks without stripping
